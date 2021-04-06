@@ -3193,6 +3193,26 @@ MacroExpander::expand_decl_macro (AST::MacroInvocData &invoc,
   rust_assert (!rules_def.is_marked_for_strip ());
   rust_assert (rules_def.get_macro_rules ().size () > 0);
 
+  // auto invoc_token_stream = invoc.get_tok_stream();
+  /* something to think about: parser can technically mutate token stream - 
+   * e.g. replacement of '>>' token by '>' and '>'. Theoretically there should
+   * never be a point where they can be confused, but possibly with macros 
+   * somehow it could occur? 
+   * So there are two options to address this:
+   * - take a new copy of the token stream each time.
+   * - maybe attempt to detect that specific parsing error, and if it occurs,
+   *   try parsing again on a new copy of the token stream.
+   * The first one is obviously simpler, but requires copying. This would just
+   * be adding to the reference count, which is not particularly expensive, but
+   * also isn't cheap if you're doing it like a million times. The second one
+   * would require special handling and may break encapsulation to some extent. 
+   * Which one is better? 
+   * New clever way around this: each time replace_current_token is called, store
+   * the token replaced in a stack (along with index or something in a pair). Then,
+   * before trying the next rule, call a "reset" function on the token stream holder
+   * that not only "winds back" the current position, but also puts back in the 
+   * original tokens. This would cause much less reference count updating and stuff. */
+
   /* probably something here about parsing invoc and rules def token trees to
    * token stream. if not, how would parser handle the captures of exprs and
    * stuff? on the other hand, token trees may be kind of useful in rules def as
