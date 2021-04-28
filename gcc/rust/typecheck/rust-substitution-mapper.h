@@ -57,6 +57,9 @@ public:
       {
 	TyTy::SubstitutionArgumentMappings mappings
 	  = type.get_mappings_from_generic_args (*generics);
+	if (mappings.is_error ())
+	  return;
+
 	concrete = type.handle_substitions (mappings);
       }
 
@@ -77,6 +80,9 @@ public:
       {
 	TyTy::SubstitutionArgumentMappings mappings
 	  = type.get_mappings_from_generic_args (*generics);
+	if (mappings.is_error ())
+	  return;
+
 	concrete = type.handle_substitions (mappings);
       }
 
@@ -99,6 +105,7 @@ public:
   void visit (TyTy::ReferenceType &) override { gcc_unreachable (); }
   void visit (TyTy::ParamType &) override { gcc_unreachable (); }
   void visit (TyTy::StrType &) override { gcc_unreachable (); }
+  void visit (TyTy::NeverType &) override { gcc_unreachable (); }
 
 private:
   SubstMapper (HirId ref, HIR::GenericArgs *generics, Location locus)
@@ -126,6 +133,8 @@ public:
   {
     TyTy::SubstitutionArgumentMappings adjusted
       = type.adjust_mappings_for_this (mappings);
+    if (adjusted.is_error ())
+      return;
 
     TyTy::BaseType *concrete = type.handle_substitions (adjusted);
     if (concrete != nullptr)
@@ -136,6 +145,8 @@ public:
   {
     TyTy::SubstitutionArgumentMappings adjusted
       = type.adjust_mappings_for_this (mappings);
+    if (adjusted.is_error ())
+      return;
 
     TyTy::BaseType *concrete = type.handle_substitions (adjusted);
     if (concrete != nullptr)
@@ -157,6 +168,7 @@ public:
   void visit (TyTy::ReferenceType &) override { gcc_unreachable (); }
   void visit (TyTy::ParamType &) override { gcc_unreachable (); }
   void visit (TyTy::StrType &) override { gcc_unreachable (); }
+  void visit (TyTy::NeverType &) override { gcc_unreachable (); }
 
 private:
   SubstMapperInternal (HirId ref, TyTy::SubstitutionArgumentMappings &mappings)
@@ -211,6 +223,7 @@ public:
   void visit (TyTy::ReferenceType &) override { gcc_unreachable (); }
   void visit (TyTy::ParamType &) override { gcc_unreachable (); }
   void visit (TyTy::StrType &) override { gcc_unreachable (); }
+  void visit (TyTy::NeverType &) override { gcc_unreachable (); }
 
 private:
   SubstMapperFromExisting (TyTy::BaseType *concrete, TyTy::BaseType *receiver)
@@ -258,6 +271,7 @@ public:
   void visit (TyTy::ReferenceType &) override { gcc_unreachable (); }
   void visit (TyTy::ParamType &) override { gcc_unreachable (); }
   void visit (TyTy::StrType &) override { gcc_unreachable (); }
+  void visit (TyTy::NeverType &) override { gcc_unreachable (); }
 
 private:
   GetUsedSubstArgs () : args (TyTy::SubstitutionArgumentMappings::error ()) {}

@@ -38,6 +38,8 @@ public:
 
   EmptyStmt (Location locus) : locus (locus) {}
 
+  Location get_locus_slow () const final override { return get_locus (); }
+
   Location get_locus () const { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
@@ -134,6 +136,8 @@ public:
   // move constructors
   LetStmt (LetStmt &&other) = default;
   LetStmt &operator= (LetStmt &&other) = default;
+
+  Location get_locus_slow () const final override { return get_locus (); }
 
   Location get_locus () const { return locus; }
 
@@ -269,14 +273,17 @@ protected:
 class ExprStmtWithBlock : public ExprStmt
 {
   std::unique_ptr<ExprWithBlock> expr;
+  bool semicolon_followed;
 
 public:
   std::string as_string () const override;
 
   std::vector<LetStmt *> locals;
 
-  ExprStmtWithBlock (std::unique_ptr<ExprWithBlock> expr, Location locus)
-    : ExprStmt (locus), expr (std::move (expr))
+  ExprStmtWithBlock (std::unique_ptr<ExprWithBlock> expr, Location locus,
+		     bool semicolon_followed)
+    : ExprStmt (locus), expr (std::move (expr)),
+      semicolon_followed (semicolon_followed)
   {}
 
   // Copy constructor with clone
@@ -317,6 +324,8 @@ public:
     rust_assert (expr != nullptr);
     return expr;
   }
+
+  bool is_semicolon_followed () const { return semicolon_followed; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather

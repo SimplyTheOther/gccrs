@@ -25,6 +25,9 @@
 #include "rust-hir-map.h"
 #include "rust-hir-type-check.h"
 
+extern ::Backend *
+rust_get_backend ();
+
 namespace Rust {
 namespace TyTy {
 
@@ -289,6 +292,14 @@ public:
     RichLocation r (ref_locus);
     r.add_range (base_locus);
     rust_error_at (r, "expected [%s] got [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
+  virtual void visit (NeverType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    rust_error_at (ref_locus, "expected [%s] got [%s]",
 		   get_base ()->as_string ().c_str (),
 		   type.as_string ().c_str ());
   }
@@ -706,11 +717,12 @@ public:
 	return;
       }
 
+    auto backend = rust_get_backend ();
+
     // need to check the base types and capacity
-    if (type.get_capacity () != base->get_capacity ())
+    if (!backend->const_values_equal (type.get_capacity (),
+				      base->get_capacity ()))
       {
-	Location locus = mappings->lookup_location (type.get_ref ());
-	rust_error_at (locus, "mismatch in array capacity");
 	BaseRules::visit (type);
 	return;
       }
@@ -1136,6 +1148,21 @@ private:
   BaseType *get_base () override { return base; }
 
   StrType *base;
+};
+
+class NeverRules : public BaseRules
+{
+  using Rust::TyTy::BaseRules::visit;
+
+public:
+  NeverRules (NeverType *base) : BaseRules (base), base (base) {}
+
+  virtual void visit (NeverType &type) override { resolved = type.clone (); }
+
+private:
+  BaseType *get_base () override { return base; }
+
+  NeverType *base;
 };
 
 } // namespace TyTy

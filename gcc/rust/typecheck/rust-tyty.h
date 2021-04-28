@@ -19,6 +19,7 @@
 #ifndef RUST_TYTY
 #define RUST_TYTY
 
+#include "rust-backend.h"
 #include "rust-hir-map.h"
 #include "rust-hir-full.h"
 
@@ -45,6 +46,7 @@ enum TypeKind
   FLOAT,
   USIZE,
   ISIZE,
+  NEVER,
   // there are more to add...
   ERROR
 };
@@ -406,6 +408,15 @@ public:
 
   void override_context ();
 
+  bool needs_substitution () const
+  {
+    auto p = get_param_ty ();
+    if (!p->can_resolve ())
+      return true;
+
+    return p->resolve ()->get_kind () == TypeKind::PARAM;
+  }
+
 private:
   std::unique_ptr<HIR::GenericParam> &generic;
   ParamType *param;
@@ -434,6 +445,8 @@ public:
   SubstitutionParamMapping *get_param_mapping () { return param; }
 
   static SubstitutionArg error () { return SubstitutionArg (nullptr, nullptr); }
+
+  bool is_error () const { return param == nullptr || argument == nullptr; }
 
   bool is_conrete () const
   {
@@ -596,6 +609,17 @@ public:
   SubstitutionArgumentMappings get_substitution_arguments ()
   {
     return used_arguments;
+  }
+
+  size_t num_required_substitutions () const
+  {
+    size_t n = 0;
+    for (auto &p : substitutions)
+      {
+	if (p.needs_substitution ())
+	  n++;
+      }
+    return n;
   }
 
   // We are trying to subst <i32, f32> into Struct Foo<X,Y> {}
@@ -870,13 +894,13 @@ private:
 class ArrayType : public BaseType
 {
 public:
-  ArrayType (HirId ref, size_t capacity, TyVar base,
+  ArrayType (HirId ref, Bexpression *capacity, TyVar base,
 	     std::set<HirId> refs = std::set<HirId> ())
     : BaseType (ref, ref, TypeKind::ARRAY, refs), capacity (capacity),
       element_type (base)
   {}
 
-  ArrayType (HirId ref, HirId ty_ref, size_t capacity, TyVar base,
+  ArrayType (HirId ref, HirId ty_ref, Bexpression *capacity, TyVar base,
 	     std::set<HirId> refs = std::set<HirId> ())
     : BaseType (ref, ty_ref, TypeKind::ARRAY, refs), capacity (capacity),
       element_type (base)
@@ -893,7 +917,8 @@ public:
 
   bool is_equal (const BaseType &other) const override;
 
-  size_t get_capacity () const { return capacity; }
+  Bexpression *get_capacity () const { return capacity; }
+  std::string capacity_string () const;
 
   BaseType *get_element_type () const;
 
@@ -905,7 +930,7 @@ public:
   }
 
 private:
-  size_t capacity;
+  Bexpression *capacity;
   TyVar element_type;
 };
 
@@ -1226,6 +1251,41 @@ public:
   BaseType *clone () final override;
 };
 
+// https://doc.rust-lang.org/std/primitive.never.html
+//
+// Since the `!` type is really complicated and it is even still unstable
+// in rustc, only fairly limited support for this type is introduced here.
+// Unification between `!` and ANY other type (including `<T?>`) is simply
+// not allowed. If it is needed, it should be handled manually. For example,
+// unifying `!` with other types is very necessary when resolving types of
+// `if/else` expressions.
+//
+// See related discussion at https://github.com/Rust-GCC/gccrs/pull/364
+class NeverType : public BaseType
+{
+public:
+  NeverType (HirId ref, std::set<HirId> refs = std::set<HirId> ())
+    : BaseType (ref, ref, TypeKind::NEVER, refs)
+  {}
+
+  NeverType (HirId ref, HirId ty_ref, std::set<HirId> refs = std::set<HirId> ())
+    : BaseType (ref, ty_ref, TypeKind::NEVER, refs)
+  {}
+
+  void accept_vis (TyVisitor &vis) override;
+
+  std::string as_string () const override;
+
+  BaseType *unify (BaseType *other) override;
+  bool can_eq (BaseType *other) override;
+
+  BaseType *clone () final override;
+
+  std::string get_name () const override final { return as_string (); }
+
+  bool is_unit () const override { return true; }
+};
+
 class TypeKindFormat
 {
 public:
@@ -1280,6 +1340,9 @@ public:
 
       case TypeKind::ISIZE:
 	return "Isize";
+
+      case TypeKind::NEVER:
+	return "Never";
 
       case TypeKind::ERROR:
 	return "ERROR";

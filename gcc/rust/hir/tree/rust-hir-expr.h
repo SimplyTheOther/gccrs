@@ -825,8 +825,6 @@ public:
 
   virtual void accept_vis (HIRVisitor &vis) = 0;
 
-  virtual size_t get_num_elements () const = 0;
-
 protected:
   // pure virtual clone implementation
   virtual ArrayElems *clone_array_elems_impl () const = 0;
@@ -870,7 +868,7 @@ public:
 
   void accept_vis (HIRVisitor &vis) override;
 
-  size_t get_num_elements () const override { return values.size (); }
+  size_t get_num_elements () const { return values.size (); }
 
   void iterate (std::function<bool (Expr *)> cb)
   {
@@ -893,25 +891,19 @@ class ArrayElemsCopied : public ArrayElems
 {
   std::unique_ptr<Expr> elem_to_copy;
   std::unique_ptr<Expr> num_copies;
-  size_t folded_copy_amount;
-
-  // TODO: should this store location data?
 
 public:
   // Constructor requires pointers for polymorphism
   ArrayElemsCopied (std::unique_ptr<Expr> copied_elem,
-		    std::unique_ptr<Expr> copy_amount,
-		    size_t folded_copy_amount)
+		    std::unique_ptr<Expr> copy_amount)
     : elem_to_copy (std::move (copied_elem)),
-      num_copies (std::move (copy_amount)),
-      folded_copy_amount (folded_copy_amount)
+      num_copies (std::move (copy_amount))
   {}
 
   // Copy constructor required due to unique_ptr - uses custom clone
   ArrayElemsCopied (ArrayElemsCopied const &other)
     : elem_to_copy (other.elem_to_copy->clone_expr ()),
-      num_copies (other.num_copies->clone_expr ()),
-      folded_copy_amount (other.folded_copy_amount)
+      num_copies (other.num_copies->clone_expr ())
   {}
 
   // Overloaded assignment operator for deep copying
@@ -919,7 +911,6 @@ public:
   {
     elem_to_copy = other.elem_to_copy->clone_expr ();
     num_copies = other.num_copies->clone_expr ();
-    folded_copy_amount = other.folded_copy_amount;
 
     return *this;
   }
@@ -932,9 +923,9 @@ public:
 
   void accept_vis (HIRVisitor &vis) override;
 
-  size_t get_num_elements () const override { return folded_copy_amount; }
-
   Expr *get_elem_to_copy () { return elem_to_copy.get (); }
+
+  Expr *get_num_copies_expr () { return num_copies.get (); }
 
 protected:
   ArrayElemsCopied *clone_array_elems_impl () const override
@@ -2498,7 +2489,7 @@ public:
   std::vector<Attribute> inner_attrs;
 
   std::vector<std::unique_ptr<Stmt> > statements;
-  std::unique_ptr<ExprWithoutBlock> expr; // inlined from Statements
+  std::unique_ptr<Expr> expr; // inlined from Statements
 
   bool tail_reachable;
   Location locus;
@@ -2511,11 +2502,11 @@ public:
   // Returns whether the block contains an expression
   bool has_expr () const { return expr != nullptr; }
 
-  bool tail_expr_reachable () const { return tail_reachable; }
+  bool is_tail_reachable () const { return tail_reachable; }
 
   BlockExpr (Analysis::NodeMapping mappings,
 	     std::vector<std::unique_ptr<Stmt> > block_statements,
-	     std::unique_ptr<ExprWithoutBlock> block_expr, bool tail_reachable,
+	     std::unique_ptr<Expr> block_expr, bool tail_reachable,
 	     std::vector<Attribute> inner_attribs,
 	     std::vector<Attribute> outer_attribs, Location locus)
     : ExprWithBlock (std::move (mappings), std::move (outer_attribs)),
@@ -2531,7 +2522,7 @@ public:
   {
     // guard to protect from null pointer dereference
     if (other.expr != nullptr)
-      expr = other.expr->clone_expr_without_block ();
+      expr = other.expr->clone_expr ();
 
     statements.reserve (other.statements.size ());
     for (const auto &e : other.statements)
@@ -2543,7 +2534,7 @@ public:
   {
     ExprWithBlock::operator= (other);
     // statements = other.statements;
-    expr = other.expr->clone_expr_without_block ();
+    expr = other.expr->clone_expr ();
     inner_attrs = other.inner_attrs;
     locus = other.locus;
     // outer_attrs = other.outer_attrs;
@@ -2589,7 +2580,7 @@ public:
     return statements[statements.size () - 1]->get_locus_slow ();
   }
 
-  std::unique_ptr<ExprWithoutBlock> &get_final_expr () { return expr; }
+  std::unique_ptr<Expr> &get_final_expr () { return expr; }
 
   std::vector<std::unique_ptr<Stmt> > &get_statements () { return statements; }
 
