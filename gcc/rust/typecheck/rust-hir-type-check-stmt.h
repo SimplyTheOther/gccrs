@@ -58,7 +58,7 @@ public:
       {
 	init_expr_ty
 	  = TypeCheckExpr::Resolve (stmt.get_init_expr (), inside_loop);
-	if (init_expr_ty == nullptr)
+	if (init_expr_ty->get_kind () == TyTy::TypeKind::ERROR)
 	  return;
 
 	init_expr_ty = init_expr_ty->clone ();
@@ -76,11 +76,7 @@ public:
       {
 	auto unified_ty = specified_ty->unify (init_expr_ty);
 	if (unified_ty->get_kind () == TyTy::TypeKind::ERROR)
-	  {
-	    rust_fatal_error (stmt.get_locus (),
-			      "failure in setting up let stmt type");
-	    return;
-	  }
+	  return;
 
 	context->insert_type (stmt.get_mappings (), unified_ty);
       }

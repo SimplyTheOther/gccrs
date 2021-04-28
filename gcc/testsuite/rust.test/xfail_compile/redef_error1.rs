@@ -1,5 +1,4 @@
-// { dg-excess-errors "Noisy error and debug" }
-struct S1 { // { dg-error "was defined here" }
+struct S1 {
     x: f64,
     y: f64,
 }

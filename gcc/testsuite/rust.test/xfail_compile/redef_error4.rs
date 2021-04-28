@@ -1,5 +1,3 @@
-// { dg-excess-errors "Noisy error and debug" }
-
 struct Foo(i32, bool);
 
 impl Foo {
@@ -7,7 +5,7 @@ impl Foo {
         Foo(a, b)
     }
 
-    fn test() -> i32 { // { dg-error "was defined here" }
+    fn test() -> i32 {
         test()
     }
 

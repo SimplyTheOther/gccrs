@@ -1,5 +1,4 @@
-// { dg-excess-errors "Noisy error and debug" }
-fn test() -> bool {  // { dg-error "was defined here" }
+fn test() -> bool {
     true
 }
 

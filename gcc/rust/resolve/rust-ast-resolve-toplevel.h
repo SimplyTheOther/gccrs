@@ -32,51 +32,58 @@ class ResolveTopLevel : public ResolverBase
   using Rust::Resolver::ResolverBase::visit;
 
 public:
-  static void go (AST::Item *item)
+  static void go (AST::Item *item,
+		  const CanonicalPath &prefix = CanonicalPath::create_empty ())
   {
-    ResolveTopLevel resolver;
+    ResolveTopLevel resolver (prefix);
     item->accept_vis (resolver);
   };
 
   void visit (AST::TypeAlias &alias) override
   {
     resolver->get_type_scope ().insert (
-      alias.get_new_type_name (), alias.get_node_id (), alias.get_locus (),
-      false, [&] (std::string, NodeId, Location locus) -> void {
-	rust_error_at (alias.get_locus (), "redefined multiple times");
-	rust_error_at (locus, "was defined here");
+      CanonicalPath (alias.get_new_type_name ()), alias.get_node_id (),
+      alias.get_locus (), false,
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (alias.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
       });
   }
 
   void visit (AST::TupleStruct &struct_decl) override
   {
     resolver->get_type_scope ().insert (
-      struct_decl.get_identifier (), struct_decl.get_node_id (),
+      CanonicalPath (struct_decl.get_identifier ()), struct_decl.get_node_id (),
       struct_decl.get_locus (), false,
-      [&] (std::string, NodeId, Location locus) -> void {
-	rust_error_at (struct_decl.get_locus (), "redefined multiple times");
-	rust_error_at (locus, "was defined here");
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (struct_decl.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
       });
   }
 
   void visit (AST::StructStruct &struct_decl) override
   {
     resolver->get_type_scope ().insert (
-      struct_decl.get_identifier (), struct_decl.get_node_id (),
+      CanonicalPath (struct_decl.get_identifier ()), struct_decl.get_node_id (),
       struct_decl.get_locus (), false,
-      [&] (std::string, NodeId, Location locus) -> void {
-	rust_error_at (struct_decl.get_locus (), "redefined multiple times");
-	rust_error_at (locus, "was defined here");
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (struct_decl.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
       });
   }
 
   void visit (AST::StaticItem &var) override
   {
     resolver->get_name_scope ().insert (
-      var.get_identifier (), var.get_node_id (), var.get_locus (), false,
-      [&] (std::string, NodeId, Location locus) -> void {
-	rust_error_at (var.get_locus (), "redefined multiple times");
-	rust_error_at (locus, "was defined here");
+      CanonicalPath (var.get_identifier ()), var.get_node_id (),
+      var.get_locus (), false,
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (var.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
       });
     resolver->insert_new_definition (var.get_node_id (),
 				     Definition{var.get_node_id (),
@@ -86,12 +93,14 @@ public:
 
   void visit (AST::ConstantItem &constant) override
   {
+    auto path
+      = prefix.append (ResolveConstantItemToCanonicalPath::resolve (constant));
     resolver->get_name_scope ().insert (
-      constant.get_identifier (), constant.get_node_id (),
-      constant.get_locus (), false,
-      [&] (std::string, NodeId, Location locus) -> void {
-	rust_error_at (constant.get_locus (), "redefined multiple times");
-	rust_error_at (locus, "was defined here");
+      path, constant.get_node_id (), constant.get_locus (), false,
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (constant.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
       });
     resolver->insert_new_definition (constant.get_node_id (),
 				     Definition{constant.get_node_id (),
@@ -100,12 +109,14 @@ public:
 
   void visit (AST::Function &function) override
   {
+    auto path
+      = prefix.append (ResolveFunctionItemToCanonicalPath::resolve (function));
     resolver->get_name_scope ().insert (
-      function.get_function_name (), function.get_node_id (),
-      function.get_locus (), false,
-      [&] (std::string, NodeId, Location locus) -> void {
-	rust_error_at (function.get_locus (), "redefined multiple times");
-	rust_error_at (locus, "was defined here");
+      path, function.get_node_id (), function.get_locus (), false,
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (function.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
       });
     resolver->insert_new_definition (function.get_node_id (),
 				     Definition{function.get_node_id (),
@@ -122,13 +133,24 @@ public:
 
   void visit (AST::InherentImpl &impl_block) override
   {
+    bool canonicalize_type_args = !impl_block.has_generics ();
+    bool type_resolve_generic_args = false;
+    CanonicalPath impl_type
+      = ResolveTypeToCanonicalPath::resolve (*impl_block.get_type ().get (),
+					     canonicalize_type_args,
+					     type_resolve_generic_args);
+    CanonicalPath impl_prefix = prefix.append (impl_type);
+
     for (auto &impl_item : impl_block.get_impl_items ())
-      ResolveToplevelImplItem::go (impl_item.get (),
-				   impl_block.get_type ().get ());
+      ResolveToplevelImplItem::go (impl_item.get (), impl_prefix);
   }
 
 private:
-  ResolveTopLevel () : ResolverBase (UNKNOWN_NODEID) {}
+  ResolveTopLevel (const CanonicalPath &prefix)
+    : ResolverBase (UNKNOWN_NODEID), prefix (prefix)
+  {}
+
+  const CanonicalPath &prefix;
 };
 
 } // namespace Resolver
