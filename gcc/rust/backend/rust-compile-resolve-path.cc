@@ -91,7 +91,7 @@ ResolvePathRef::visit (HIR::PathInExpression &expr)
       else
 	{
 	  HirId parent_impl_id = UNKNOWN_HIRID;
-	  HIR::InherentImplItem *resolved_item
+	  HIR::ImplItem *resolved_item
 	    = ctx->get_mappings ()->lookup_hir_implitem (
 	      expr.get_mappings ().get_crate_num (), ref, &parent_impl_id);
 	  if (resolved_item != nullptr)
@@ -100,8 +100,7 @@ ResolvePathRef::visit (HIR::PathInExpression &expr)
 	      HIR::Item *impl_ref = ctx->get_mappings ()->lookup_hir_item (
 		expr.get_mappings ().get_crate_num (), parent_impl_id);
 	      rust_assert (impl_ref != nullptr);
-	      HIR::InherentImpl *impl
-		= static_cast<HIR::InherentImpl *> (impl_ref);
+	      HIR::ImplBlock *impl = static_cast<HIR::ImplBlock *> (impl_ref);
 
 	      TyTy::BaseType *self = nullptr;
 	      bool ok = ctx->get_tyctx ()->lookup_type (
@@ -118,7 +117,7 @@ ResolvePathRef::visit (HIR::PathInExpression &expr)
 	  else
 	    {
 	      rust_error_at (expr.get_locus (),
-			     "failed to lookup definition decl");
+			     "failed to lookup definition declaration");
 	      return;
 	    }
 	}
@@ -126,7 +125,7 @@ ResolvePathRef::visit (HIR::PathInExpression &expr)
       if (!ctx->lookup_function_decl (lookup->get_ty_ref (), &fn))
 	{
 	  rust_fatal_error (expr.get_locus (),
-			    "forward decl was not compiled 1");
+			    "forward declaration was not compiled");
 	  return;
 	}
     }

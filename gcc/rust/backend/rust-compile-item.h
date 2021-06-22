@@ -53,8 +53,7 @@ public:
     Bexpression *value = CompileExpr::Compile (var.get_expr (), ctx);
 
     std::string name = var.get_identifier ();
-    // FIXME need name mangling
-    std::string asm_name = "__" + var.get_identifier ();
+    std::string asm_name = ctx->mangle_item (resolved_type, name);
 
     bool is_external = false;
     bool is_hidden = false;
@@ -93,17 +92,6 @@ public:
     if (!compile_fns)
       return;
 
-    // items can be forward compiled which means we may not need to invoke this
-    // code
-    Bfunction *lookup = nullptr;
-    if (ctx->lookup_function_decl (function.get_mappings ().get_hirid (),
-				   &lookup))
-      {
-	// has this been added to the list then it must be finished
-	if (ctx->function_completed (lookup))
-	  return;
-      }
-
     TyTy::BaseType *fntype_tyty;
     if (!ctx->get_tyctx ()->lookup_type (function.get_mappings ().get_hirid (),
 					 &fntype_tyty))
@@ -113,26 +101,41 @@ public:
 	return;
       }
 
-    if (fntype_tyty->get_kind () != TyTy::TypeKind::FNDEF)
-      {
-	rust_error_at (function.get_locus (), "invalid TyTy for function item");
-	return;
-      }
-
+    rust_assert (fntype_tyty->get_kind () == TyTy::TypeKind::FNDEF);
     TyTy::FnType *fntype = static_cast<TyTy::FnType *> (fntype_tyty);
     if (fntype->has_subsititions_defined ())
       {
-	// we cant do anything for this only when it is used
+	// we cant do anything for this only when it is used and a concrete type
+	// is given
 	if (concrete == nullptr)
 	  return;
 	else
 	  {
 	    rust_assert (concrete->get_kind () == TyTy::TypeKind::FNDEF);
 	    fntype = static_cast<TyTy::FnType *> (concrete);
-
-	    // override the Hir Lookups for the substituions in this context
-	    fntype->override_context ();
 	  }
+      }
+
+    // items can be forward compiled which means we may not need to invoke this
+    // code. We might also have already compiled this generic function as well.
+    Bfunction *lookup = nullptr;
+    if (ctx->lookup_function_decl (fntype->get_ty_ref (), &lookup, fntype))
+      {
+	// has this been added to the list then it must be finished
+	if (ctx->function_completed (lookup))
+	  {
+	    Bfunction *dummy = nullptr;
+	    if (!ctx->lookup_function_decl (fntype->get_ty_ref (), &dummy))
+	      ctx->insert_function_decl (fntype->get_ty_ref (), lookup, fntype);
+
+	    return;
+	  }
+      }
+
+    if (fntype->has_subsititions_defined ())
+      {
+	// override the Hir Lookups for the substituions in this context
+	fntype->override_context ();
       }
 
     ::Btype *compiled_fn_type = TyTyResolveCompile::compile (ctx, fntype);
@@ -147,26 +150,16 @@ public:
 
     std::string ir_symbol_name = function.get_function_name ();
     std::string asm_name = function.get_function_name ();
-    if (!is_main_fn)
-      {
-	// FIXME need name mangling
-	if (concrete == nullptr)
-	  asm_name = "__" + function.get_function_name ();
-	else
-	  {
-	    ir_symbol_name
-	      = function.get_function_name () + fntype->subst_as_string ();
 
-	    asm_name = "__" + function.get_function_name ();
-	    for (auto &sub : fntype->get_substs ())
-	      asm_name += "G" + sub.as_string ();
-	  }
-      }
+    // we don't mangle the main fn since we haven't implemented the main shim
+    // yet
+    if (!is_main_fn)
+      asm_name = ctx->mangle_item (fntype, ir_symbol_name);
 
     Bfunction *fndecl
       = ctx->get_backend ()->function (compiled_fn_type, ir_symbol_name,
 				       asm_name, flags, function.get_locus ());
-    ctx->insert_function_decl (fntype->get_ty_ref (), fndecl);
+    ctx->insert_function_decl (fntype->get_ty_ref (), fndecl, fntype);
 
     // setup the params
     TyTy::BaseType *tyret = fntype->get_return_type ();
@@ -281,7 +274,7 @@ public:
     ctx->push_function (fndecl);
   }
 
-  void visit (HIR::InherentImpl &impl_block) override
+  void visit (HIR::ImplBlock &impl_block) override
   {
     TyTy::BaseType *self_lookup = nullptr;
     if (!ctx->get_tyctx ()->lookup_type (

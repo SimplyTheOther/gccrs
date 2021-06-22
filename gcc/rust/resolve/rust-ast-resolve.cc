@@ -41,6 +41,9 @@
     }                                                                          \
   while (0)
 
+extern bool
+saw_errors (void);
+
 namespace Rust {
 namespace Resolver {
 
@@ -322,6 +325,9 @@ NameResolution::go (AST::Crate &crate)
   for (auto it = crate.items.begin (); it != crate.items.end (); it++)
     ResolveTopLevel::go (it->get ());
 
+  if (saw_errors ())
+    return;
+
   // next we can drill down into the items and their scopes
   for (auto it = crate.items.begin (); it != crate.items.end (); it++)
     ResolveItem::go (it->get ());
@@ -506,7 +512,7 @@ ResolvePath::resolve_path (AST::PathInExpression *expr)
       if (!ok)
 	{
 	  rust_error_at (root_segment.get_locus (),
-			 "failed to resolve generic args");
+			 "failed to resolve generic arguments");
 	  return;
 	}
     }
@@ -531,61 +537,65 @@ ResolvePath::resolve_path (AST::PathInExpression *expr)
       AST::PathExprSegment &seg = expr->get_segments ().at (i);
       auto s = ResolvePathSegmentToCanonicalPath::resolve (seg);
       path = path.append (s);
-    }
 
-  if (resolver->get_name_scope ().lookup (path, &resolved_node))
-    {
-      resolver->insert_resolved_name (expr->get_node_id (), resolved_node);
-      resolver->insert_new_definition (expr->get_node_id (),
-				       Definition{expr->get_node_id (),
-						  parent});
-    }
-  // check the type scope
-  else if (resolver->get_type_scope ().lookup (path, &resolved_node))
-    {
-      resolver->insert_resolved_type (expr->get_node_id (), resolved_node);
-      resolver->insert_new_definition (expr->get_node_id (),
-				       Definition{expr->get_node_id (),
-						  parent});
-    }
-  else
-    {
-      // attempt to fully resolve the path which is allowed to fail given the
-      // following scenario
-      //
-      // https://github.com/Rust-GCC/gccrs/issues/355 Paths are
-      // resolved fully here, there are limitations though imagine:
-      //
-      // struct Foo<A> (A);
-      //
-      // impl Foo<isize> {
-      //    fn test() -> ...
-      //
-      // impl Foo<f32> {
-      //    fn test() -> ...
-      //
-      // fn main() {
-      //    let a:i32 = Foo::test();
-      //
-      // there are multiple paths that test can resolve to Foo::<?>::test here
-      // so we cannot resolve this case
-      //
-      // canonical names:
-      //
-      // struct Foo<A>            -> Foo
-      // impl Foo<isize>::fn test -> Foo::isize::test
-      // impl Foo<f32>::fn test   -> Foo::f32::test
-      //
-      // Since there is the case we have the following paths for test:
-      //
-      // Foo::isize::test
-      // Foo::f32::test
-      // vs
-      // Foo::test
-      //
-      // but the lookup was simply Foo::test we must rely on type resolution to
-      // figure this type out in a similar fashion to method resolution with a
-      // probe phase
+      if (resolver->get_name_scope ().lookup (path, &resolved_node))
+	{
+	  resolver->insert_resolved_name (seg.get_node_id (), resolved_node);
+	  resolver->insert_new_definition (seg.get_node_id (),
+					   Definition{expr->get_node_id (),
+						      parent});
+	}
+      // check the type scope
+      else if (resolver->get_type_scope ().lookup (path, &resolved_node))
+	{
+	  resolver->insert_resolved_type (seg.get_node_id (), resolved_node);
+	  resolver->insert_new_definition (seg.get_node_id (),
+					   Definition{expr->get_node_id (),
+						      parent});
+	}
+      else
+	{
+	  // attempt to fully resolve the path which is allowed to fail given
+	  // the following scenario
+	  //
+	  // https://github.com/Rust-GCC/gccrs/issues/355 Paths are
+	  // resolved fully here, there are limitations though imagine:
+	  //
+	  // struct Foo<A> (A);
+	  //
+	  // impl Foo<isize> {
+	  //    fn test() -> ...
+	  //
+	  // impl Foo<f32> {
+	  //    fn test() -> ...
+	  //
+	  // fn main() {
+	  //    let a:i32 = Foo::test();
+	  //
+	  // there are multiple paths that test can resolve to Foo::<?>::test
+	  // here so we cannot resolve this case
+	  //
+	  // canonical names:
+	  //
+	  // struct Foo<A>            -> Foo
+	  // impl Foo<isize>::fn test -> Foo::isize::test
+	  // impl Foo<f32>::fn test   -> Foo::f32::test
+	  //
+	  // Since there is the case we have the following paths for test:
+	  //
+	  // Foo::isize::test
+	  // Foo::f32::test
+	  // vs
+	  // Foo::test
+	  //
+	  // but the lookup was simply Foo::test we must rely on type resolution
+	  // to figure this type out in a similar fashion to method resolution
+	  // with a probe phase
+
+	  // nothing more we can do we need the type resolver to try and resolve
+	  // this
+	  return;
+	}
     }
 }
 

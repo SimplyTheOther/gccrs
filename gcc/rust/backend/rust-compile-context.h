@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020, 2021 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -66,7 +66,7 @@ public:
   bool lookup_compiled_types (HirId id, ::Btype **type,
 			      const TyTy::BaseType *ref = nullptr)
   {
-    if (ref != nullptr && ref->has_subsititions_defined ())
+    if (ref != nullptr)
       {
 	for (auto it = mono.begin (); it != mono.end (); it++)
 	  {
@@ -157,13 +157,38 @@ public:
     return true;
   }
 
-  void insert_function_decl (HirId id, ::Bfunction *fn)
+  void insert_function_decl (HirId id, ::Bfunction *fn,
+			     const TyTy::BaseType *ref)
   {
+    rust_assert (compiled_fn_map.find (id) == compiled_fn_map.end ());
     compiled_fn_map[id] = fn;
+    if (ref != nullptr)
+      {
+	std::pair<HirId, ::Bfunction *> elem (id, fn);
+	mono_fns[ref] = std::move (elem);
+      }
   }
 
-  bool lookup_function_decl (HirId id, ::Bfunction **fn)
+  bool lookup_function_decl (HirId id, ::Bfunction **fn,
+			     const TyTy::BaseType *ref = nullptr)
   {
+    // for for any monomorphized fns
+    if (ref != nullptr)
+      {
+	for (auto it = mono_fns.begin (); it != mono_fns.end (); it++)
+	  {
+	    std::pair<HirId, ::Bfunction *> &val = it->second;
+	    const TyTy::BaseType *r = it->first;
+	    if (ref->is_equal (*r))
+	      {
+		*fn = val.second;
+
+		return true;
+	      }
+	  }
+	return false;
+      }
+
     auto it = compiled_fn_map.find (id);
     if (it == compiled_fn_map.end ())
       return false;
@@ -258,6 +283,14 @@ public:
     return pop;
   }
 
+  // this needs to support Legacy and V0 see github #429 or #305
+  std::string mangle_item (const TyTy::BaseType *ty,
+			   const std::string &name) const;
+
+  std::string mangle_impl_item (const TyTy::BaseType *self,
+				const TyTy::BaseType *ty,
+				const std::string &name) const;
+
 private:
   ::Backend *backend;
   Resolver::Resolver *resolver;
@@ -277,6 +310,7 @@ private:
   std::vector< ::Bvariable *> loop_value_stack;
   std::vector< ::Blabel *> loop_begin_labels;
   std::map<const TyTy::BaseType *, std::pair<HirId, ::Btype *> > mono;
+  std::map<const TyTy::BaseType *, std::pair<HirId, ::Bfunction *> > mono_fns;
 
   // To GCC middle-end
   std::vector< ::Btype *> type_decls;
@@ -393,7 +427,8 @@ public:
 	return;
       }
 
-    bool ok = ctx->lookup_compiled_types (type.get_ty_ref (), &translated);
+    bool ok
+      = ctx->lookup_compiled_types (type.get_ty_ref (), &translated, &type);
     if (ok)
       return;
 
@@ -402,10 +437,16 @@ public:
     for (size_t i = 0; i < type.num_fields (); i++)
       {
 	TyTy::BaseType *field = type.get_field (i);
-	Btype *compiled_field_ty
-	  = TyTyCompile::compile (ctx->get_backend (), field);
+	Btype *compiled_field_ty = TyTyResolveCompile::compile (ctx, field);
 
-	Backend::Btyped_identifier f (std::to_string (i), compiled_field_ty,
+	// rustc uses the convention __N, where N is an integer, to
+	// name the fields of a tuple.  We follow this as well,
+	// because this is used by GDB.  One further reason to prefer
+	// this, rather than simply emitting the integer, is that this
+	// approach makes it simpler to use a C-only debugger, or
+	// GDB's C mode, when debugging Rust.
+	Backend::Btyped_identifier f ("__" + std::to_string (i),
+				      compiled_field_ty,
 				      ctx->get_mappings ()->lookup_location (
 					type.get_ty_ref ()));
 	fields.push_back (std::move (f));
@@ -418,7 +459,7 @@ public:
 					   type.get_ty_ref ()));
 
     ctx->push_type (named_struct);
-    ctx->insert_compiled_type (type.get_ty_ref (), named_struct);
+    ctx->insert_compiled_type (type.get_ty_ref (), named_struct, &type);
     translated = named_struct;
   }
 

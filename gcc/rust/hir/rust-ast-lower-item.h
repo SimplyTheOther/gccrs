@@ -58,7 +58,6 @@ public:
     std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
     HIR::WhereClause where_clause (std::move (where_clause_items));
     HIR::Visibility vis = HIR::Visibility::create_public ();
-    std::vector<HIR::Attribute> outer_attrs;
 
     std::vector<std::unique_ptr<HIR::GenericParam> > generic_params;
     if (alias.has_generics ())
@@ -76,7 +75,7 @@ public:
 				     std::move (generic_params),
 				     std::move (where_clause),
 				     std::unique_ptr<HIR::Type> (existing_type),
-				     std::move (vis), std::move (outer_attrs),
+				     std::move (vis), alias.get_outer_attrs (),
 				     alias.get_locus ());
 
     mappings->insert_defid_mapping (mapping.get_defid (), translated);
@@ -98,11 +97,9 @@ public:
     std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
     HIR::WhereClause where_clause (std::move (where_clause_items));
     HIR::Visibility vis = HIR::Visibility::create_public ();
-    std::vector<HIR::Attribute> outer_attrs;
 
     std::vector<HIR::TupleField> fields;
     struct_decl.iterate ([&] (AST::TupleField &field) mutable -> bool {
-      std::vector<HIR::Attribute> outer_attrs;
       HIR::Visibility vis = HIR::Visibility::create_public ();
       HIR::Type *type
 	= ASTLoweringType::translate (field.get_field_type ().get ());
@@ -118,7 +115,7 @@ public:
       Location field_locus;
       HIR::TupleField translated_field (mapping,
 					std::unique_ptr<HIR::Type> (type), vis,
-					field_locus, outer_attrs);
+					field_locus, field.get_outer_attrs ());
       fields.push_back (std::move (translated_field));
       return true;
     });
@@ -132,7 +129,7 @@ public:
 				       struct_decl.get_identifier (),
 				       std::move (generic_params),
 				       std::move (where_clause), vis,
-				       std::move (outer_attrs),
+				       struct_decl.get_outer_attrs (),
 				       struct_decl.get_locus ());
 
     mappings->insert_defid_mapping (mapping.get_defid (), translated);
@@ -154,12 +151,10 @@ public:
     std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
     HIR::WhereClause where_clause (std::move (where_clause_items));
     HIR::Visibility vis = HIR::Visibility::create_public ();
-    std::vector<HIR::Attribute> outer_attrs;
 
     bool is_unit = struct_decl.is_unit_struct ();
     std::vector<HIR::StructField> fields;
     struct_decl.iterate ([&] (AST::StructField &field) mutable -> bool {
-      std::vector<HIR::Attribute> outer_attrs;
       HIR::Visibility vis = HIR::Visibility::create_public ();
       HIR::Type *type
 	= ASTLoweringType::translate (field.get_field_type ().get ());
@@ -175,7 +170,7 @@ public:
       Location field_locus;
       HIR::StructField translated_field (mapping, field.get_field_name (),
 					 std::unique_ptr<HIR::Type> (type), vis,
-					 field_locus, outer_attrs);
+					 field_locus, field.get_outer_attrs ());
       fields.push_back (std::move (translated_field));
       return true;
     });
@@ -189,7 +184,7 @@ public:
 					struct_decl.get_identifier (),
 					std::move (generic_params),
 					std::move (where_clause), is_unit, vis,
-					std::move (outer_attrs),
+					struct_decl.get_outer_attrs (),
 					struct_decl.get_locus ());
 
     mappings->insert_defid_mapping (mapping.get_defid (), translated);
@@ -201,7 +196,6 @@ public:
 
   void visit (AST::StaticItem &var) override
   {
-    std::vector<HIR::Attribute> outer_attrs;
     HIR::Visibility vis = HIR::Visibility::create_public ();
 
     HIR::Type *type = ASTLoweringType::translate (var.get_type ().get ());
@@ -216,7 +210,7 @@ public:
       = new HIR::StaticItem (mapping, var.get_identifier (), var.is_mutable (),
 			     std::unique_ptr<HIR::Type> (type),
 			     std::unique_ptr<HIR::Expr> (expr), vis,
-			     outer_attrs, var.get_locus ());
+			     var.get_outer_attrs (), var.get_locus ());
 
     mappings->insert_defid_mapping (mapping.get_defid (), translated);
     mappings->insert_hir_item (mapping.get_crate_num (), mapping.get_hirid (),
@@ -227,7 +221,6 @@ public:
 
   void visit (AST::ConstantItem &constant) override
   {
-    std::vector<HIR::Attribute> outer_attrs;
     HIR::Visibility vis = HIR::Visibility::create_public ();
 
     HIR::Type *type = ASTLoweringType::translate (constant.get_type ().get ());
@@ -241,7 +234,8 @@ public:
     translated = new HIR::ConstantItem (mapping, constant.get_identifier (),
 					vis, std::unique_ptr<HIR::Type> (type),
 					std::unique_ptr<HIR::Expr> (expr),
-					outer_attrs, constant.get_locus ());
+					constant.get_outer_attrs (),
+					constant.get_locus ());
 
     mappings->insert_defid_mapping (mapping.get_defid (), translated);
     mappings->insert_hir_item (mapping.get_crate_num (), mapping.get_hirid (),
@@ -253,7 +247,6 @@ public:
   void visit (AST::Function &function) override
   {
     // ignore for now and leave empty
-    std::vector<HIR::Attribute> outer_attrs;
     std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
     HIR::WhereClause where_clause (std::move (where_clause_items));
     HIR::FunctionQualifiers qualifiers (
@@ -315,7 +308,7 @@ public:
 			   std::move (qualifiers), std::move (generic_params),
 			   std::move (function_params), std::move (return_type),
 			   std::move (where_clause), std::move (function_body),
-			   std::move (vis), std::move (outer_attrs), locus);
+			   std::move (vis), function.get_outer_attrs (), locus);
 
     mappings->insert_defid_mapping (mapping.get_defid (), translated);
     mappings->insert_hir_item (mapping.get_crate_num (), mapping.get_hirid (),
@@ -337,8 +330,6 @@ public:
 
   void visit (AST::InherentImpl &impl_block) override
   {
-    std::vector<HIR::Attribute> inner_attrs;
-    std::vector<HIR::Attribute> outer_attrs;
     std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
 
     HIR::WhereClause where_clause (std::move (where_clause_items));
@@ -349,9 +340,32 @@ public:
       {
 	generic_params
 	  = lower_generic_params (impl_block.get_generic_params ());
+
+	for (auto &generic_param : generic_params)
+	  {
+	    switch (generic_param->get_kind ())
+	      {
+		case HIR::GenericParam::GenericKind::TYPE: {
+		  const HIR::TypeParam &t
+		    = static_cast<const HIR::TypeParam &> (*generic_param);
+
+		  if (t.has_type ())
+		    {
+		      // see https://github.com/rust-lang/rust/issues/36887
+		      rust_error_at (
+			t.get_locus (),
+			"defaults for type parameters are not allowed here");
+		    }
+		}
+		break;
+
+	      default:
+		break;
+	      }
+	  }
       }
 
-    HIR::Type *trait_type
+    HIR::Type *impl_type
       = ASTLoweringType::translate (impl_block.get_type ().get ());
 
     auto crate_num = mappings->get_current_crate ();
@@ -359,24 +373,25 @@ public:
 				   mappings->get_next_hir_id (crate_num),
 				   mappings->get_next_localdef_id (crate_num));
 
-    std::vector<std::unique_ptr<HIR::InherentImplItem> > impl_items;
+    std::vector<std::unique_ptr<HIR::ImplItem> > impl_items;
     std::vector<HirId> impl_item_ids;
     for (auto &impl_item : impl_block.get_impl_items ())
       {
-	HIR::InherentImplItem *lowered
+	HIR::ImplItem *lowered
 	  = ASTLowerImplItem::translate (impl_item.get (),
 					 mapping.get_hirid ());
-	impl_items.push_back (std::unique_ptr<HIR::InherentImplItem> (lowered));
+	impl_items.push_back (std::unique_ptr<HIR::ImplItem> (lowered));
 	impl_item_ids.push_back (lowered->get_impl_mappings ().get_hirid ());
       }
 
-    translated
-      = new HIR::InherentImpl (mapping, std::move (impl_items),
-			       std::move (generic_params),
-			       std::unique_ptr<HIR::Type> (trait_type),
-			       where_clause, vis, std::move (inner_attrs),
-			       std::move (outer_attrs),
-			       impl_block.get_locus ());
+    HIR::ImplBlock *hir_impl_block
+      = new HIR::ImplBlock (mapping, std::move (impl_items),
+			    std::move (generic_params),
+			    std::unique_ptr<HIR::Type> (impl_type), nullptr,
+			    where_clause, vis, impl_block.get_inner_attrs (),
+			    impl_block.get_outer_attrs (),
+			    impl_block.get_locus ());
+    translated = hir_impl_block;
 
     mappings->insert_defid_mapping (mapping.get_defid (), translated);
     mappings->insert_hir_item (mapping.get_crate_num (), mapping.get_hirid (),
@@ -386,9 +401,150 @@ public:
 
     for (auto &impl_item_id : impl_item_ids)
       {
-	mappings->insert_impl_item_mapping (impl_item_id,
-					    static_cast<HIR::InherentImpl *> (
-					      translated));
+	mappings->insert_impl_item_mapping (impl_item_id, hir_impl_block);
+      }
+  }
+
+  void visit (AST::Trait &trait) override
+  {
+    std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
+
+    HIR::WhereClause where_clause (std::move (where_clause_items));
+    HIR::Visibility vis = HIR::Visibility::create_public ();
+
+    std::vector<std::unique_ptr<HIR::GenericParam> > generic_params;
+    if (trait.has_generics ())
+      {
+	generic_params = lower_generic_params (trait.get_generic_params ());
+
+	for (auto &generic_param : generic_params)
+	  {
+	    switch (generic_param->get_kind ())
+	      {
+		case HIR::GenericParam::GenericKind::TYPE: {
+		  const HIR::TypeParam &t
+		    = static_cast<const HIR::TypeParam &> (*generic_param);
+
+		  if (t.has_type ())
+		    {
+		      // see https://github.com/rust-lang/rust/issues/36887
+		      rust_error_at (
+			t.get_locus (),
+			"defaults for type parameters are not allowed here");
+		    }
+		}
+		break;
+
+	      default:
+		break;
+	      }
+	  }
+      }
+
+    std::vector<std::unique_ptr<HIR::TypeParamBound> > type_param_bounds;
+
+    std::vector<std::unique_ptr<HIR::TraitItem> > trait_items;
+    for (auto &item : trait.get_trait_items ())
+      {
+	HIR::TraitItem *lowered = ASTLowerTraitItem::translate (item.get ());
+	trait_items.push_back (std::unique_ptr<HIR::TraitItem> (lowered));
+      }
+
+    auto crate_num = mappings->get_current_crate ();
+    Analysis::NodeMapping mapping (crate_num, trait.get_node_id (),
+				   mappings->get_next_hir_id (crate_num),
+				   mappings->get_next_localdef_id (crate_num));
+
+    translated = new HIR::Trait (mapping, trait.get_identifier (),
+				 trait.is_unsafe (), std::move (generic_params),
+				 std::move (type_param_bounds), where_clause,
+				 std::move (trait_items), vis,
+				 trait.get_outer_attrs (), trait.get_locus ());
+
+    mappings->insert_defid_mapping (mapping.get_defid (), translated);
+    mappings->insert_hir_item (mapping.get_crate_num (), mapping.get_hirid (),
+			       translated);
+    mappings->insert_location (crate_num, mapping.get_hirid (),
+			       trait.get_locus ());
+  }
+
+  void visit (AST::TraitImpl &impl_block) override
+  {
+    std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
+
+    HIR::WhereClause where_clause (std::move (where_clause_items));
+    HIR::Visibility vis = HIR::Visibility::create_public ();
+
+    std::vector<std::unique_ptr<HIR::GenericParam> > generic_params;
+    if (impl_block.has_generics ())
+      {
+	generic_params
+	  = lower_generic_params (impl_block.get_generic_params ());
+
+	for (auto &generic_param : generic_params)
+	  {
+	    switch (generic_param->get_kind ())
+	      {
+		case HIR::GenericParam::GenericKind::TYPE: {
+		  const HIR::TypeParam &t
+		    = static_cast<const HIR::TypeParam &> (*generic_param);
+
+		  if (t.has_type ())
+		    {
+		      // see https://github.com/rust-lang/rust/issues/36887
+		      rust_error_at (
+			t.get_locus (),
+			"defaults for type parameters are not allowed here");
+		    }
+		}
+		break;
+
+	      default:
+		break;
+	      }
+	  }
+      }
+
+    HIR::Type *impl_type
+      = ASTLoweringType::translate (impl_block.get_type ().get ());
+    HIR::TypePath *trait_ref
+      = ASTLowerTypePath::translate (impl_block.get_trait_path ());
+
+    auto crate_num = mappings->get_current_crate ();
+    Analysis::NodeMapping mapping (crate_num, impl_block.get_node_id (),
+				   mappings->get_next_hir_id (crate_num),
+				   mappings->get_next_localdef_id (crate_num));
+
+    std::vector<std::unique_ptr<HIR::ImplItem> > impl_items;
+    std::vector<HirId> impl_item_ids;
+    for (auto &impl_item : impl_block.get_impl_items ())
+      {
+	HIR::ImplItem *lowered
+	  = ASTLowerImplItem::translate (impl_item.get (),
+					 mapping.get_hirid ());
+	impl_items.push_back (std::unique_ptr<HIR::ImplItem> (lowered));
+	impl_item_ids.push_back (lowered->get_impl_mappings ().get_hirid ());
+      }
+
+    HIR::ImplBlock *hir_impl_block
+      = new HIR::ImplBlock (mapping, std::move (impl_items),
+			    std::move (generic_params),
+			    std::unique_ptr<HIR::Type> (impl_type),
+			    std::unique_ptr<HIR::TypePath> (trait_ref),
+			    where_clause, vis, impl_block.get_inner_attrs (),
+			    impl_block.get_outer_attrs (),
+			    impl_block.get_locus ());
+    translated = hir_impl_block;
+
+    mappings->insert_defid_mapping (mapping.get_defid (), translated);
+    mappings->insert_hir_item (mapping.get_crate_num (), mapping.get_hirid (),
+			       translated);
+    mappings->insert_location (crate_num, mapping.get_hirid (),
+			       impl_block.get_locus ());
+
+    for (auto &impl_item_id : impl_item_ids)
+      {
+	mappings->insert_impl_item_mapping (impl_item_id, hir_impl_block);
       }
   }
 

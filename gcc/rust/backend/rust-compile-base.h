@@ -32,25 +32,9 @@ public:
   virtual ~HIRCompileBase () {}
 
   // rust-ast.h
-  // virtual void visit(AttrInput& attr_input) {}
-  // virtual void visit(TokenTree& token_tree) {}
-  // virtual void visit(MacroMatch& macro_match) {}
-  virtual void visit (HIR::Token &tok) {}
-  virtual void visit (HIR::DelimTokenTree &delim_tok_tree) {}
-  virtual void visit (HIR::AttrInputMetaItemContainer &input) {}
-  // virtual void visit(MetaItem& meta_item) {}
-  // virtual void visit(Stmt& stmt) {}
-  // virtual void visit(Expr& expr) {}
   virtual void visit (HIR::IdentifierExpr &ident_expr) {}
-  // virtual void visit(Pattern& pattern) {}
-  // virtual void visit(Type& type) {}
-  // virtual void visit(TypeParamBound& type_param_bound) {}
   virtual void visit (HIR::Lifetime &lifetime) {}
-  // virtual void visit(GenericParam& generic_param) {}
   virtual void visit (HIR::LifetimeParam &lifetime_param) {}
-  // virtual void visit(TraitItem& trait_item) {}
-  // virtual void visit(InherentImplItem& inherent_impl_item) {}
-  // virtual void visit(TraitImplItem& trait_impl_item) {}
 
   // rust-path.h
   virtual void visit (HIR::PathInExpression &path) {}
@@ -63,9 +47,6 @@ public:
 
   // rust-expr.h
   virtual void visit (HIR::LiteralExpr &expr) {}
-  virtual void visit (HIR::AttrInputLiteral &attr_input) {}
-  virtual void visit (HIR::MetaItemLitExpr &meta_item) {}
-  virtual void visit (HIR::MetaItemPathLit &meta_item) {}
   virtual void visit (HIR::BorrowExpr &expr) {}
   virtual void visit (HIR::DereferenceExpr &expr) {}
   virtual void visit (HIR::ErrorPropagationExpr &expr) {}
@@ -162,29 +143,14 @@ public:
   virtual void visit (HIR::ConstantItem &const_item) {}
   virtual void visit (HIR::StaticItem &static_item) {}
   virtual void visit (HIR::TraitItemFunc &item) {}
-  virtual void visit (HIR::TraitItemMethod &item) {}
   virtual void visit (HIR::TraitItemConst &item) {}
   virtual void visit (HIR::TraitItemType &item) {}
   virtual void visit (HIR::Trait &trait) {}
-  virtual void visit (HIR::InherentImpl &impl) {}
-  virtual void visit (HIR::TraitImpl &impl) {}
-  // virtual void visit(ExternalItem& item) {}
+  virtual void visit (HIR::ImplBlock &impl) {}
+
   virtual void visit (HIR::ExternalStaticItem &item) {}
   virtual void visit (HIR::ExternalFunctionItem &item) {}
   virtual void visit (HIR::ExternBlock &block) {}
-
-  // rust-macro.h
-  virtual void visit (HIR::MacroMatchFragment &match) {}
-  virtual void visit (HIR::MacroMatchRepetition &match) {}
-  virtual void visit (HIR::MacroMatcher &matcher) {}
-  virtual void visit (HIR::MacroRulesDefinition &rules_def) {}
-  virtual void visit (HIR::MacroInvocation &macro_invoc) {}
-  virtual void visit (HIR::MetaItemPath &meta_item) {}
-  virtual void visit (HIR::MetaItemSeq &meta_item) {}
-  virtual void visit (HIR::MetaWord &meta_item) {}
-  virtual void visit (HIR::MetaNameValueStr &meta_item) {}
-  virtual void visit (HIR::MetaListPaths &meta_item) {}
-  virtual void visit (HIR::MetaListNameValueStr &meta_item) {}
 
   // rust-pattern.h
   virtual void visit (HIR::LiteralPattern &pattern) {}

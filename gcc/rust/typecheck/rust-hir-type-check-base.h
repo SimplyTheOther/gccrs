@@ -34,9 +34,6 @@ class TypeCheckBase : public HIR::HIRVisitor
 public:
   virtual ~TypeCheckBase () {}
 
-  virtual void visit (HIR::Token &) override {}
-  virtual void visit (HIR::DelimTokenTree &) override {}
-  virtual void visit (HIR::AttrInputMetaItemContainer &) override {}
   virtual void visit (HIR::IdentifierExpr &) override {}
   virtual void visit (HIR::Lifetime &) override {}
   virtual void visit (HIR::LifetimeParam &) override {}
@@ -49,9 +46,6 @@ public:
   virtual void visit (HIR::QualifiedPathInType &) override {}
 
   virtual void visit (HIR::LiteralExpr &) override {}
-  virtual void visit (HIR::AttrInputLiteral &) override {}
-  virtual void visit (HIR::MetaItemLitExpr &) override {}
-  virtual void visit (HIR::MetaItemPathLit &) override {}
   virtual void visit (HIR::BorrowExpr &) override {}
   virtual void visit (HIR::DereferenceExpr &) override {}
   virtual void visit (HIR::ErrorPropagationExpr &) override {}
@@ -147,28 +141,14 @@ public:
   virtual void visit (HIR::ConstantItem &) override {}
   virtual void visit (HIR::StaticItem &) override {}
   virtual void visit (HIR::TraitItemFunc &) override {}
-  virtual void visit (HIR::TraitItemMethod &) override {}
   virtual void visit (HIR::TraitItemConst &) override {}
   virtual void visit (HIR::TraitItemType &) override {}
   virtual void visit (HIR::Trait &) override {}
-  virtual void visit (HIR::InherentImpl &) override {}
-  virtual void visit (HIR::TraitImpl &) override {}
+  virtual void visit (HIR::ImplBlock &) override {}
 
   virtual void visit (HIR::ExternalStaticItem &) override {}
   virtual void visit (HIR::ExternalFunctionItem &) override {}
   virtual void visit (HIR::ExternBlock &) override {}
-
-  virtual void visit (HIR::MacroMatchFragment &) override {}
-  virtual void visit (HIR::MacroMatchRepetition &) override {}
-  virtual void visit (HIR::MacroMatcher &) override {}
-  virtual void visit (HIR::MacroRulesDefinition &) override {}
-  virtual void visit (HIR::MacroInvocation &) override {}
-  virtual void visit (HIR::MetaItemPath &) override {}
-  virtual void visit (HIR::MetaItemSeq &) override {}
-  virtual void visit (HIR::MetaWord &) override {}
-  virtual void visit (HIR::MetaNameValueStr &) override {}
-  virtual void visit (HIR::MetaListPaths &) override {}
-  virtual void visit (HIR::MetaListNameValueStr &) override {}
 
   virtual void visit (HIR::LiteralPattern &) override {}
   virtual void visit (HIR::IdentifierPattern &) override {}

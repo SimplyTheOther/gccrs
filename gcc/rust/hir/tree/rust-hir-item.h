@@ -19,6 +19,7 @@
 #ifndef RUST_HIR_ITEM_H
 #define RUST_HIR_ITEM_H
 
+#include "rust-ast-full-decls.h"
 #include "rust-hir.h"
 #include "rust-hir-path.h"
 
@@ -33,7 +34,7 @@ class TypeParam : public GenericParam
 {
   // bool has_outer_attribute;
   // std::unique_ptr<Attribute> outer_attr;
-  Attribute outer_attr;
+  AST::Attribute outer_attr;
 
   Identifier type_representation;
 
@@ -62,7 +63,7 @@ public:
 	     std::vector<std::unique_ptr<TypeParamBound> > type_param_bounds
 	     = std::vector<std::unique_ptr<TypeParamBound> > (),
 	     std::unique_ptr<Type> type = nullptr,
-	     Attribute outer_attr = Attribute::create_empty ())
+	     AST::Attribute outer_attr = AST::Attribute::create_empty ())
     : GenericParam (mappings), outer_attr (std::move (outer_attr)),
       type_representation (std::move (type_representation)),
       type_param_bounds (std::move (type_param_bounds)),
@@ -110,6 +111,18 @@ public:
   void accept_vis (HIRVisitor &vis) override;
 
   Identifier get_type_representation () const { return type_representation; }
+
+  std::unique_ptr<Type> &get_type ()
+  {
+    rust_assert (type != nullptr);
+    return type;
+  }
+
+  Analysis::NodeMapping get_type_mappings () const
+  {
+    rust_assert (type != nullptr);
+    return type->get_mappings ();
+  }
 
 protected:
   // Clone function implementation as (not pure) virtual method
@@ -292,45 +305,34 @@ public:
 // A self parameter in a method
 struct SelfParam
 {
+public:
+  enum ImplicitSelfKind
+  {
+    IMM,
+    MUT,
+    IMM_REF,
+    MUT_REF,
+    NONE
+  };
+
 private:
-  bool has_ref;
-  bool is_mut;
-  // bool has_lifetime; // only possible if also ref
+  ImplicitSelfKind self_kind;
   Lifetime lifetime;
-
-  // bool has_type; // only possible if not ref
   std::unique_ptr<Type> type;
-
   Location locus;
-
   Analysis::NodeMapping mappings;
 
-  // Unrestricted constructor used for error state
-  SelfParam (Analysis::NodeMapping mappings, Lifetime lifetime, bool has_ref,
-	     bool is_mut, Type *type)
-    : has_ref (has_ref), is_mut (is_mut), lifetime (std::move (lifetime)),
-      type (type), mappings (mappings)
+  SelfParam (Analysis::NodeMapping mappings, ImplicitSelfKind self_kind,
+	     Lifetime lifetime, Type *type)
+    : self_kind (self_kind), lifetime (std::move (lifetime)), type (type),
+      mappings (mappings)
   {}
-  // this is ok as no outside classes can ever call this
 
 public:
-  // Returns whether the self-param has a type field.
-  bool has_type () const { return type != nullptr; }
-
-  // Returns whether the self-param has a valid lifetime.
-  bool has_lifetime () const { return !lifetime.is_error (); }
-
-  // Returns whether the self-param is in an error state.
-  bool is_error () const
-  {
-    return has_type () && has_lifetime ();
-    // not having either is not an error
-  }
-
   // Type-based self parameter (not ref, no lifetime)
   SelfParam (Analysis::NodeMapping mappings, std::unique_ptr<Type> type,
 	     bool is_mut, Location locus)
-    : has_ref (false), is_mut (is_mut),
+    : self_kind (is_mut ? ImplicitSelfKind::MUT : ImplicitSelfKind::IMM),
       lifetime (Lifetime (mappings, Lifetime::LifetimeType::NAMED, "", locus)),
       type (std::move (type)), locus (locus), mappings (mappings)
   {}
@@ -338,13 +340,14 @@ public:
   // Lifetime-based self parameter (is ref, no type)
   SelfParam (Analysis::NodeMapping mappings, Lifetime lifetime, bool is_mut,
 	     Location locus)
-    : has_ref (true), is_mut (is_mut), lifetime (std::move (lifetime)),
-      locus (locus), mappings (mappings)
+    : self_kind (is_mut ? ImplicitSelfKind::MUT_REF
+			: ImplicitSelfKind::IMM_REF),
+      lifetime (std::move (lifetime)), locus (locus), mappings (mappings)
   {}
 
   // Copy constructor requires clone
   SelfParam (SelfParam const &other)
-    : has_ref (other.has_ref), is_mut (other.is_mut), lifetime (other.lifetime),
+    : self_kind (other.self_kind), lifetime (other.lifetime),
       locus (other.locus), mappings (other.mappings)
   {
     if (other.type != nullptr)
@@ -356,8 +359,8 @@ public:
   {
     if (other.type != nullptr)
       type = other.type->clone_type ();
-    is_mut = other.is_mut;
-    has_ref = other.has_ref;
+
+    self_kind = other.self_kind;
     lifetime = other.lifetime;
     locus = other.locus;
     mappings = other.mappings;
@@ -369,14 +372,27 @@ public:
   SelfParam (SelfParam &&other) = default;
   SelfParam &operator= (SelfParam &&other) = default;
 
+  static SelfParam error ()
+  {
+    return SelfParam (Analysis::NodeMapping::get_error (),
+		      ImplicitSelfKind::NONE, Lifetime::error (), nullptr);
+  }
+
+  // Returns whether the self-param has a type field.
+  bool has_type () const { return type != nullptr; }
+
+  // Returns whether the self-param has a valid lifetime.
+  bool has_lifetime () const { return !lifetime.is_error (); }
+
+  // Returns whether the self-param is in an error state.
+  bool is_error () const { return self_kind != ImplicitSelfKind::NONE; }
+
   std::string as_string () const;
 
   Location get_locus () const { return locus; }
 
-  bool get_has_ref () const { return has_ref; };
-  bool get_is_mut () const { return is_mut; }
+  ImplicitSelfKind get_self_kind () const { return self_kind; }
 
-  // TODO: is this better? Or is a "vis_block" better?
   std::unique_ptr<Type> &get_type ()
   {
     rust_assert (has_type ());
@@ -384,6 +400,18 @@ public:
   }
 
   Analysis::NodeMapping get_mappings () { return mappings; }
+
+  bool is_mut () const
+  {
+    return self_kind == ImplicitSelfKind::MUT
+	   || self_kind == ImplicitSelfKind::MUT_REF;
+  }
+
+  bool is_ref () const
+  {
+    return self_kind == ImplicitSelfKind::IMM_REF
+	   || self_kind == ImplicitSelfKind::MUT_REF;
+  }
 };
 
 // Qualifiers for function, i.e. const, unsafe, extern etc.
@@ -492,13 +520,13 @@ private:
   // if vis is public, one of these
   PublicVisType public_vis_type;
   // Only assigned if public_vis_type is IN_PATH
-  SimplePath in_path;
+  AST::SimplePath in_path;
 
   // should this store location info?
 
 public:
   // Creates a Visibility - TODO make constructor protected or private?
-  Visibility (PublicVisType public_vis_type, SimplePath in_path)
+  Visibility (PublicVisType public_vis_type, AST::SimplePath in_path)
     : public_vis_type (public_vis_type), in_path (std::move (in_path))
   {}
 
@@ -511,7 +539,7 @@ public:
   // Creates an error visibility.
   static Visibility create_error ()
   {
-    return Visibility (IN_PATH, SimplePath::create_empty ());
+    return Visibility (IN_PATH, AST::SimplePath::create_empty ());
   }
 
   // Unique pointer custom clone function
@@ -525,30 +553,30 @@ public:
   // Creates a public visibility with no further features/arguments.
   static Visibility create_public ()
   {
-    return Visibility (NONE, SimplePath::create_empty ());
+    return Visibility (NONE, AST::SimplePath::create_empty ());
   }
 
   // Creates a public visibility with crate-relative paths or whatever.
   static Visibility create_crate ()
   {
-    return Visibility (CRATE, SimplePath::create_empty ());
+    return Visibility (CRATE, AST::SimplePath::create_empty ());
   }
 
   // Creates a public visibility with self-relative paths or whatever.
   static Visibility create_self ()
   {
-    return Visibility (SELF, SimplePath::create_empty ());
+    return Visibility (SELF, AST::SimplePath::create_empty ());
   }
 
   // Creates a public visibility with parent module-relative paths or
   // whatever.
   static Visibility create_super ()
   {
-    return Visibility (SUPER, SimplePath::create_empty ());
+    return Visibility (SUPER, AST::SimplePath::create_empty ());
   }
 
   // Creates a public visibility with a given path or whatever.
-  static Visibility create_in_path (SimplePath in_path)
+  static Visibility create_in_path (AST::SimplePath in_path)
   {
     return Visibility (IN_PATH, std::move (in_path));
   }
@@ -565,12 +593,12 @@ protected:
 };
 
 // A method (function belonging to a type)
-class Method : public InherentImplItem, public TraitImplItem
+class Method : public ImplItem
 {
   Analysis::NodeMapping mappings;
 
   // moved from impl items for consistency
-  std::vector<Attribute> outer_attrs;
+  AST::AttrVec outer_attrs;
   Visibility vis;
 
   FunctionQualifiers qualifiers;
@@ -620,7 +648,7 @@ public:
 	  SelfParam self_param, std::vector<FunctionParam> function_params,
 	  std::unique_ptr<Type> return_type, WhereClause where_clause,
 	  std::unique_ptr<BlockExpr> function_body, Visibility vis,
-	  std::vector<Attribute> outer_attrs, Location locus = Location ())
+	  AST::AttrVec outer_attrs, Location locus = Location ())
     : mappings (mappings), outer_attrs (std::move (outer_attrs)),
       vis (std::move (vis)), qualifiers (std::move (qualifiers)),
       method_name (std::move (method_name)),
@@ -733,6 +761,8 @@ public:
 
   Location get_locus () const { return locus; }
 
+  Location get_impl_locus () const final { return get_locus (); }
+
   std::unique_ptr<BlockExpr> &get_function_body () { return function_body; }
   const std::unique_ptr<BlockExpr> &get_function_body () const
   {
@@ -746,13 +776,6 @@ protected:
   {
     return new Method (*this);
   }
-
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  Method *clone_trait_impl_item_impl () const override
-  {
-    return new Method (*this);
-  }
 };
 
 // Item that supports visibility - abstract base class
@@ -763,7 +786,7 @@ class VisItem : public Item
 protected:
   // Visibility constructor
   VisItem (Analysis::NodeMapping mappings, Visibility visibility,
-	   std::vector<Attribute> outer_attrs = std::vector<Attribute> ())
+	   AST::AttrVec outer_attrs = AST::AttrVec ())
     : Item (std::move (mappings), std::move (outer_attrs)),
       visibility (std::move (visibility))
   {}
@@ -806,7 +829,7 @@ protected:
   // Protected constructor
   Module (Analysis::NodeMapping mappings, Identifier module_name,
 	  Visibility visibility, Location locus,
-	  std::vector<Attribute> outer_attrs = std::vector<Attribute> ())
+	  AST::AttrVec outer_attrs = AST::AttrVec ())
     : VisItem (std::move (mappings), std::move (visibility),
 	       std::move (outer_attrs)),
       module_name (module_name), locus (locus)
@@ -822,7 +845,7 @@ public:
 class ModuleBodied : public Module
 {
   // bool has_inner_attrs;
-  std::vector<Attribute> inner_attrs;
+  AST::AttrVec inner_attrs;
   // bool has_items;
   std::vector<std::unique_ptr<Item> > items;
 
@@ -840,8 +863,8 @@ public:
 		std::vector<std::unique_ptr<Item> > items
 		= std::vector<std::unique_ptr<Item> > (),
 		Visibility visibility = Visibility::create_error (),
-		std::vector<Attribute> inner_attrs = std::vector<Attribute> (),
-		std::vector<Attribute> outer_attrs = std::vector<Attribute> ())
+		AST::AttrVec inner_attrs = AST::AttrVec (),
+		AST::AttrVec outer_attrs = AST::AttrVec ())
     : Module (std::move (mappings), std::move (name), std::move (visibility),
 	      locus, std::move (outer_attrs)),
       inner_attrs (std::move (inner_attrs)), items (std::move (items))
@@ -902,8 +925,7 @@ public:
 
   // Full constructor
   ModuleNoBody (Analysis::NodeMapping mappings, Identifier name,
-		Visibility visibility, std::vector<Attribute> outer_attrs,
-		Location locus)
+		Visibility visibility, AST::AttrVec outer_attrs, Location locus)
     : Module (std::move (mappings), std::move (name), std::move (visibility),
 	      locus, std::move (outer_attrs))
   {}
@@ -953,8 +975,8 @@ public:
 
   // Constructor
   ExternCrate (Analysis::NodeMapping mappings, std::string referenced_crate,
-	       Visibility visibility, std::vector<Attribute> outer_attrs,
-	       Location locus, std::string as_clause_name = std::string ())
+	       Visibility visibility, AST::AttrVec outer_attrs, Location locus,
+	       std::string as_clause_name = std::string ())
     : VisItem (std::move (mappings), std::move (visibility),
 	       std::move (outer_attrs)),
       referenced_crate (std::move (referenced_crate)),
@@ -1026,10 +1048,10 @@ public:
 
 private:
   PathType glob_type;
-  SimplePath path;
+  AST::SimplePath path;
 
 public:
-  UseTreeGlob (PathType glob_type, SimplePath path, Location locus)
+  UseTreeGlob (PathType glob_type, AST::SimplePath path, Location locus)
     : UseTree (locus), glob_type (glob_type), path (std::move (path))
   {
     if (this->glob_type != PATH_PREFIXED)
@@ -1074,12 +1096,12 @@ public:
 
 private:
   PathType path_type;
-  SimplePath path;
+  AST::SimplePath path;
 
   std::vector<std::unique_ptr<UseTree> > trees;
 
 public:
-  UseTreeList (PathType path_type, SimplePath path,
+  UseTreeList (PathType path_type, AST::SimplePath path,
 	       std::vector<std::unique_ptr<UseTree> > trees, Location locus)
     : UseTree (locus), path_type (path_type), path (std::move (path)),
       trees (std::move (trees))
@@ -1154,13 +1176,13 @@ public:
   };
 
 private:
-  SimplePath path;
+  AST::SimplePath path;
 
   NewBindType bind_type;
   Identifier identifier; // only if NewBindType is IDENTIFIER
 
 public:
-  UseTreeRebind (NewBindType bind_type, SimplePath path, Location locus,
+  UseTreeRebind (NewBindType bind_type, AST::SimplePath path, Location locus,
 		 Identifier identifier = std::string ())
     : UseTree (locus), path (std::move (path)), bind_type (bind_type),
       identifier (std::move (identifier))
@@ -1198,7 +1220,7 @@ public:
 
   UseDeclaration (Analysis::NodeMapping mappings,
 		  std::unique_ptr<UseTree> use_tree, Visibility visibility,
-		  std::vector<Attribute> outer_attrs, Location locus)
+		  AST::AttrVec outer_attrs, Location locus)
     : VisItem (std::move (mappings), std::move (visibility),
 	       std::move (outer_attrs)),
       use_tree (std::move (use_tree)), locus (locus)
@@ -1253,7 +1275,7 @@ protected:
 class LetStmt;
 
 // Rust function declaration HIR node
-class Function : public VisItem, public InherentImplItem, public TraitImplItem
+class Function : public VisItem, public ImplItem
 {
   FunctionQualifiers qualifiers;
   Identifier function_name;
@@ -1298,7 +1320,7 @@ public:
 	    std::vector<FunctionParam> function_params,
 	    std::unique_ptr<Type> return_type, WhereClause where_clause,
 	    std::unique_ptr<BlockExpr> function_body, Visibility vis,
-	    std::vector<Attribute> outer_attrs, Location locus)
+	    AST::AttrVec outer_attrs, Location locus)
     : VisItem (std::move (mappings), std::move (vis), std::move (outer_attrs)),
       qualifiers (std::move (qualifiers)),
       function_name (std::move (function_name)),
@@ -1353,6 +1375,8 @@ public:
   Function &operator= (Function &&other) = default;
 
   Location get_locus () const { return locus; }
+
+  Location get_impl_locus () const final { return get_locus (); }
 
   void accept_vis (HIRVisitor &vis) override;
 
@@ -1414,23 +1438,10 @@ protected:
   {
     return new Function (*this);
   }
-
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  Function *clone_trait_impl_item_impl () const override
-  {
-    return new Function (*this);
-  }
-
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  /*virtual Function* clone_statement_impl() const override {
-      return new Function(*this);
-  }*/
 };
 
 // Rust type alias (i.e. typedef) HIR node
-class TypeAlias : public VisItem, public TraitImplItem
+class TypeAlias : public VisItem, public ImplItem
 {
   Identifier new_type_name;
 
@@ -1458,7 +1469,7 @@ public:
   TypeAlias (Analysis::NodeMapping mappings, Identifier new_type_name,
 	     std::vector<std::unique_ptr<GenericParam> > generic_params,
 	     WhereClause where_clause, std::unique_ptr<Type> existing_type,
-	     Visibility vis, std::vector<Attribute> outer_attrs, Location locus)
+	     Visibility vis, AST::AttrVec outer_attrs, Location locus)
     : VisItem (std::move (mappings), std::move (vis), std::move (outer_attrs)),
       new_type_name (std::move (new_type_name)),
       generic_params (std::move (generic_params)),
@@ -1482,11 +1493,8 @@ public:
   {
     VisItem::operator= (other);
     new_type_name = other.new_type_name;
-    // generic_params = other.generic_params;
     where_clause = other.where_clause;
     existing_type = other.existing_type->clone_type ();
-    // visibility = other.visibility->clone_visibility();
-    // outer_attrs = other.outer_attrs;
     locus = other.locus;
 
     generic_params.reserve (other.generic_params.size ());
@@ -1502,6 +1510,8 @@ public:
 
   Location get_locus () const { return locus; }
 
+  Location get_impl_locus () const final { return get_locus (); }
+
   void accept_vis (HIRVisitor &vis) override;
 
   std::vector<std::unique_ptr<GenericParam> > &get_generic_params ()
@@ -1513,14 +1523,12 @@ public:
     return generic_params;
   }
 
-  // TODO: is this better? Or is a "vis_block" better?
   WhereClause &get_where_clause ()
   {
     rust_assert (has_where_clause ());
     return where_clause;
   }
 
-  // TODO: is this better? Or is a "vis_block" better?
   std::unique_ptr<Type> &get_type_aliased ()
   {
     rust_assert (existing_type != nullptr);
@@ -1529,6 +1537,11 @@ public:
 
   Identifier get_new_type_name () const { return new_type_name; }
 
+  Analysis::NodeMapping get_impl_mappings () const override
+  {
+    return get_mappings ();
+  };
+
 protected:
   /* Use covariance to implement clone function as returning this object
    * rather than base */
@@ -1536,16 +1549,10 @@ protected:
 
   /* Use covariance to implement clone function as returning this object
    * rather than base */
-  TypeAlias *clone_trait_impl_item_impl () const override
+  TypeAlias *clone_inherent_impl_item_impl () const override
   {
     return new TypeAlias (*this);
   }
-
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  /*virtual TypeAlias* clone_statement_impl() const override {
-      return new TypeAlias(*this);
-  }*/
 };
 
 // Rust base struct declaration HIR node - abstract base class
@@ -1584,7 +1591,7 @@ protected:
   Struct (Analysis::NodeMapping mappings, Identifier struct_name,
 	  std::vector<std::unique_ptr<GenericParam> > generic_params,
 	  WhereClause where_clause, Visibility vis, Location locus,
-	  std::vector<Attribute> outer_attrs = std::vector<Attribute> ())
+	  AST::AttrVec outer_attrs = AST::AttrVec ())
     : VisItem (std::move (mappings), std::move (vis), std::move (outer_attrs)),
       struct_name (std::move (struct_name)),
       generic_params (std::move (generic_params)),
@@ -1626,7 +1633,7 @@ struct StructField
 {
 public:
   // bool has_outer_attributes;
-  std::vector<Attribute> outer_attrs;
+  AST::AttrVec outer_attrs;
 
   // bool has_visibility;
   Visibility visibility;
@@ -1648,7 +1655,7 @@ public:
 
   StructField (Analysis::NodeMapping mappings, Identifier field_name,
 	       std::unique_ptr<Type> field_type, Visibility vis, Location locus,
-	       std::vector<Attribute> outer_attrs = std::vector<Attribute> ())
+	       AST::AttrVec outer_attrs = AST::AttrVec ())
     : outer_attrs (std::move (outer_attrs)), visibility (std::move (vis)),
       field_name (std::move (field_name)), field_type (std::move (field_type)),
       mappings (mappings), locus (locus)
@@ -1708,7 +1715,7 @@ public:
 		Identifier struct_name,
 		std::vector<std::unique_ptr<GenericParam> > generic_params,
 		WhereClause where_clause, bool is_unit, Visibility vis,
-		std::vector<Attribute> outer_attrs, Location locus)
+		AST::AttrVec outer_attrs, Location locus)
     : Struct (std::move (mappings), std::move (struct_name),
 	      std::move (generic_params), std::move (where_clause),
 	      std::move (vis), locus, std::move (outer_attrs)),
@@ -1719,7 +1726,7 @@ public:
   StructStruct (Analysis::NodeMapping mappings, Identifier struct_name,
 		std::vector<std::unique_ptr<GenericParam> > generic_params,
 		WhereClause where_clause, Visibility vis,
-		std::vector<Attribute> outer_attrs, Location locus)
+		AST::AttrVec outer_attrs, Location locus)
     : Struct (std::move (mappings), std::move (struct_name),
 	      std::move (generic_params), std::move (where_clause),
 	      std::move (vis), locus, std::move (outer_attrs)),
@@ -1763,7 +1770,7 @@ struct TupleField
 {
 private:
   // bool has_outer_attributes;
-  std::vector<Attribute> outer_attrs;
+  AST::AttrVec outer_attrs;
 
   // bool has_visibility;
   Visibility visibility;
@@ -1785,7 +1792,7 @@ public:
   // Complete constructor
   TupleField (Analysis::NodeMapping mapping, std::unique_ptr<Type> field_type,
 	      Visibility vis, Location locus,
-	      std::vector<Attribute> outer_attrs = std::vector<Attribute> ())
+	      AST::AttrVec outer_attrs = AST::AttrVec ())
     : outer_attrs (std::move (outer_attrs)), visibility (std::move (vis)),
       field_type (std::move (field_type)), locus (locus), mappings (mapping)
   {}
@@ -1840,7 +1847,7 @@ public:
 	       Identifier struct_name,
 	       std::vector<std::unique_ptr<GenericParam> > generic_params,
 	       WhereClause where_clause, Visibility vis,
-	       std::vector<Attribute> outer_attrs, Location locus)
+	       AST::AttrVec outer_attrs, Location locus)
     : Struct (std::move (mappings), std::move (struct_name),
 	      std::move (generic_params), std::move (where_clause),
 	      std::move (vis), locus, std::move (outer_attrs)),
@@ -1881,7 +1888,7 @@ protected:
 class EnumItem
 {
   // bool has_attrs;
-  std::vector<Attribute> outer_attrs;
+  AST::AttrVec outer_attrs;
 
   Identifier variant_name;
 
@@ -1893,8 +1900,7 @@ public:
   // Returns whether enum item has outer attributes.
   bool has_outer_attrs () const { return !outer_attrs.empty (); }
 
-  EnumItem (Identifier variant_name, std::vector<Attribute> outer_attrs,
-	    Location locus)
+  EnumItem (Identifier variant_name, AST::AttrVec outer_attrs, Location locus)
     : outer_attrs (std::move (outer_attrs)),
       variant_name (std::move (variant_name)), locus (locus)
   {}
@@ -1929,7 +1935,7 @@ public:
   bool has_tuple_fields () const { return !tuple_fields.empty (); }
 
   EnumItemTuple (Identifier variant_name, std::vector<TupleField> tuple_fields,
-		 std::vector<Attribute> outer_attrs, Location locus)
+		 AST::AttrVec outer_attrs, Location locus)
     : EnumItem (std::move (variant_name), std::move (outer_attrs), locus),
       tuple_fields (std::move (tuple_fields))
   {}
@@ -1958,7 +1964,7 @@ public:
 
   EnumItemStruct (Identifier variant_name,
 		  std::vector<StructField> struct_fields,
-		  std::vector<Attribute> outer_attrs, Location locus)
+		  AST::AttrVec outer_attrs, Location locus)
     : EnumItem (std::move (variant_name), std::move (outer_attrs), locus),
       struct_fields (std::move (struct_fields))
   {}
@@ -1982,7 +1988,7 @@ class EnumItemDiscriminant : public EnumItem
 
 public:
   EnumItemDiscriminant (Identifier variant_name, std::unique_ptr<Expr> expr,
-			std::vector<Attribute> outer_attrs, Location locus)
+			AST::AttrVec outer_attrs, Location locus)
     : EnumItem (std::move (variant_name), std::move (outer_attrs), locus),
       expression (std::move (expr))
   {}
@@ -2052,7 +2058,7 @@ public:
   Enum (Analysis::NodeMapping mappings, Identifier enum_name, Visibility vis,
 	std::vector<std::unique_ptr<GenericParam> > generic_params,
 	WhereClause where_clause, std::vector<std::unique_ptr<EnumItem> > items,
-	std::vector<Attribute> outer_attrs, Location locus)
+	AST::AttrVec outer_attrs, Location locus)
     : VisItem (std::move (mappings), std::move (vis), std::move (outer_attrs)),
       enum_name (std::move (enum_name)),
       generic_params (std::move (generic_params)),
@@ -2143,7 +2149,7 @@ public:
   Union (Analysis::NodeMapping mappings, Identifier union_name, Visibility vis,
 	 std::vector<std::unique_ptr<GenericParam> > generic_params,
 	 WhereClause where_clause, std::vector<StructField> variants,
-	 std::vector<Attribute> outer_attrs, Location locus)
+	 AST::AttrVec outer_attrs, Location locus)
     : VisItem (std::move (mappings), std::move (vis), std::move (outer_attrs)),
       union_name (std::move (union_name)),
       generic_params (std::move (generic_params)),
@@ -2190,28 +2196,13 @@ protected:
   /* Use covariance to implement clone function as returning this object
    * rather than base */
   Union *clone_item_impl () const override { return new Union (*this); }
-
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  /*virtual Union* clone_statement_impl() const override {
-      return new Union(*this);
-  }*/
 };
 
-/* "Constant item" HIR node - used for constant, compile-time expressions
- * within module scope (like constexpr) */
-class ConstantItem : public VisItem,
-		     public InherentImplItem,
-		     public TraitImplItem
+class ConstantItem : public VisItem, public ImplItem
 {
-  // either has an identifier or "_" - maybe handle in identifier?
-  // bool identifier_is_underscore;
-  // if no identifier declared, identifier will be "_"
   Identifier identifier;
-
   std::unique_ptr<Type> type;
   std::unique_ptr<Expr> const_expr;
-
   Location locus;
 
 public:
@@ -2219,8 +2210,8 @@ public:
 
   ConstantItem (Analysis::NodeMapping mappings, Identifier ident,
 		Visibility vis, std::unique_ptr<Type> type,
-		std::unique_ptr<Expr> const_expr,
-		std::vector<Attribute> outer_attrs, Location locus)
+		std::unique_ptr<Expr> const_expr, AST::AttrVec outer_attrs,
+		Location locus)
     : VisItem (std::move (mappings), std::move (vis), std::move (outer_attrs)),
       identifier (std::move (ident)), type (std::move (type)),
       const_expr (std::move (const_expr)), locus (locus)
@@ -2248,11 +2239,13 @@ public:
   ConstantItem (ConstantItem &&other) = default;
   ConstantItem &operator= (ConstantItem &&other) = default;
 
-  /* Returns whether constant item is an "unnamed" (wildcard underscore used
-   * as identifier) constant. */
+  // Returns whether constant item is an "unnamed" (wildcard underscore used
+  // as identifier) constant.
   bool is_unnamed () const { return identifier == std::string ("_"); }
 
   Location get_locus () const { return locus; }
+
+  Location get_impl_locus () const final { return get_locus (); }
 
   void accept_vis (HIRVisitor &vis) override;
 
@@ -2281,19 +2274,6 @@ protected:
   {
     return new ConstantItem (*this);
   }
-
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  ConstantItem *clone_trait_impl_item_impl () const override
-  {
-    return new ConstantItem (*this);
-  }
-
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  /*virtual ConstantItem* clone_statement_impl() const override {
-      return new ConstantItem(*this);
-  }*/
 };
 
 /* Static item HIR node - items within module scope with fixed storage
@@ -2311,8 +2291,7 @@ public:
 
   StaticItem (Analysis::NodeMapping mappings, Identifier name, bool is_mut,
 	      std::unique_ptr<Type> type, std::unique_ptr<Expr> expr,
-	      Visibility vis, std::vector<Attribute> outer_attrs,
-	      Location locus)
+	      Visibility vis, AST::AttrVec outer_attrs, Location locus)
     : VisItem (std::move (mappings), std::move (vis), std::move (outer_attrs)),
       has_mut (is_mut), name (std::move (name)), type (std::move (type)),
       expr (std::move (expr)), locus (locus)
@@ -2355,61 +2334,29 @@ public:
   Type *get_type () { return type.get (); }
 
 protected:
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
   StaticItem *clone_item_impl () const override
   {
     return new StaticItem (*this);
   }
-
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  /*virtual StaticItem* clone_statement_impl() const override {
-      return new StaticItem(*this);
-  }*/
 };
 
 // Function declaration in traits
 struct TraitFunctionDecl
 {
 private:
-  // TODO: delete and replace with Function decl item? no as no body in this.
   FunctionQualifiers qualifiers;
   Identifier function_name;
-
-  // bool has_generics;
-  // Generics generic_params;
-  std::vector<std::unique_ptr<GenericParam> > generic_params; // inlined
-
-  // bool has_params;
-  // FunctionParams function_params;
-  std::vector<FunctionParam> function_params; // inlined
-
-  // bool has_return_type;
+  std::vector<std::unique_ptr<GenericParam> > generic_params;
+  std::vector<FunctionParam> function_params;
   std::unique_ptr<Type> return_type;
-
-  // bool has_where_clause;
   WhereClause where_clause;
-
-  // should this store location info?
+  SelfParam self;
 
 public:
-  // Returns whether function decl has generic parameters.
-  bool has_generics () const { return !generic_params.empty (); }
-
-  // Returns whether function decl has regular parameters.
-  bool has_params () const { return !function_params.empty (); }
-
-  // Returns whether function has return type (otherwise is void).
-  bool has_return_type () const { return return_type != nullptr; }
-
-  // Returns whether function has a where clause.
-  bool has_where_clause () const { return !where_clause.is_empty (); }
-
   // Mega-constructor
   TraitFunctionDecl (Identifier function_name, FunctionQualifiers qualifiers,
 		     std::vector<std::unique_ptr<GenericParam> > generic_params,
-		     std::vector<FunctionParam> function_params,
+		     SelfParam self, std::vector<FunctionParam> function_params,
 		     std::unique_ptr<Type> return_type,
 		     WhereClause where_clause)
     : qualifiers (std::move (qualifiers)),
@@ -2417,7 +2364,7 @@ public:
       generic_params (std::move (generic_params)),
       function_params (std::move (function_params)),
       return_type (std::move (return_type)),
-      where_clause (std::move (where_clause))
+      where_clause (std::move (where_clause)), self (self)
   {}
 
   // Copy constructor with clone
@@ -2425,7 +2372,7 @@ public:
     : qualifiers (other.qualifiers), function_name (other.function_name),
       function_params (other.function_params),
       return_type (other.return_type->clone_type ()),
-      where_clause (other.where_clause)
+      where_clause (other.where_clause), self (other.self)
   {
     generic_params.reserve (other.generic_params.size ());
     for (const auto &e : other.generic_params)
@@ -2442,6 +2389,7 @@ public:
     function_params = other.function_params;
     return_type = other.return_type->clone_type ();
     where_clause = other.where_clause;
+    self = other.self;
 
     generic_params.reserve (other.generic_params.size ());
     for (const auto &e : other.generic_params)
@@ -2455,32 +2403,55 @@ public:
   TraitFunctionDecl &operator= (TraitFunctionDecl &&other) = default;
 
   std::string as_string () const;
+
+  // Returns whether function decl has generic parameters.
+  bool has_generics () const { return !generic_params.empty (); }
+
+  // Returns whether function decl has regular parameters.
+  bool has_params () const { return !function_params.empty (); }
+
+  // Returns whether function has return type (otherwise is void).
+  bool has_return_type () const { return return_type != nullptr; }
+
+  // Returns whether function has a where clause.
+  bool has_where_clause () const { return !where_clause.is_empty (); }
+
+  bool is_method () const { return !self.is_error (); }
+
+  SelfParam &get_self ()
+  {
+    rust_assert (is_method ());
+    return self;
+  }
 };
 
 // Actual trait item function declaration within traits
 class TraitItemFunc : public TraitItem
 {
-  std::vector<Attribute> outer_attrs;
+  AST::AttrVec outer_attrs;
   TraitFunctionDecl decl;
-  std::unique_ptr<BlockExpr> block_expr;
+  std::unique_ptr<Expr> block_expr;
   Location locus;
 
 public:
   // Returns whether function has a definition or is just a declaration.
   bool has_definition () const { return block_expr != nullptr; }
 
-  TraitItemFunc (TraitFunctionDecl decl, std::unique_ptr<BlockExpr> block_expr,
-		 std::vector<Attribute> outer_attrs, Location locus)
-    : outer_attrs (std::move (outer_attrs)), decl (std::move (decl)),
-      block_expr (std::move (block_expr)), locus (locus)
+  TraitItemFunc (Analysis::NodeMapping mappings, TraitFunctionDecl decl,
+		 std::unique_ptr<Expr> block_expr, AST::AttrVec outer_attrs,
+		 Location locus)
+    : TraitItem (mappings), outer_attrs (std::move (outer_attrs)),
+      decl (std::move (decl)), block_expr (std::move (block_expr)),
+      locus (locus)
   {}
 
   // Copy constructor with clone
   TraitItemFunc (TraitItemFunc const &other)
-    : outer_attrs (other.outer_attrs), decl (other.decl), locus (other.locus)
+    : TraitItem (other.mappings), outer_attrs (other.outer_attrs),
+      decl (other.decl), locus (other.locus)
   {
     if (other.block_expr != nullptr)
-      block_expr = other.block_expr->clone_block_expr ();
+      block_expr = other.block_expr->clone_expr ();
   }
 
   // Overloaded assignment operator to clone
@@ -2490,8 +2461,9 @@ public:
     outer_attrs = other.outer_attrs;
     decl = other.decl;
     locus = other.locus;
+    mappings = other.mappings;
     if (other.block_expr != nullptr)
-      block_expr = other.block_expr->clone_block_expr ();
+      block_expr = other.block_expr->clone_expr ();
 
     return *this;
   }
@@ -2506,7 +2478,7 @@ public:
 
   void accept_vis (HIRVisitor &vis) override;
 
-  BlockExpr *get_block_expr () { return block_expr.get (); }
+  std::unique_ptr<Expr> &get_block_expr () { return block_expr; }
 
 protected:
   // Clone function implementation as (not pure) virtual method
@@ -2516,158 +2488,10 @@ protected:
   }
 };
 
-// Method declaration within traits
-struct TraitMethodDecl
-{
-private:
-  // TODO: delete and replace with Function decl item? no as no body.
-  FunctionQualifiers qualifiers;
-  Identifier function_name;
-
-  // bool has_generics;
-  // Generics generic_params;
-  std::vector<std::unique_ptr<GenericParam> > generic_params; // inlined
-
-  SelfParam self_param;
-
-  // bool has_params;
-  // FunctionParams function_params;
-  std::vector<FunctionParam> function_params; // inlined
-
-  // bool has_return_type;
-  std::unique_ptr<Type> return_type;
-
-  // bool has_where_clause;
-  WhereClause where_clause;
-
-  // should this store location info?
-
-public:
-  // Returns whether method decl has generic parameters.
-  bool has_generics () const { return !generic_params.empty (); }
-
-  // Returns whether method decl has regular parameters.
-  bool has_params () const { return !function_params.empty (); }
-
-  // Returns whether method has return type (otherwise is void).
-  bool has_return_type () const { return return_type != nullptr; }
-
-  // Returns whether method has a where clause.
-  bool has_where_clause () const { return !where_clause.is_empty (); }
-
-  // Mega-constructor
-  TraitMethodDecl (Identifier function_name, FunctionQualifiers qualifiers,
-		   std::vector<std::unique_ptr<GenericParam> > generic_params,
-		   SelfParam self_param,
-		   std::vector<FunctionParam> function_params,
-		   std::unique_ptr<Type> return_type, WhereClause where_clause)
-    : qualifiers (std::move (qualifiers)),
-      function_name (std::move (function_name)),
-      generic_params (std::move (generic_params)),
-      self_param (std::move (self_param)),
-      function_params (std::move (function_params)),
-      return_type (std::move (return_type)),
-      where_clause (std::move (where_clause))
-  {}
-
-  // Copy constructor with clone
-  TraitMethodDecl (TraitMethodDecl const &other)
-    : qualifiers (other.qualifiers), function_name (other.function_name),
-      self_param (other.self_param), function_params (other.function_params),
-      return_type (other.return_type->clone_type ()),
-      where_clause (other.where_clause)
-  {
-    generic_params.reserve (other.generic_params.size ());
-    for (const auto &e : other.generic_params)
-      generic_params.push_back (e->clone_generic_param ());
-  }
-
-  ~TraitMethodDecl () = default;
-
-  // Overloaded assignment operator with clone
-  TraitMethodDecl &operator= (TraitMethodDecl const &other)
-  {
-    function_name = other.function_name;
-    qualifiers = other.qualifiers;
-    self_param = other.self_param;
-    function_params = other.function_params;
-    return_type = other.return_type->clone_type ();
-    where_clause = other.where_clause;
-
-    generic_params.reserve (other.generic_params.size ());
-    for (const auto &e : other.generic_params)
-      generic_params.push_back (e->clone_generic_param ());
-
-    return *this;
-  }
-
-  // move constructors
-  TraitMethodDecl (TraitMethodDecl &&other) = default;
-  TraitMethodDecl &operator= (TraitMethodDecl &&other) = default;
-
-  std::string as_string () const;
-};
-
-// Actual trait item method declaration within traits
-class TraitItemMethod : public TraitItem
-{
-  std::vector<Attribute> outer_attrs;
-  TraitMethodDecl decl;
-  std::unique_ptr<BlockExpr> block_expr;
-  Location locus;
-
-public:
-  // Returns whether method has a definition or is just a declaration.
-  bool has_definition () const { return block_expr != nullptr; }
-
-  TraitItemMethod (TraitMethodDecl decl, std::unique_ptr<BlockExpr> block_expr,
-		   std::vector<Attribute> outer_attrs, Location locus)
-    : outer_attrs (std::move (outer_attrs)), decl (std::move (decl)),
-      block_expr (std::move (block_expr)), locus (locus)
-  {}
-
-  // Copy constructor with clone
-  TraitItemMethod (TraitItemMethod const &other)
-    : outer_attrs (other.outer_attrs), decl (other.decl),
-      block_expr (other.block_expr->clone_block_expr ()), locus (other.locus)
-  {}
-
-  // Overloaded assignment operator to clone
-  TraitItemMethod &operator= (TraitItemMethod const &other)
-  {
-    TraitItem::operator= (other);
-    outer_attrs = other.outer_attrs;
-    decl = other.decl;
-    block_expr = other.block_expr->clone_block_expr ();
-    locus = other.locus;
-
-    return *this;
-  }
-
-  // move constructors
-  TraitItemMethod (TraitItemMethod &&other) = default;
-  TraitItemMethod &operator= (TraitItemMethod &&other) = default;
-
-  std::string as_string () const override;
-
-  Location get_locus () const { return locus; }
-
-  void accept_vis (HIRVisitor &vis) override;
-
-  BlockExpr *get_block_expr () { return block_expr.get (); }
-
-protected:
-  // Clone function implementation as (not pure) virtual method
-  TraitItemMethod *clone_trait_item_impl () const override
-  {
-    return new TraitItemMethod (*this);
-  }
-};
-
 // Constant item within traits
 class TraitItemConst : public TraitItem
 {
-  std::vector<Attribute> outer_attrs;
+  AST::AttrVec outer_attrs;
   Identifier name;
   std::unique_ptr<Type> type;
 
@@ -2680,18 +2504,19 @@ public:
   // Whether the constant item has an associated expression.
   bool has_expression () const { return expr != nullptr; }
 
-  TraitItemConst (Identifier name, std::unique_ptr<Type> type,
-		  std::unique_ptr<Expr> expr,
-		  std::vector<Attribute> outer_attrs, Location locus)
-    : outer_attrs (std::move (outer_attrs)), name (std::move (name)),
-      type (std::move (type)), expr (std::move (expr)), locus (locus)
+  TraitItemConst (Analysis::NodeMapping mappings, Identifier name,
+		  std::unique_ptr<Type> type, std::unique_ptr<Expr> expr,
+		  AST::AttrVec outer_attrs, Location locus)
+    : TraitItem (mappings), outer_attrs (std::move (outer_attrs)),
+      name (std::move (name)), type (std::move (type)), expr (std::move (expr)),
+      locus (locus)
   {}
 
   // Copy constructor with clones
   TraitItemConst (TraitItemConst const &other)
-    : outer_attrs (other.outer_attrs), name (other.name),
-      type (other.type->clone_type ()), expr (other.expr->clone_expr ()),
-      locus (other.locus)
+    : TraitItem (other.mappings), outer_attrs (other.outer_attrs),
+      name (other.name), type (other.type->clone_type ()),
+      expr (other.expr->clone_expr ()), locus (other.locus)
   {}
 
   // Overloaded assignment operator to clone
@@ -2703,6 +2528,7 @@ public:
     type = other.type->clone_type ();
     expr = other.expr->clone_expr ();
     locus = other.locus;
+    mappings = other.mappings;
 
     return *this;
   }
@@ -2728,7 +2554,7 @@ protected:
 // Type items within traits
 class TraitItemType : public TraitItem
 {
-  std::vector<Attribute> outer_attrs;
+  AST::AttrVec outer_attrs;
 
   Identifier name;
 
@@ -2744,16 +2570,18 @@ public:
   bool has_type_param_bounds () const { return !type_param_bounds.empty (); }
 
   TraitItemType (
-    Identifier name,
+    Analysis::NodeMapping mappings, Identifier name,
     std::vector<std::unique_ptr<TypeParamBound> > type_param_bounds,
-    std::vector<Attribute> outer_attrs, Location locus)
-    : outer_attrs (std::move (outer_attrs)), name (std::move (name)),
+    AST::AttrVec outer_attrs, Location locus)
+    : TraitItem (mappings), outer_attrs (std::move (outer_attrs)),
+      name (std::move (name)),
       type_param_bounds (std::move (type_param_bounds)), locus (locus)
   {}
 
   // Copy constructor with vector clone
   TraitItemType (TraitItemType const &other)
-    : outer_attrs (other.outer_attrs), name (other.name), locus (other.locus)
+    : TraitItem (other.mappings), outer_attrs (other.outer_attrs),
+      name (other.name), locus (other.locus)
   {
     type_param_bounds.reserve (other.type_param_bounds.size ());
     for (const auto &e : other.type_param_bounds)
@@ -2767,6 +2595,7 @@ public:
     outer_attrs = other.outer_attrs;
     name = other.name;
     locus = other.locus;
+    mappings = other.mappings;
 
     type_param_bounds.reserve (other.type_param_bounds.size ());
     for (const auto &e : other.type_param_bounds)
@@ -2838,7 +2667,7 @@ public:
 	 std::vector<std::unique_ptr<TypeParamBound> > type_param_bounds,
 	 WhereClause where_clause,
 	 std::vector<std::unique_ptr<TraitItem> > trait_items, Visibility vis,
-	 std::vector<Attribute> outer_attrs, Location locus)
+	 AST::AttrVec outer_attrs, Location locus)
     : VisItem (std::move (mappings), std::move (vis), std::move (outer_attrs)),
       has_unsafe (is_unsafe), name (std::move (name)),
       generic_params (std::move (generic_params)),
@@ -2901,36 +2730,87 @@ protected:
   /* Use covariance to implement clone function as returning this object
    * rather than base */
   Trait *clone_item_impl () const override { return new Trait (*this); }
-
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  /*virtual Trait* clone_statement_impl() const override {
-      return new Trait(*this);
-  }*/
 };
 
-// Implementation item declaration HIR node - abstract base class
-class Impl : public VisItem
+class ImplBlock : public VisItem
 {
-  // must be protected to allow subclasses to access them properly
-protected:
-  // bool has_generics;
-  // Generics generic_params;
-  std::vector<std::unique_ptr<GenericParam> > generic_params; // inlined
-
-  std::unique_ptr<Type> trait_type;
-
-  // bool has_where_clause;
+  std::vector<std::unique_ptr<GenericParam> > generic_params;
+  std::unique_ptr<Type> impl_type;
+  std::unique_ptr<TypePath> trait_ref;
   WhereClause where_clause;
-
-  // bool has_inner_attrs;
-  std::vector<Attribute> inner_attrs;
-
-private:
-  // doesn't really need to be protected as write access probably not needed
+  AST::AttrVec inner_attrs;
   Location locus;
+  std::vector<std::unique_ptr<ImplItem> > impl_items;
 
 public:
+  ImplBlock (Analysis::NodeMapping mappings,
+	     std::vector<std::unique_ptr<ImplItem> > impl_items,
+	     std::vector<std::unique_ptr<GenericParam> > generic_params,
+	     std::unique_ptr<Type> impl_type,
+	     std::unique_ptr<TypePath> trait_ref, WhereClause where_clause,
+	     Visibility vis, AST::AttrVec inner_attrs, AST::AttrVec outer_attrs,
+	     Location locus)
+    : VisItem (std::move (mappings), std::move (vis), std::move (outer_attrs)),
+      generic_params (std::move (generic_params)),
+      impl_type (std::move (impl_type)), trait_ref (std::move (trait_ref)),
+      where_clause (std::move (where_clause)),
+      inner_attrs (std::move (inner_attrs)), locus (locus),
+      impl_items (std::move (impl_items))
+  {}
+
+  ImplBlock (ImplBlock const &other)
+    : VisItem (other), impl_type (other.impl_type->clone_type ()),
+      where_clause (other.where_clause), inner_attrs (other.inner_attrs),
+      locus (other.locus)
+  {
+    generic_params.reserve (other.generic_params.size ());
+    for (const auto &e : other.generic_params)
+      generic_params.push_back (e->clone_generic_param ());
+
+    impl_items.reserve (other.impl_items.size ());
+    for (const auto &e : other.impl_items)
+      impl_items.push_back (e->clone_inherent_impl_item ());
+  }
+
+  ImplBlock &operator= (ImplBlock const &other)
+  {
+    VisItem::operator= (other);
+    impl_type = other.impl_type->clone_type ();
+    where_clause = other.where_clause;
+    inner_attrs = other.inner_attrs;
+    locus = other.locus;
+
+    generic_params.reserve (other.generic_params.size ());
+    for (const auto &e : other.generic_params)
+      generic_params.push_back (e->clone_generic_param ());
+
+    impl_items.reserve (other.impl_items.size ());
+    for (const auto &e : other.impl_items)
+      impl_items.push_back (e->clone_inherent_impl_item ());
+
+    return *this;
+  }
+
+  ImplBlock (ImplBlock &&other) = default;
+  ImplBlock &operator= (ImplBlock &&other) = default;
+
+  std::string as_string () const override;
+
+  // Returns whether inherent impl block has inherent impl items.
+  bool has_impl_items () const { return !impl_items.empty (); }
+
+  void accept_vis (HIRVisitor &vis) override;
+
+  std::vector<std::unique_ptr<ImplItem> > &get_impl_items ()
+  {
+    return impl_items;
+  };
+
+  const std::vector<std::unique_ptr<ImplItem> > &get_impl_items () const
+  {
+    return impl_items;
+  };
+
   // Returns whether impl has generic parameters.
   bool has_generics () const { return !generic_params.empty (); }
 
@@ -2942,224 +2822,30 @@ public:
 
   Location get_locus () const { return locus; }
 
-  std::unique_ptr<Type> &get_type () { return trait_type; };
+  std::unique_ptr<Type> &get_type () { return impl_type; };
 
   std::vector<std::unique_ptr<GenericParam> > &get_generic_params ()
   {
     return generic_params;
   }
 
-protected:
-  // Mega-constructor
-  Impl (Analysis::NodeMapping mappings,
-	std::vector<std::unique_ptr<GenericParam> > generic_params,
-	std::unique_ptr<Type> trait_type, WhereClause where_clause,
-	Visibility vis, std::vector<Attribute> inner_attrs,
-	std::vector<Attribute> outer_attrs, Location locus)
-    : VisItem (std::move (mappings), std::move (vis), std::move (outer_attrs)),
-      generic_params (std::move (generic_params)),
-      trait_type (std::move (trait_type)),
-      where_clause (std::move (where_clause)),
-      inner_attrs (std::move (inner_attrs)), locus (locus)
-  {}
+  bool has_trait_ref () const { return trait_ref != nullptr; }
 
-  // Copy constructor
-  Impl (Impl const &other)
-    : VisItem (other), trait_type (other.trait_type->clone_type ()),
-      where_clause (other.where_clause), inner_attrs (other.inner_attrs),
-      locus (other.locus)
+  std::unique_ptr<TypePath> &get_trait_ref ()
   {
-    generic_params.reserve (other.generic_params.size ());
-    for (const auto &e : other.generic_params)
-      generic_params.push_back (e->clone_generic_param ());
+    rust_assert (has_trait_ref ());
+    return trait_ref;
   }
-
-  // Assignment operator overload with cloning
-  Impl &operator= (Impl const &other)
-  {
-    VisItem::operator= (other);
-    trait_type = other.trait_type->clone_type ();
-    where_clause = other.where_clause;
-    inner_attrs = other.inner_attrs;
-    locus = other.locus;
-
-    generic_params.reserve (other.generic_params.size ());
-    for (const auto &e : other.generic_params)
-      generic_params.push_back (e->clone_generic_param ());
-
-    return *this;
-  }
-
-  // move constructors
-  Impl (Impl &&other) = default;
-  Impl &operator= (Impl &&other) = default;
-};
-
-// Regular "impl foo" impl block declaration HIR node
-class InherentImpl : public Impl
-{
-  // bool has_impl_items;
-  std::vector<std::unique_ptr<InherentImplItem> > impl_items;
-
-public:
-  std::string as_string () const override;
-
-  // Returns whether inherent impl block has inherent impl items.
-  bool has_impl_items () const { return !impl_items.empty (); }
-
-  // Mega-constructor
-  InherentImpl (Analysis::NodeMapping mappings,
-		std::vector<std::unique_ptr<InherentImplItem> > impl_items,
-		std::vector<std::unique_ptr<GenericParam> > generic_params,
-		std::unique_ptr<Type> trait_type, WhereClause where_clause,
-		Visibility vis, std::vector<Attribute> inner_attrs,
-		std::vector<Attribute> outer_attrs, Location locus)
-    : Impl (std::move (mappings), std::move (generic_params),
-	    std::move (trait_type), std::move (where_clause), std::move (vis),
-	    std::move (inner_attrs), std::move (outer_attrs), locus),
-      impl_items (std::move (impl_items))
-  {}
-
-  // Copy constructor with vector clone
-  InherentImpl (InherentImpl const &other) : Impl (other)
-  {
-    impl_items.reserve (other.impl_items.size ());
-    for (const auto &e : other.impl_items)
-      impl_items.push_back (e->clone_inherent_impl_item ());
-  }
-
-  // Overloaded assignment operator with vector clone
-  InherentImpl &operator= (InherentImpl const &other)
-  {
-    Impl::operator= (other);
-
-    impl_items.reserve (other.impl_items.size ());
-    for (const auto &e : other.impl_items)
-      impl_items.push_back (e->clone_inherent_impl_item ());
-
-    return *this;
-  }
-
-  // default move constructors
-  InherentImpl (InherentImpl &&other) = default;
-  InherentImpl &operator= (InherentImpl &&other) = default;
-
-  void accept_vis (HIRVisitor &vis) override;
-
-  std::vector<std::unique_ptr<InherentImplItem> > &get_impl_items ()
-  {
-    return impl_items;
-  };
-
-  const std::vector<std::unique_ptr<InherentImplItem> > &get_impl_items () const
-  {
-    return impl_items;
-  };
 
 protected:
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  InherentImpl *clone_item_impl () const override
-  {
-    return new InherentImpl (*this);
-  }
-
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  /*virtual InherentImpl* clone_statement_impl() const override {
-      return new InherentImpl(*this);
-  }*/
-};
-
-// The "impl footrait for foo" impl block declaration HIR node
-class TraitImpl : public Impl
-{
-  bool has_unsafe;
-  bool has_exclam;
-  TypePath trait_path;
-
-  // bool has_impl_items;
-  std::vector<std::unique_ptr<TraitImplItem> > impl_items;
-
-public:
-  std::string as_string () const override;
-
-  // Returns whether trait impl has impl items.
-  bool has_impl_items () const { return !impl_items.empty (); }
-
-  // Mega-constructor
-  TraitImpl (Analysis::NodeMapping mappings, TypePath trait_path,
-	     bool is_unsafe, bool has_exclam,
-	     std::vector<std::unique_ptr<TraitImplItem> > impl_items,
-	     std::vector<std::unique_ptr<GenericParam> > generic_params,
-	     std::unique_ptr<Type> trait_type, WhereClause where_clause,
-	     Visibility vis, std::vector<Attribute> inner_attrs,
-	     std::vector<Attribute> outer_attrs, Location locus)
-    : Impl (std::move (mappings), std::move (generic_params),
-	    std::move (trait_type), std::move (where_clause), std::move (vis),
-	    std::move (inner_attrs), std::move (outer_attrs), locus),
-      has_unsafe (is_unsafe), has_exclam (has_exclam),
-      trait_path (std::move (trait_path)), impl_items (std::move (impl_items))
-  {}
-
-  // TODO: constructors with less params
-
-  // Copy constructor with vector clone
-  TraitImpl (TraitImpl const &other)
-    : Impl (other), has_unsafe (other.has_unsafe),
-      has_exclam (other.has_exclam), trait_path (other.trait_path)
-  {
-    impl_items.reserve (other.impl_items.size ());
-    for (const auto &e : other.impl_items)
-      impl_items.push_back (e->clone_trait_impl_item ());
-  }
-
-  // Overloaded assignment operator with vector clone
-  TraitImpl &operator= (TraitImpl const &other)
-  {
-    Impl::operator= (other);
-    trait_path = other.trait_path;
-    has_unsafe = other.has_unsafe;
-    has_exclam = other.has_exclam;
-
-    impl_items.reserve (other.impl_items.size ());
-    for (const auto &e : other.impl_items)
-      impl_items.push_back (e->clone_trait_impl_item ());
-
-    return *this;
-  }
-
-  // move constructors
-  TraitImpl (TraitImpl &&other) = default;
-  TraitImpl &operator= (TraitImpl &&other) = default;
-
-  void accept_vis (HIRVisitor &vis) override;
-  std::vector<std::unique_ptr<TraitImplItem> > &get_impl_items ()
-  {
-    return impl_items;
-  };
-
-protected:
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  TraitImpl *clone_item_impl () const override { return new TraitImpl (*this); }
-
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  /*virtual TraitImpl* clone_statement_impl() const override {
-      return new TraitImpl(*this);
-  }*/
+  ImplBlock *clone_item_impl () const override { return new ImplBlock (*this); }
 };
 
 // Abstract base class for an item used inside an extern block
 class ExternalItem
 {
-  // bool has_outer_attrs;
-  std::vector<Attribute> outer_attrs;
-
-  // bool has_visibility;
+  AST::AttrVec outer_attrs;
   Visibility visibility;
-
   Identifier item_name;
   Location locus;
 
@@ -3185,8 +2871,8 @@ public:
   virtual void accept_vis (HIRVisitor &vis) = 0;
 
 protected:
-  ExternalItem (Identifier item_name, Visibility vis,
-		std::vector<Attribute> outer_attrs, Location locus)
+  ExternalItem (Identifier item_name, Visibility vis, AST::AttrVec outer_attrs,
+		Location locus)
     : outer_attrs (std::move (outer_attrs)), visibility (std::move (vis)),
       item_name (std::move (item_name)), locus (locus)
   {}
@@ -3227,8 +2913,8 @@ class ExternalStaticItem : public ExternalItem
 
 public:
   ExternalStaticItem (Identifier item_name, std::unique_ptr<Type> item_type,
-		      bool is_mut, Visibility vis,
-		      std::vector<Attribute> outer_attrs, Location locus)
+		      bool is_mut, Visibility vis, AST::AttrVec outer_attrs,
+		      Location locus)
     : ExternalItem (std::move (item_name), std::move (vis),
 		    std::move (outer_attrs), locus),
       has_mut (is_mut), item_type (std::move (item_type))
@@ -3356,7 +3042,7 @@ public:
     std::vector<std::unique_ptr<GenericParam> > generic_params,
     std::unique_ptr<Type> return_type, WhereClause where_clause,
     std::vector<NamedFunctionParam> function_params, bool has_variadics,
-    Visibility vis, std::vector<Attribute> outer_attrs, Location locus)
+    Visibility vis, AST::AttrVec outer_attrs, Location locus)
     : ExternalItem (std::move (item_name), std::move (vis),
 		    std::move (outer_attrs), locus),
       generic_params (std::move (generic_params)),
@@ -3418,7 +3104,7 @@ class ExternBlock : public VisItem
   std::string abi;
 
   // bool has_inner_attrs;
-  std::vector<Attribute> inner_attrs;
+  AST::AttrVec inner_attrs;
 
   // bool has_extern_items;
   std::vector<std::unique_ptr<ExternalItem> > extern_items;
@@ -3439,8 +3125,8 @@ public:
 
   ExternBlock (Analysis::NodeMapping mappings, std::string abi,
 	       std::vector<std::unique_ptr<ExternalItem> > extern_items,
-	       Visibility vis, std::vector<Attribute> inner_attrs,
-	       std::vector<Attribute> outer_attrs, Location locus)
+	       Visibility vis, AST::AttrVec inner_attrs,
+	       AST::AttrVec outer_attrs, Location locus)
     : VisItem (std::move (mappings), std::move (vis), std::move (outer_attrs)),
       abi (std::move (abi)), inner_attrs (std::move (inner_attrs)),
       extern_items (std::move (extern_items)), locus (locus)

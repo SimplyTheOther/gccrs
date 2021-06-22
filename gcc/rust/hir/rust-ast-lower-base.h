@@ -291,6 +291,10 @@ protected:
   HIR::PathExprSegment lower_path_expr_seg (AST::PathExprSegment &s);
 
   HIR::GenericArgs lower_generic_args (AST::GenericArgs &args);
+
+  HIR::GenericArgsBinding lower_binding (AST::GenericArgsBinding &binding);
+
+  HIR::SelfParam lower_self (AST::SelfParam &self);
 };
 
 } // namespace HIR

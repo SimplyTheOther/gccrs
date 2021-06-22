@@ -38,6 +38,8 @@ Clone the repository
 $ git clone git@github.com:Rust-GCC/gccrs.git
 ```
 
+#### Linux
+
 It is important to remember that GNU toolchain projects are designed to be built outside of their source directory
 which is why a build directory is created.
 
@@ -48,10 +50,23 @@ $ ../gccrs/configure --prefix=$HOME/gccrs-install --disable-bootstrap --enable-m
 $ make
 ```
 
+#### MacOS
+
+The path of header dir and sysroot should be specified when you configure the project.
+```bash
+$ mkdir mac-build
+$ cd mac-build
+$ ../gccrs/configure --prefix=$HOME/gccrs-install --disable-bootstrap --enable-multilib --enable-languages=rust --with-native-system-header-dir=/usr/include --with-sysroot=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk 
+$ make
+
+```
+
+#### Running GCC Rust
+
 Running the compiler itself without make install we can simply invoke the compiler proper:
 
 ```bash
-$ ./gcc/rust1 test.rs -frust-dump-parse -Warray-bounds -dumpbase test.rs -mtune=generic -march=x86-64 -O0 -version -fdump-tree-gimple -o test.s -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu -L/usr/lib/../lib64
+$ ./gcc/rust1 test.rs -frust-debug -frust-dump-parse -Warray-bounds -dumpbase test.rs -mtune=generic -march=x86-64 -O0 -version -fdump-tree-gimple -o test.s -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu -L/usr/lib/../lib64
 ```
 
 To invoke the compiler driver (gccrs) we need to:
@@ -76,33 +91,34 @@ export PATH=$HOME/gccrs-install/bin:$PATH
 
 ## Testsuite
 
-Invoke the full testsuite from the build directory (`gcc/gccrs-build` in the previous commands):
+Invoke the full testsuite from the build directory (`gccrs-build` in the previous commands):
 
 ```bash
 $ make check-rust
 ```
 
-Invoke a subset of the testsuite. For example, to only execute the tests that are expected to fail:
+Invoke a subset of the testsuite. For example, to only run tests that are currently known/expected to fail:
 
 ```bash
-$ make check-rust  RUNTESTFLAGS="xfail_compile.exp"
+$ make check-rust RUNTESTFLAGS="xfail.exp"
 ```
-The project currently has 3 sets of tests:
+There are the following sets of tests:
+- `compile.exp` : compilation tests
 - `execute.exp` : execution tests
-- `compile.exp` : compilation only tests, using combination of options
-- `xfail_compile.exp` : compilation only tests expected to fail
+- `xfail.exp` : tests that are currently known/expected to fail
 
 Invoke only a specific test :
 
 ```bash
-$ make check-rust  RUNTESTFLAGS="xfail_compile.exp=continue1.rs"
+$ make check-rust RUNTESTFLAGS="--all compile.exp=continue1.rs"
 ```
 
 Logs (with corresponding commands) can be found in : `gccrs-build/gcc/testsuite/rust/rust.log`.
 
 See [GCC Testing documentation](https://gcc.gnu.org/install/test.html) for more details.
 
-Test cases are located within [gcc/testsuite/rust.test](gcc/testsuite/rust.test) please feel free to contribute your specific
+Test cases are located within [`gcc/testsuite/rust/`](gcc/testsuite/rust/).
+Please contribute your specific
 test cases referencing any issues on Github.
 
 ## Debugging
@@ -152,32 +168,29 @@ If you want to build an object file:
 ```bash
 $ docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp \
     gccrs-dev:latest gccrs -g -O2 -c \
-    gcc/testsuite/rust.test/compilable/type_infer1.rs -o type_infer1.o
+    gcc/testsuite/rust/compile/torture/type_infer1.rs -o type_infer1.o
 ```
 
 If you want to build an executable file:
 ```bash
 $ docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp \
     gccrs-dev:latest gccrs -g -O2 \
-    gcc/testsuite/rust.test/compilable/type_infer1.rs -o type_infer1
+    gcc/testsuite/rust/compile/torture/type_infer1.rs -o type_infer1
 ```
 
 To emit assembly :
 ```bash
 $ docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp \
     gccrs-dev:latest gccrs -g -O2 \
-    gcc/testsuite/rust.test/compilable/type_infer1.rs -S -o type_infer1.s 
+    gcc/testsuite/rust/compile/torture/type_infer1.rs -S -o type_infer1.s 
 ```
 
-To emit the debug outputs you can add the option -frust-dump-all :
-```bash
-$ docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp \
-    gccrs-dev:latest gccrs -g -O2 \
-    gcc/testsuite/rust.test/compilable/type_infer1.rs -o type_infer1 -frust-dump-all
-```
+To emit Rust front end debug output, you may add options like `-frust-debug`, `-frust-dump-all`.
 
 
 ## Contributing
+
+If you want to contribute to GCC Rust, you can find more information in [CONTRIBUTING.md](https://github.com/Rust-GCC/gccrs/blob/master/CONTRIBUTING.md).
 
 Please be aware this project is designed to be pushed upstream to GCC when we reach some milestones, and this means we require
 contributions to have copyright assignment in place. Please see https://gcc.gnu.org/contribute.html.
@@ -190,3 +203,5 @@ We can be found on all usual Rust channels such as Zulip, but we also have our o
 
  * GCC Rust Zulip: https://gcc-rust.zulipchat.com/
  * Twitter: https://twitter.com/gcc_rust
+ * GCC Mailing List: https://gcc.gnu.org/mailman/listinfo/gcc-rust
+ * irc: irc.oftc.net - gccrust

@@ -22,6 +22,7 @@
 #include "rust-backend.h"
 #include "rust-hir-map.h"
 #include "rust-hir-full.h"
+#include "rust-diagnostics.h"
 
 namespace Rust {
 namespace TyTy {
@@ -122,6 +123,8 @@ public:
 
   virtual bool needs_generic_substitutions () const { return false; }
 
+  virtual bool contains_type_parameters () const { return false; }
+
   std::string mappings_str () const
   {
     std::string buffer = "Ref: " + std::to_string (get_ref ())
@@ -140,8 +143,8 @@ public:
 
   void debug () const
   {
-    printf ("[%p] %s\n", static_cast<const void *> (this),
-	    debug_str ().c_str ());
+    rust_debug ("[%p] %s", static_cast<const void *> (this),
+		debug_str ().c_str ());
   }
 
 protected:
@@ -169,7 +172,7 @@ public:
 
   BaseType *get_tyty () const;
 
-  static TyVar get_implicit_infer_var ();
+  static TyVar get_implicit_infer_var (Location locus);
 
 private:
   HirId ref;
@@ -242,6 +245,7 @@ public:
   std::string get_name () const override final { return as_string (); }
 };
 
+class SubstitutionArgumentMappings;
 class ParamType : public BaseType
 {
 public:
@@ -278,6 +282,18 @@ public:
 
   bool is_equal (const BaseType &other) const override;
 
+  bool contains_type_parameters () const override final
+  {
+    if (can_resolve ())
+      {
+	auto r = resolve ();
+	return r->contains_type_parameters ();
+      }
+    return true;
+  }
+
+  ParamType *handle_substitions (SubstitutionArgumentMappings mappings);
+
 private:
   std::string symbol;
   HIR::GenericParam &param;
@@ -304,7 +320,7 @@ public:
 
   StructFieldType *clone () const;
 
-  void debug () const { printf ("%s\n", as_string ().c_str ()); }
+  void debug () const { rust_debug ("%s", as_string ().c_str ()); }
 
 private:
   HirId ref;
@@ -364,6 +380,18 @@ public:
 
   std::string get_name () const override final { return as_string (); }
 
+  bool contains_type_parameters () const override final
+  {
+    for (auto &f : fields)
+      {
+	if (f.get_tyty ()->contains_type_parameters ())
+	  return true;
+      }
+    return false;
+  }
+
+  TupleType *handle_substitions (SubstitutionArgumentMappings mappings);
+
 private:
   std::vector<TyVar> fields;
 };
@@ -371,8 +399,7 @@ private:
 class SubstitutionParamMapping
 {
 public:
-  SubstitutionParamMapping (std::unique_ptr<HIR::GenericParam> &generic,
-			    ParamType *param)
+  SubstitutionParamMapping (const HIR::TypeParam &generic, ParamType *param)
 
     : generic (generic), param (param)
   {}
@@ -404,8 +431,10 @@ public:
 
   const ParamType *get_param_ty () const { return param; }
 
-  std::unique_ptr<HIR::GenericParam> &get_generic_param () { return generic; };
+  const HIR::TypeParam &get_generic_param () { return generic; };
 
+  // this is used for the backend to override the HirId ref of the param to
+  // what the concrete type is for the rest of the context
   void override_context ();
 
   bool needs_substitution () const
@@ -417,8 +446,18 @@ public:
     return p->resolve ()->get_kind () == TypeKind::PARAM;
   }
 
+  Location get_param_locus () const { return generic.get_locus (); }
+
+  bool param_has_default_ty () const { return generic.has_type (); }
+
+  BaseType *get_default_ty () const
+  {
+    TyVar var (generic.get_type_mappings ().get_hirid ());
+    return var.get_tyty ();
+  }
+
 private:
-  std::unique_ptr<HIR::GenericParam> &generic;
+  const HIR::TypeParam &generic;
   ParamType *param;
 };
 
@@ -580,6 +619,11 @@ public:
 
   std::vector<SubstitutionParamMapping> &get_substs () { return substitutions; }
 
+  const std::vector<SubstitutionParamMapping> &get_substs () const
+  {
+    return substitutions;
+  }
+
   std::vector<SubstitutionParamMapping> clone_substs ()
   {
     std::vector<SubstitutionParamMapping> clone;
@@ -600,8 +644,16 @@ public:
 
   bool needs_substitution () const
   {
-    return has_substitutions ()
-	   && (used_arguments.is_error () || !used_arguments.is_concrete ());
+    if (!has_substitutions ())
+      return false;
+
+    if (used_arguments.is_error ())
+      return true;
+
+    if (used_arguments.size () != get_num_substitutions ())
+      return true;
+
+    return !used_arguments.is_concrete ();
   }
 
   bool was_substituted () const { return !needs_substitution (); }
@@ -611,12 +663,26 @@ public:
     return used_arguments;
   }
 
+  // this is the count of type params that are not substituted fuly
   size_t num_required_substitutions () const
   {
     size_t n = 0;
     for (auto &p : substitutions)
       {
 	if (p.needs_substitution ())
+	  n++;
+      }
+    return n;
+  }
+
+  // this is the count of type params that need substituted taking into account
+  // possible defaults
+  size_t min_required_substitutions () const
+  {
+    size_t n = 0;
+    for (auto &p : substitutions)
+      {
+	if (p.needs_substitution () && !p.param_has_default_ty ())
 	  n++;
       }
     return n;
@@ -638,13 +704,36 @@ public:
   SubstitutionArgumentMappings
   adjust_mappings_for_this (SubstitutionArgumentMappings &mappings);
 
+  // struct Foo<A, B>(A, B);
+  //
+  // impl<T> Foo<T, f32>;
+  //     -> fn test<X>(self, a: X) -> X
+  //
+  // We might invoke this via:
+  //
+  // a = Foo(123, 456f32);
+  // b = a.test::<bool>(false);
+  //
+  // we need to figure out relevant generic arguemts for self to apply to the
+  // fntype
+  SubstitutionArgumentMappings solve_mappings_from_receiver_for_self (
+    SubstitutionArgumentMappings &mappings);
+
   BaseType *infer_substitions (Location locus)
   {
     std::vector<SubstitutionArg> args;
-    for (auto &sub : get_substs ())
+    for (auto &p : get_substs ())
       {
-	TyVar infer_var = TyVar::get_implicit_infer_var ();
-	args.push_back (SubstitutionArg (&sub, infer_var.get_tyty ()));
+	if (p.needs_substitution ())
+	  {
+	    TyVar infer_var = TyVar::get_implicit_infer_var (locus);
+	    args.push_back (SubstitutionArg (&p, infer_var.get_tyty ()));
+	  }
+	else
+	  {
+	    args.push_back (
+	      SubstitutionArg (&p, p.get_param_ty ()->resolve ()));
+	  }
       }
 
     SubstitutionArgumentMappings infer_arguments (std::move (args), locus);
@@ -767,23 +856,26 @@ private:
 class FnType : public BaseType, public SubstitutionRef
 {
 public:
-  FnType (HirId ref, std::vector<std::pair<HIR::Pattern *, BaseType *> > params,
+  FnType (HirId ref, std::string identifier, bool is_method,
+	  std::vector<std::pair<HIR::Pattern *, BaseType *> > params,
 	  BaseType *type, std::vector<SubstitutionParamMapping> subst_refs,
 	  std::set<HirId> refs = std::set<HirId> ())
     : BaseType (ref, ref, TypeKind::FNDEF, refs),
       SubstitutionRef (std::move (subst_refs),
 		       SubstitutionArgumentMappings::error ()),
-      params (std::move (params)), type (type)
+      params (std::move (params)), type (type), is_method_flag (is_method),
+      identifier (identifier)
   {}
 
-  FnType (HirId ref, HirId ty_ref,
+  FnType (HirId ref, HirId ty_ref, std::string identifier, bool is_method,
 	  std::vector<std::pair<HIR::Pattern *, BaseType *> > params,
 	  BaseType *type, std::vector<SubstitutionParamMapping> subst_refs,
 	  std::set<HirId> refs = std::set<HirId> ())
     : BaseType (ref, ty_ref, TypeKind::FNDEF, refs),
       SubstitutionRef (std::move (subst_refs),
 		       SubstitutionArgumentMappings::error ()),
-      params (params), type (type)
+      params (params), type (type), is_method_flag (is_method),
+      identifier (identifier)
   {}
 
   void accept_vis (TyVisitor &vis) override;
@@ -792,12 +884,30 @@ public:
 
   std::string get_name () const override final { return as_string (); }
 
+  std::string get_identifier () const { return identifier; }
+
   BaseType *unify (BaseType *other) override;
   bool can_eq (BaseType *other) override;
 
   bool is_equal (const BaseType &other) const override;
 
   size_t num_params () const { return params.size (); }
+
+  bool is_method () const
+  {
+    if (num_params () == 0)
+      return false;
+
+    return is_method_flag;
+  }
+
+  // get the Self type for the method
+  BaseType *get_self_type () const
+  {
+    rust_assert (is_method ());
+    // FIXME this will need updated when we support coercion for & mut self etc
+    return get_params ().at (0).second;
+  }
 
   std::vector<std::pair<HIR::Pattern *, BaseType *> > &get_params ()
   {
@@ -841,6 +951,8 @@ public:
 private:
   std::vector<std::pair<HIR::Pattern *, BaseType *> > params;
   BaseType *type;
+  bool is_method_flag;
+  std::string identifier;
 };
 
 class FnPtr : public BaseType
@@ -1211,6 +1323,13 @@ public:
   bool is_equal (const BaseType &other) const override;
 
   BaseType *clone () final override;
+
+  bool contains_type_parameters () const override final
+  {
+    return get_base ()->contains_type_parameters ();
+  }
+
+  ReferenceType *handle_substitions (SubstitutionArgumentMappings mappings);
 
 private:
   TyVar base;

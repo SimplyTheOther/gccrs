@@ -52,6 +52,43 @@ public:
   }
 };
 
+class ResolveTraitItemFunctionToCanonicalPath
+{
+public:
+  static CanonicalPath resolve (AST::TraitItemFunc &function)
+  {
+    return CanonicalPath (
+      function.get_trait_function_decl ().get_identifier ());
+  }
+};
+
+class ResolveTraitItemMethodToCanonicalPath
+{
+public:
+  static CanonicalPath resolve (AST::TraitItemMethod &method)
+  {
+    return CanonicalPath (method.get_trait_method_decl ().get_identifier ());
+  }
+};
+
+class ResolveTraitItemConstToCanonicalPath
+{
+public:
+  static CanonicalPath resolve (AST::TraitItemConst &constant)
+  {
+    return CanonicalPath (constant.get_identifier ());
+  }
+};
+
+class ResolveTraitItemTypeToCanonicalPath
+{
+public:
+  static CanonicalPath resolve (AST::TraitItemType &type)
+  {
+    return CanonicalPath (type.get_identifier ());
+  }
+};
+
 class ResolveTypeToCanonicalPath : public ResolverBase
 {
   using Rust::Resolver::ResolverBase::visit;
@@ -113,7 +150,7 @@ public:
 	if (!ok)
 	  {
 	    rust_error_at (seg.get_locus (),
-			   "failed to resolve all generic args");
+			   "failed to resolve all generic arguments");
 	    return CanonicalPath::create_empty ();
 	  }
 
@@ -122,6 +159,17 @@ public:
 	    seg.get_generic_args ()));
       }
     return path;
+  }
+};
+
+class TraitImplProjection
+{
+public:
+  static CanonicalPath resolve (const CanonicalPath &trait_seg,
+				const CanonicalPath &impl_type_seg)
+  {
+    return CanonicalPath ("<" + impl_type_seg.get () + " as " + trait_seg.get ()
+			  + ">");
   }
 };
 
@@ -252,9 +300,21 @@ public:
     return resolver.resolved_node;
   };
 
+  void visit (AST::LifetimeParam &param) override
+  {
+    // For now do not do anything and accept everything.
+    ok = true;
+  }
+
   void visit (AST::TypeParam &param) override
   {
     ok = true;
+
+    // if it has a type lets resolve it
+    if (param.has_type ())
+      {
+	ResolveType::go (param.get_type ().get (), param.get_node_id ());
+      }
 
     // for now lets focus on handling the basics: like struct<T> { a:T, ....}
     resolver->get_type_scope ().insert (

@@ -34,7 +34,7 @@ class TypeCheckTopLevelImplItem : public TypeCheckBase
 
 public:
   static void
-  Resolve (HIR::InherentImplItem *item, TyTy::BaseType *self,
+  Resolve (HIR::ImplItem *item, TyTy::BaseType *self,
 	   std::vector<TyTy::SubstitutionParamMapping> substitutions)
   {
     TypeCheckTopLevelImplItem resolver (self, substitutions);
@@ -59,12 +59,24 @@ public:
       {
 	for (auto &generic_param : function.get_generic_params ())
 	  {
-	    auto param_type
-	      = TypeResolveGenericParam::Resolve (generic_param.get ());
-	    context->insert_type (generic_param->get_mappings (), param_type);
+	    switch (generic_param.get ()->get_kind ())
+	      {
+	      case HIR::GenericParam::GenericKind::LIFETIME:
+		// Skipping Lifetime completely until better handling.
+		break;
 
-	    substitutions.push_back (
-	      TyTy::SubstitutionParamMapping (generic_param, param_type));
+		case HIR::GenericParam::GenericKind::TYPE: {
+		  auto param_type
+		    = TypeResolveGenericParam::Resolve (generic_param.get ());
+		  context->insert_type (generic_param->get_mappings (),
+					param_type);
+
+		  substitutions.push_back (TyTy::SubstitutionParamMapping (
+		    static_cast<HIR::TypeParam &> (*generic_param),
+		    param_type));
+		}
+		break;
+	      }
 	  }
       }
 
@@ -100,6 +112,7 @@ public:
       }
 
     auto fnType = new TyTy::FnType (function.get_mappings ().get_hirid (),
+				    function.get_function_name (), false,
 				    std::move (params), ret_type,
 				    std::move (substitutions));
     context->insert_type (function.get_mappings (), fnType);
@@ -111,12 +124,24 @@ public:
       {
 	for (auto &generic_param : method.get_generic_params ())
 	  {
-	    auto param_type
-	      = TypeResolveGenericParam::Resolve (generic_param.get ());
-	    context->insert_type (generic_param->get_mappings (), param_type);
+	    switch (generic_param.get ()->get_kind ())
+	      {
+	      case HIR::GenericParam::GenericKind::LIFETIME:
+		// Skipping Lifetime completely until better handling.
+		break;
 
-	    substitutions.push_back (
-	      TyTy::SubstitutionParamMapping (generic_param, param_type));
+		case HIR::GenericParam::GenericKind::TYPE: {
+		  auto param_type
+		    = TypeResolveGenericParam::Resolve (generic_param.get ());
+		  context->insert_type (generic_param->get_mappings (),
+					param_type);
+
+		  substitutions.push_back (TyTy::SubstitutionParamMapping (
+		    static_cast<HIR::TypeParam &> (*generic_param),
+		    param_type));
+		}
+		break;
+	      }
 	  }
       }
 
@@ -142,12 +167,13 @@ public:
     // hold all the params to the fndef
     std::vector<std::pair<HIR::Pattern *, TyTy::BaseType *> > params;
 
-    // add the self param at the front
+    // add the synthetic self param at the front, this is a placeholder for
+    // compilation to know parameter names. The types are ignored but we reuse
+    // the HIR identifier pattern which requires it
     HIR::SelfParam &self_param = method.get_self_param ();
     HIR::IdentifierPattern *self_pattern
       = new HIR::IdentifierPattern ("self", self_param.get_locus (),
-				    self_param.get_has_ref (),
-				    self_param.get_is_mut (),
+				    self_param.is_ref (), self_param.is_mut (),
 				    std::unique_ptr<HIR::Pattern> (nullptr));
     context->insert_type (self_param.get_mappings (), self->clone ());
     params.push_back (
@@ -165,9 +191,10 @@ public:
 	context->insert_type (param.get_mappings (), param_tyty);
       }
 
-    auto fnType = new TyTy::FnType (method.get_mappings ().get_hirid (),
-				    std::move (params), ret_type,
-				    std::move (substitutions));
+    auto fnType
+      = new TyTy::FnType (method.get_mappings ().get_hirid (),
+			  method.get_method_name (), true, std::move (params),
+			  ret_type, std::move (substitutions));
     context->insert_type (method.get_mappings (), fnType);
   }
 
@@ -180,14 +207,14 @@ private:
 
   TyTy::BaseType *self;
   std::vector<TyTy::SubstitutionParamMapping> substitutions;
-};
+}; // namespace Resolver
 
 class TypeCheckImplItem : public TypeCheckBase
 {
   using Rust::Resolver::TypeCheckBase::visit;
 
 public:
-  static void Resolve (HIR::InherentImplItem *item, TyTy::BaseType *self)
+  static void Resolve (HIR::ImplItem *item, TyTy::BaseType *self)
   {
     TypeCheckImplItem resolver (self);
     item->accept_vis (resolver);

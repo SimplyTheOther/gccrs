@@ -40,7 +40,6 @@ HIR::Crate
 ASTLowering::go ()
 {
   std::vector<std::unique_ptr<HIR::Item> > items;
-  std::vector<HIR::Attribute> inner_attrs;
   bool has_utf8bom = false;
   bool has_shebang = false;
 
@@ -57,7 +56,7 @@ ASTLowering::go ()
 				 mappings->get_next_hir_id (crate_num),
 				 UNKNOWN_LOCAL_DEFID);
 
-  return HIR::Crate (std::move (items), std::move (inner_attrs), mapping,
+  return HIR::Crate (std::move (items), astCrate.get_inner_attrs (), mapping,
 		     has_utf8bom, has_shebang);
 }
 
@@ -65,9 +64,6 @@ ASTLowering::go ()
 void
 ASTLoweringBlock::visit (AST::BlockExpr &expr)
 {
-  std::vector<HIR::Attribute> inner_attribs;
-  std::vector<HIR::Attribute> outer_attribs;
-
   std::vector<std::unique_ptr<HIR::Stmt> > block_stmts;
   bool block_did_terminate = false;
   expr.iterate_stmts ([&] (AST::Stmt *s) mutable -> bool {
@@ -105,8 +101,8 @@ ASTLoweringBlock::visit (AST::BlockExpr &expr)
   translated
     = new HIR::BlockExpr (mapping, std::move (block_stmts),
 			  std::unique_ptr<HIR::ExprWithoutBlock> (tail_expr),
-			  tail_reachable, std::move (inner_attribs),
-			  std::move (outer_attribs), expr.get_locus ());
+			  tail_reachable, expr.get_inner_attrs (),
+			  expr.get_outer_attrs (), expr.get_locus ());
 
   terminated = block_did_terminate;
 }
@@ -240,7 +236,6 @@ ASTLowerStructExprField::visit (AST::StructExprFieldIdentifier &field)
 void
 ASTLoweringExprWithBlock::visit (AST::WhileLoopExpr &expr)
 {
-  std::vector<HIR::Attribute> outer_attribs;
   HIR::BlockExpr *loop_block
     = ASTLoweringBlock::translate (expr.get_loop_block ().get (), &terminated);
 
@@ -259,7 +254,7 @@ ASTLoweringExprWithBlock::visit (AST::WhileLoopExpr &expr)
 			      std::unique_ptr<HIR::Expr> (loop_condition),
 			      std::unique_ptr<HIR::BlockExpr> (loop_block),
 			      expr.get_locus (), std::move (loop_label),
-			      std::move (outer_attribs));
+			      expr.get_outer_attrs ());
 }
 
 // rust-ast-lower-expr.h
@@ -314,10 +309,25 @@ ASTLoweringBase::lower_path_expr_seg (AST::PathExprSegment &s)
 			  : HIR::GenericArgs::create_empty ());
 }
 
+HIR::GenericArgsBinding
+ASTLoweringBase::lower_binding (AST::GenericArgsBinding &binding)
+{
+  HIR::Type *lowered_type
+    = ASTLoweringType::translate (binding.get_type ().get ());
+  return HIR::GenericArgsBinding (binding.get_identifier (),
+				  std::unique_ptr<HIR::Type> (lowered_type),
+				  binding.get_locus ());
+}
+
 HIR::GenericArgs
 ASTLoweringBase::lower_generic_args (AST::GenericArgs &args)
 {
-  std::vector<HIR::GenericArgsBinding> binding_args; // TODO
+  std::vector<HIR::GenericArgsBinding> binding_args;
+  for (auto &binding : args.get_binding_args ())
+    {
+      HIR::GenericArgsBinding b = lower_binding (binding);
+      binding_args.push_back (std::move (b));
+    }
 
   std::vector<HIR::Lifetime> lifetime_args;
   for (auto &lifetime : args.get_lifetime_args ())
@@ -335,6 +345,50 @@ ASTLoweringBase::lower_generic_args (AST::GenericArgs &args)
 
   return HIR::GenericArgs (std::move (lifetime_args), std::move (type_args),
 			   std::move (binding_args), args.get_locus ());
+}
+
+HIR::SelfParam
+ASTLoweringBase::lower_self (AST::SelfParam &self)
+{
+  HIR::Type *type = self.has_type ()
+		      ? ASTLoweringType::translate (self.get_type ().get ())
+		      : nullptr;
+
+  auto crate_num = mappings->get_current_crate ();
+  Analysis::NodeMapping mapping (crate_num, self.get_node_id (),
+				 mappings->get_next_hir_id (crate_num),
+				 mappings->get_next_localdef_id (crate_num));
+
+  return HIR::SelfParam (mapping, std::unique_ptr<HIR::Type> (type),
+			 self.get_is_mut (), self.get_locus ());
+}
+
+void
+ASTLowerTypePath::visit (AST::TypePathSegmentGeneric &segment)
+{
+  std::vector<HIR::GenericArgsBinding> binding_args; // TODO
+
+  std::string segment_name = segment.get_ident_segment ().as_string ();
+  bool has_separating_scope_resolution
+    = segment.get_separating_scope_resolution ();
+
+  std::vector<HIR::Lifetime> lifetime_args;
+  for (auto &lifetime : segment.get_generic_args ().get_lifetime_args ())
+    {
+      HIR::Lifetime l = lower_lifetime (lifetime);
+      lifetime_args.push_back (std::move (l));
+    }
+
+  std::vector<std::unique_ptr<HIR::Type> > type_args;
+  for (auto &type : segment.get_generic_args ().get_type_args ())
+    {
+      HIR::Type *t = ASTLoweringType::translate (type.get ());
+      type_args.push_back (std::unique_ptr<HIR::Type> (t));
+    }
+
+  translated_segment = new HIR::TypePathSegmentGeneric (
+    segment_name, has_separating_scope_resolution, std::move (lifetime_args),
+    std::move (type_args), std::move (binding_args), segment.get_locus ());
 }
 
 } // namespace HIR

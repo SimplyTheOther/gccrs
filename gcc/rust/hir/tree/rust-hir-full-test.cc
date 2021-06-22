@@ -16,6 +16,7 @@
 // along with GCC; see the file COPYING3.  If not see
 // <http://www.gnu.org/licenses/>.
 
+#include "rust-ast-full.h"
 #include "rust-hir-full.h"
 #include "rust-hir-visitor.h"
 #include "rust-diagnostics.h"
@@ -52,59 +53,20 @@ indent_spaces (enum indent_mode mode)
 
 // Gets a string in a certain delim type.
 std::string
-get_string_in_delims (std::string str_input, DelimType delim_type)
+get_string_in_delims (std::string str_input, AST::DelimType delim_type)
 {
   switch (delim_type)
     {
-    case PARENS:
+    case AST::DelimType::PARENS:
       return "(" + str_input + ")";
-    case SQUARE:
+    case AST::DelimType::SQUARE:
       return "[" + str_input + "]";
-    case CURLY:
+    case AST::DelimType::CURLY:
       return "{" + str_input + "}";
     default:
       return "ERROR-MARK-STRING (delims)";
     }
   gcc_unreachable ();
-}
-
-// Converts a frag spec enum item to a string form.
-std::string
-frag_spec_to_str (MacroFragSpec frag_spec)
-{
-  switch (frag_spec)
-    {
-    case BLOCK:
-      return "block";
-    case EXPR:
-      return "expr";
-    case IDENT:
-      return "ident";
-    case ITEM:
-      return "item";
-    case LIFETIME:
-      return "lifetime";
-    case LITERAL:
-      return "literal";
-    case META:
-      return "meta";
-    case PAT:
-      return "pat";
-    case PATH:
-      return "path";
-    case STMT:
-      return "stmt";
-    case TT:
-      return "tt";
-    case TY:
-      return "ty";
-    case VIS:
-      return "vis";
-    case INVALID:
-      return "INVALID_FRAG_SPEC";
-    default:
-      return "ERROR_MARK_STRING - unknown frag spec";
-    }
 }
 
 std::string
@@ -150,8 +112,8 @@ Crate::as_string () const
 	  // DEBUG: null pointer check
 	  if (item == nullptr)
 	    {
-	      fprintf (stderr, "something really terrible has gone wrong - "
-			       "null pointer item in crate.");
+	      rust_debug ("something really terrible has gone wrong - "
+			  "null pointer item in crate.");
 	      return "nullptr_POINTER_MARK";
 	    }
 
@@ -160,122 +122,6 @@ Crate::as_string () const
     }
 
   return str + "\n::" + get_mappings ().as_string () + "\n";
-}
-
-std::string
-Attribute::as_string () const
-{
-  std::string path_str = path.as_string ();
-  if (attr_input == nullptr)
-    {
-      return path_str;
-    }
-  else
-    {
-      return path_str + attr_input->as_string ();
-    }
-}
-
-std::string
-DelimTokenTree::as_string () const
-{
-  std::string start_delim;
-  std::string end_delim;
-  switch (delim_type)
-    {
-    case PARENS:
-      start_delim = "(";
-      end_delim = ")";
-      break;
-    case SQUARE:
-      start_delim = "[";
-      end_delim = "]";
-      break;
-    case CURLY:
-      start_delim = "{";
-      end_delim = "}";
-      break;
-    default:
-      fprintf (stderr, "Invalid delimiter type, "
-		       "Should be PARENS, SQUARE, or CURLY.");
-      return "Invalid delimiter type";
-    }
-  std::string str = start_delim;
-  if (!token_trees.empty ())
-    {
-      for (const auto &tree : token_trees)
-	{
-	  // DEBUG: null pointer check
-	  if (tree == nullptr)
-	    {
-	      fprintf (
-		stderr,
-		"something really terrible has gone wrong - null pointer "
-		"token tree in delim token tree.");
-	      return "nullptr_POINTER_MARK";
-	    }
-
-	  str += tree->as_string ();
-	}
-    }
-  str += end_delim;
-
-  return str;
-}
-
-std::string
-Token::as_string () const
-{
-  /* FIXME: only works when not identifier or literal or whatever, i.e. when
-   * doesn't store string value */
-  // return get_token_description(token_id);
-
-  // maybe fixed - stores everything as string though, so storage-inefficient
-  std::string quote = is_string_lit () ? "\"" : "";
-  return quote + str + quote;
-}
-
-std::string
-SimplePathSegment::as_string () const
-{
-  return segment_name;
-}
-
-std::string
-SimplePath::as_string () const
-{
-  std::string path;
-  if (has_opening_scope_resolution)
-    {
-      path = "::";
-    }
-
-  // crappy hack because doing proper for loop would be more code
-  bool first_time = true;
-  for (const auto &segment : segments)
-    {
-      if (first_time)
-	{
-	  path += segment.as_string ();
-	  first_time = false;
-	}
-      else
-	{
-	  path += "::" + segment.as_string ();
-	}
-
-      // DEBUG: remove later. Checks for path error.
-      if (segment.is_error ())
-	{
-	  fprintf (stderr,
-		   "segment in path is error - this should've been filtered "
-		   "out. first segment "
-		   "was '%s' \n",
-		   segments.at (0).as_string ().c_str ());
-	}
-    }
-
-  return path;
 }
 
 std::string
@@ -373,8 +219,8 @@ ModuleBodied::as_string () const
 	  // DEBUG: null pointer check
 	  if (item == nullptr)
 	    {
-	      fprintf (stderr, "something really terrible has gone wrong - "
-			       "null pointer item in crate.");
+	      rust_debug ("something really terrible has gone wrong - "
+			  "null pointer item in crate.");
 	      return "nullptr_POINTER_MARK";
 	    }
 
@@ -412,8 +258,8 @@ StaticItem::as_string () const
   // DEBUG: null pointer check
   if (type == nullptr)
     {
-      fprintf (stderr, "something really terrible has gone wrong - null "
-		       "pointer type in static item.");
+      rust_debug ("something really terrible has gone wrong - null "
+		  "pointer type in static item.");
       return "nullptr_POINTER_MARK";
     }
   str += "\n" + indent_spaces (stay) + "Type: " + type->as_string ();
@@ -421,8 +267,8 @@ StaticItem::as_string () const
   // DEBUG: null pointer check
   if (expr == nullptr)
     {
-      fprintf (stderr, "something really terrible has gone wrong - null "
-		       "pointer expr in static item.");
+      rust_debug ("something really terrible has gone wrong - null "
+		  "pointer expr in static item.");
       return "nullptr_POINTER_MARK";
     }
   str += "\n" + indent_spaces (stay) + "Expression: " + expr->as_string ();
@@ -465,8 +311,7 @@ TupleStruct::as_string () const
 	  // DEBUG: null pointer check
 	  if (param == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"generic param in enum.");
 	      return "nullptr_POINTER_MARK";
@@ -513,8 +358,8 @@ ConstantItem::as_string () const
   // DEBUG: null pointer check
   if (type == nullptr)
     {
-      fprintf (stderr, "something really terrible has gone wrong - null "
-		       "pointer type in const item.");
+      rust_debug ("something really terrible has gone wrong - null "
+		  "pointer type in const item.");
       return "nullptr_POINTER_MARK";
     }
   str += "\n  Type: " + type->as_string ();
@@ -522,8 +367,8 @@ ConstantItem::as_string () const
   // DEBUG: null pointer check
   if (const_expr == nullptr)
     {
-      fprintf (stderr, "something really terrible has gone wrong - null "
-		       "pointer expr in const item.");
+      rust_debug ("something really terrible has gone wrong - null "
+		  "pointer expr in const item.");
       return "nullptr_POINTER_MARK";
     }
   str += "\n  Expression: " + const_expr->as_string ();
@@ -532,7 +377,7 @@ ConstantItem::as_string () const
 }
 
 std::string
-InherentImpl::as_string () const
+ImplBlock::as_string () const
 {
   std::string str = VisItem::as_string ();
 
@@ -551,10 +396,9 @@ InherentImpl::as_string () const
 	  // DEBUG: null pointer check
 	  if (param == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
-		"generic param in inherent impl.");
+		"generic param in impl.");
 	      return "nullptr_POINTER_MARK";
 	    }
 
@@ -562,7 +406,7 @@ InherentImpl::as_string () const
 	}
     }
 
-  str += "\n Type: " + trait_type->as_string ();
+  str += "\n Type: " + impl_type->as_string ();
 
   str += "\n Where clause: ";
   if (has_where_clause ())
@@ -590,8 +434,7 @@ InherentImpl::as_string () const
 	}
     }
 
-  // inherent impl items
-  str += "\n Inherent impl items: ";
+  str += "\n impl items: ";
   if (!has_impl_items ())
     {
       str += "none";
@@ -629,8 +472,7 @@ Method::as_string () const
 	  // DEBUG: null pointer check
 	  if (param == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"generic param in method.");
 	      return "nullptr_POINTER_MARK";
@@ -701,8 +543,7 @@ StructStruct::as_string () const
 	  // DEBUG: null pointer check
 	  if (param == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"generic param in enum.");
 	      return "nullptr_POINTER_MARK";
@@ -736,11 +577,12 @@ StructStruct::as_string () const
     {
       for (const auto &field : fields)
 	{
-	  str += "\n  " + field.as_string ();
+	  str += "\n  - " + field.as_string ();
 	}
+      str += "\n";
     }
 
-  return str;
+  return str + "::" + get_mappings ().as_string () + "\n";
 }
 
 std::string
@@ -751,8 +593,7 @@ UseDeclaration::as_string () const
   // DEBUG: null pointer check
   if (use_tree == nullptr)
     {
-      fprintf (
-	stderr,
+      rust_debug (
 	"something really terrible has gone wrong - null pointer use tree in "
 	"use declaration.");
       return "nullptr_POINTER_MARK";
@@ -812,9 +653,8 @@ UseTreeList::as_string () const
       // DEBUG: null pointer check
       if (*i == nullptr)
 	{
-	  fprintf (stderr,
-		   "something really terrible has gone wrong - null pointer "
-		   "tree in use tree list.");
+	  rust_debug ("something really terrible has gone wrong - null pointer "
+		      "tree in use tree list.");
 	  return "nullptr_POINTER_MARK";
 	}
 
@@ -876,8 +716,7 @@ Enum::as_string () const
 	  // DEBUG: null pointer check
 	  if (param == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"generic param in enum.");
 	      return "nullptr_POINTER_MARK";
@@ -910,8 +749,7 @@ Enum::as_string () const
 	  // DEBUG: null pointer check
 	  if (item == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"enum item in enum.");
 	      return "nullptr_POINTER_MARK";
@@ -949,8 +787,7 @@ Trait::as_string () const
 	  // DEBUG: null pointer check
 	  if (param == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"generic param in trait.");
 	      return "nullptr_POINTER_MARK";
@@ -972,8 +809,7 @@ Trait::as_string () const
 	  // DEBUG: null pointer check
 	  if (bound == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"type param bound in trait.");
 	      return "nullptr_POINTER_MARK";
@@ -1005,8 +841,7 @@ Trait::as_string () const
 	  // DEBUG: null pointer check
 	  if (item == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"trait item in trait.");
 	      return "nullptr_POINTER_MARK";
@@ -1039,8 +874,7 @@ Union::as_string () const
 	  // DEBUG: null pointer check
 	  if (param == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"generic param in union.");
 	      return "nullptr_POINTER_MARK";
@@ -1090,8 +924,7 @@ Function::as_string () const
       // DEBUG: null pointer check
       if (return_type == nullptr)
 	{
-	  fprintf (
-	    stderr,
+	  rust_debug (
 	    "something really terrible has gone wrong - null pointer return "
 	    "type in function.");
 	  return "nullptr_POINTER_MARK";
@@ -1116,9 +949,8 @@ Function::as_string () const
       // DEBUG: null pointer check
       if (i == e)
 	{
-	  fprintf (stderr,
-		   "something really terrible has gone wrong - null pointer "
-		   "generic param in function item.");
+	  rust_debug ("something really terrible has gone wrong - null pointer "
+		      "generic param in function item.");
 	  return "nullptr_POINTER_MARK";
 	}
 
@@ -1159,8 +991,7 @@ Function::as_string () const
   // DEBUG: null pointer check
   if (function_body == nullptr)
     {
-      fprintf (
-	stderr,
+      rust_debug (
 	"something really terrible has gone wrong - null pointer function "
 	"body in function.");
       return "nullptr_POINTER_MARK";
@@ -1227,8 +1058,7 @@ BlockExpr::as_string () const
 	  // DEBUG: null pointer check
 	  if (stmt == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"stmt in block expr.");
 	      return "nullptr_POINTER_MARK";
@@ -1250,88 +1080,6 @@ BlockExpr::as_string () const
     }
 
   str += "\n" + indent_spaces (out) + "}";
-  return str;
-}
-
-std::string
-TraitImpl::as_string () const
-{
-  std::string str = VisItem::as_string ();
-
-  if (has_unsafe)
-    {
-      str += "unsafe ";
-    }
-
-  str += "impl ";
-
-  // generic params
-  str += "\n Generic params: ";
-  if (!has_generics ())
-    {
-      str += "none";
-    }
-  else
-    {
-      for (const auto &param : generic_params)
-	{
-	  str += "\n  " + param->as_string ();
-	}
-    }
-
-  str += "\n Has exclam: ";
-  if (has_exclam)
-    {
-      str += "true";
-    }
-  else
-    {
-      str += "false";
-    }
-
-  str += "\n TypePath (to trait): " + trait_path.as_string ();
-
-  str += "\n Type (struct to impl on): " + trait_type->as_string ();
-
-  str += "\n Where clause: ";
-  if (!has_where_clause ())
-    {
-      str += "none";
-    }
-  else
-    {
-      str += where_clause.as_string ();
-    }
-
-  // inner attributes
-  str += "\n inner attributes: ";
-  if (inner_attrs.empty ())
-    {
-      str += "none";
-    }
-  else
-    {
-      /* note that this does not print them with "inner attribute" syntax -
-       * just the body */
-      for (const auto &attr : inner_attrs)
-	{
-	  str += "\n  " + attr.as_string ();
-	}
-    }
-
-  str += "\n trait impl items: ";
-  if (!has_impl_items ())
-    {
-      str += "none";
-    }
-  else
-    {
-      for (const auto &item : impl_items)
-	{
-	  str += "\n  " + item->as_string ();
-	}
-    }
-
   return str;
 }
 
@@ -1417,66 +1165,6 @@ ExternBlock::as_string () const
     }
 
   return str;
-}
-
-std::string
-MacroRule::as_string () const
-{
-  std::string str ("Macro rule: ");
-
-  str += "\n Matcher: \n  ";
-  str += matcher.as_string ();
-
-  str += "\n Transcriber: \n  ";
-  str += transcriber.as_string ();
-
-  return str;
-}
-
-std::string
-MacroRulesDefinition::as_string () const
-{
-  std::string str ("macro_rules!");
-
-  str += rule_name;
-
-  str += "\n Macro rules: ";
-  if (rules.empty ())
-    {
-      str += "none";
-    }
-  else
-    {
-      for (const auto &rule : rules)
-	{
-	  str += "\n  " + rule.as_string ();
-	}
-    }
-
-  str += "\n Delim type: ";
-  switch (delim_type)
-    {
-    case PARENS:
-      str += "parentheses";
-      break;
-    case SQUARE:
-      str += "square";
-      break;
-    case CURLY:
-      str += "curly";
-      break;
-    default:
-      return "ERROR_MARK_STRING - delim type in macro invocation";
-    }
-
-  return str;
-}
-
-std::string
-MacroInvocation::as_string () const
-{
-  return "MacroInvocation: " + path.as_string () + "!"
-	 + token_tree.as_string ();
 }
 
 std::string
@@ -2452,45 +2140,6 @@ TraitBound::as_string () const
 }
 
 std::string
-MacroMatcher::as_string () const
-{
-  std::string str ("Macro matcher: ");
-
-  str += "\n Delim type: ";
-
-  switch (delim_type)
-    {
-    case PARENS:
-      str += "parentheses";
-      break;
-    case SQUARE:
-      str += "square";
-      break;
-    case CURLY:
-      str += "curly";
-      break;
-    default:
-      return "ERROR_MARK_STRING - macro matcher delim";
-    }
-
-  str += "\n Matches: ";
-
-  if (matches.empty ())
-    {
-      str += "none";
-    }
-  else
-    {
-      for (const auto &match : matches)
-	{
-	  str += "\n  " + match->as_string ();
-	}
-    }
-
-  return str;
-}
-
-std::string
 LifetimeParam::as_string () const
 {
   std::string str ("LifetimeParam: ");
@@ -2524,12 +2173,6 @@ LifetimeParam::as_string () const
 }
 
 std::string
-MacroMatchFragment::as_string () const
-{
-  return "$" + ident + ": " + frag_spec_to_str (frag_spec);
-}
-
-std::string
 QualifiedPathInType::as_string () const
 {
   std::string str = path_type.as_string ();
@@ -2537,56 +2180,6 @@ QualifiedPathInType::as_string () const
   for (const auto &segment : segments)
     {
       str += "::" + segment->as_string ();
-    }
-
-  return str;
-}
-
-std::string
-MacroMatchRepetition::as_string () const
-{
-  std::string str ("Macro match repetition: ");
-
-  str += "\n Matches: ";
-  if (matches.empty ())
-    {
-      str += "none";
-    }
-  else
-    {
-      for (const auto &match : matches)
-	{
-	  str += "\n  " + match->as_string ();
-	}
-    }
-
-  str += "\n Sep: ";
-  if (!has_sep ())
-    {
-      str += "none";
-    }
-  else
-    {
-      str += sep->as_string ();
-    }
-
-  str += "\n Op: ";
-  switch (op)
-    {
-    case ASTERISK:
-      str += "*";
-      break;
-    case PLUS:
-      str += "+";
-      break;
-    case QUESTION_MARK:
-      str += "?";
-      break;
-    case NONE:
-      str += "no op? shouldn't be allowed";
-      break;
-    default:
-      return "ERROR_MARK_STRING - unknown op in macro match repetition";
     }
 
   return str;
@@ -2677,16 +2270,16 @@ TypeParam::as_string () const
   return str;
 }
 
-SimplePath
+AST::SimplePath
 PathPattern::convert_to_simple_path (bool with_opening_scope_resolution) const
 {
   if (!has_segments ())
     {
-      return SimplePath::create_empty ();
+      return AST::SimplePath::create_empty ();
     }
 
   // create vector of reserved size (to minimise reallocations)
-  std::vector<SimplePathSegment> simple_segments;
+  std::vector<AST::SimplePathSegment> simple_segments;
   simple_segments.reserve (segments.size ());
 
   for (const auto &segment : segments)
@@ -2694,13 +2287,13 @@ PathPattern::convert_to_simple_path (bool with_opening_scope_resolution) const
       // return empty path if doesn't meet simple path segment requirements
       if (segment.has_generic_args () || segment.as_string () == "Self")
 	{
-	  return SimplePath::create_empty ();
+	  return AST::SimplePath::create_empty ();
 	}
 
       // create segment and add to vector
       std::string segment_str = segment.as_string ();
       simple_segments.push_back (
-	SimplePathSegment (std::move (segment_str), segment.get_locus ()));
+	AST::SimplePathSegment (std::move (segment_str), segment.get_locus ()));
     }
 
   // kind of a HACK to get locus depending on opening scope resolution
@@ -2714,20 +2307,20 @@ PathPattern::convert_to_simple_path (bool with_opening_scope_resolution) const
       locus = simple_segments[0].get_locus ();
     }
 
-  return SimplePath (std::move (simple_segments), with_opening_scope_resolution,
-		     locus);
+  return AST::SimplePath (std::move (simple_segments),
+			  with_opening_scope_resolution, locus);
 }
 
-SimplePath
+AST::SimplePath
 TypePath::as_simple_path () const
 {
   if (segments.empty ())
     {
-      return SimplePath::create_empty ();
+      return AST::SimplePath::create_empty ();
     }
 
   // create vector of reserved size (to minimise reallocations)
-  std::vector<SimplePathSegment> simple_segments;
+  std::vector<AST::SimplePathSegment> simple_segments;
   simple_segments.reserve (segments.size ());
 
   for (const auto &segment : segments)
@@ -2736,17 +2329,18 @@ TypePath::as_simple_path () const
       if (segment == nullptr || segment->is_error ()
 	  || !segment->is_ident_only () || segment->as_string () == "Self")
 	{
-	  return SimplePath::create_empty ();
+	  return AST::SimplePath::create_empty ();
 	}
 
       // create segment and add to vector
       std::string segment_str = segment->as_string ();
       simple_segments.push_back (
-	SimplePathSegment (std::move (segment_str), segment->get_locus ()));
+	AST::SimplePathSegment (std::move (segment_str),
+				segment->get_locus ()));
     }
 
-  return SimplePath (std::move (simple_segments), has_opening_scope_resolution,
-		     locus);
+  return AST::SimplePath (std::move (simple_segments),
+			  has_opening_scope_resolution, locus);
 }
 
 std::string
@@ -3874,8 +3468,7 @@ ExternalFunctionItem::as_string () const
 	  // DEBUG: null pointer check
 	  if (param == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"generic param in external function item.");
 	      return "nullptr_POINTER_MARK";
@@ -3996,8 +3589,7 @@ TraitFunctionDecl::as_string () const
 	  // DEBUG: null pointer check
 	  if (param == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"generic param in trait function decl.");
 	      return "nullptr_POINTER_MARK";
@@ -4008,106 +3600,11 @@ TraitFunctionDecl::as_string () const
     }
 
   str += "\n Function params: ";
-  if (has_params ())
+  if (is_method ())
     {
-      for (const auto &param : function_params)
-	{
-	  str += "\n  " + param.as_string ();
-	}
-    }
-  else
-    {
-      str += "none";
+      str += self.as_string ();
     }
 
-  str += "\n Return type: ";
-  if (has_return_type ())
-    {
-      str += return_type->as_string ();
-    }
-  else
-    {
-      str += "none (void)";
-    }
-
-  str += "\n Where clause: ";
-  if (has_where_clause ())
-    {
-      str += where_clause.as_string ();
-    }
-  else
-    {
-      str += "none";
-    }
-
-  return str;
-}
-
-std::string
-TraitItemMethod::as_string () const
-{
-  std::string str = "outer attributes: ";
-  if (outer_attrs.empty ())
-    {
-      str += "none";
-    }
-  else
-    {
-      /* note that this does not print them with "outer attribute" syntax -
-       * just the body */
-      for (const auto &attr : outer_attrs)
-	{
-	  str += "\n  " + attr.as_string ();
-	}
-    }
-
-  str += "\n" + decl.as_string ();
-
-  str += "\n Definition (block expr): ";
-  if (has_definition ())
-    {
-      str += block_expr->as_string ();
-    }
-  else
-    {
-      str += "none";
-    }
-
-  return str;
-}
-
-std::string
-TraitMethodDecl::as_string () const
-{
-  std::string str = qualifiers.as_string () + "fn " + function_name;
-
-  // generic params
-  str += "\n Generic params: ";
-  if (generic_params.empty ())
-    {
-      str += "none";
-    }
-  else
-    {
-      for (const auto &param : generic_params)
-	{
-	  // DEBUG: null pointer check
-	  if (param == nullptr)
-	    {
-	      fprintf (
-		stderr,
-		"something really terrible has gone wrong - null pointer "
-		"generic param in trait function decl.");
-	      return "nullptr_POINTER_MARK";
-	    }
-
-	  str += "\n  " + param->as_string ();
-	}
-    }
-
-  str += "\n Self param: " + self_param.as_string ();
-
-  str += "\n Function params: ";
   if (has_params ())
     {
       for (const auto &param : function_params)
@@ -4203,8 +3700,7 @@ TraitItemType::as_string () const
 	  // DEBUG: null pointer check
 	  if (bound == nullptr)
 	    {
-	      fprintf (
-		stderr,
+	      rust_debug (
 		"something really terrible has gone wrong - null pointer "
 		"type param bound in trait item type.");
 	      return "nullptr_POINTER_MARK";
@@ -4231,7 +3727,7 @@ SelfParam::as_string () const
 	  // type (i.e. not ref, no lifetime)
 	  std::string str;
 
-	  if (is_mut)
+	  if (is_mut ())
 	    {
 	      str += "mut ";
 	    }
@@ -4247,7 +3743,7 @@ SelfParam::as_string () const
 	  // ref and lifetime
 	  std::string str = "&" + lifetime.as_string () + " ";
 
-	  if (is_mut)
+	  if (is_mut ())
 	    {
 	      str += "mut ";
 	    }
@@ -4256,12 +3752,12 @@ SelfParam::as_string () const
 
 	  return str;
 	}
-      else if (has_ref)
+      else if (is_ref ())
 	{
 	  // ref with no lifetime
 	  std::string str = "&";
 
-	  if (is_mut)
+	  if (is_mut ())
 	    {
 	      str += " mut ";
 	    }
@@ -4275,7 +3771,7 @@ SelfParam::as_string () const
 	  // no ref, no type
 	  std::string str;
 
-	  if (is_mut)
+	  if (is_mut ())
 	    {
 	      str += "mut ";
 	    }
@@ -4355,9 +3851,8 @@ ArrayElemsValues::as_string () const
       // DEBUG: null pointer check
       if (expr == nullptr)
 	{
-	  fprintf (stderr,
-		   "something really terrible has gone wrong - null pointer "
-		   "expr in array elems values.");
+	  rust_debug ("something really terrible has gone wrong - null pointer "
+		      "expr in array elems values.");
 	  return "nullptr_POINTER_MARK";
 	}
 
@@ -4391,78 +3886,6 @@ MaybeNamedParam::as_string () const
   return str;
 }
 
-std::string
-MetaItemSeq::as_string () const
-{
-  std::string path_str = path.as_string () + "(";
-
-  auto i = seq.begin ();
-  auto e = seq.end ();
-
-  for (; i != e; i++)
-    {
-      path_str += (*i)->as_string ();
-      if (e != i + 1)
-	path_str += ", ";
-    }
-
-  return path_str + ")";
-}
-
-std::string
-MetaListPaths::as_string () const
-{
-  std::string str = ident + "(";
-
-  auto i = paths.begin ();
-  auto e = paths.end ();
-
-  for (; i != e; i++)
-    {
-      str += (*i).as_string ();
-      if (e != i + 1)
-	str += ", ";
-    }
-
-  return str + ")";
-}
-
-std::string
-MetaListNameValueStr::as_string () const
-{
-  std::string str = ident + "(";
-
-  auto i = strs.begin ();
-  auto e = strs.end ();
-
-  for (; i != e; i++)
-    {
-      str += (*i).as_string ();
-      if (e != i + 1)
-	str += ", ";
-    }
-
-  return str + ")";
-}
-
-std::string
-AttrInputMetaItemContainer::as_string () const
-{
-  std::string str = "(";
-
-  auto i = items.begin ();
-  auto e = items.end ();
-
-  for (; i != e; i++)
-    {
-      str += (*i)->as_string ();
-      if (e != i + 1)
-	str += ", ";
-    }
-
-  return str + ")";
-}
-
 /* Override that calls the function recursively on all items contained within
  * the module. */
 void
@@ -4473,516 +3896,6 @@ ModuleBodied::add_crate_name (std::vector<std::string> &names) const
 
   for (const auto &item : items)
     item->add_crate_name (names);
-}
-
-void
-Attribute::parse_attr_to_meta_item ()
-{
-  // only parse if has attribute input
-  if (!has_attr_input ())
-    return;
-
-  std::unique_ptr<AttrInput> converted_input (
-    attr_input->parse_to_meta_item ());
-
-  if (converted_input != nullptr)
-    attr_input = std::move (converted_input);
-}
-
-AttrInput *
-DelimTokenTree::parse_to_meta_item () const
-{
-  // must have token trees
-  if (token_trees.empty ())
-    return nullptr;
-
-  /* assume top-level delim token tree in attribute - convert all nested ones
-   * to token stream */
-  std::vector<std::unique_ptr<Token> > token_stream = to_token_stream ();
-
-  MacroParser parser (std::move (token_stream));
-  std::vector<std::unique_ptr<MetaItemInner> > meta_items (
-    parser.parse_meta_item_seq ());
-
-  return new AttrInputMetaItemContainer (std::move (meta_items));
-}
-
-std::unique_ptr<MetaItemInner>
-MacroParser::parse_meta_item_inner ()
-{
-  // if first tok not identifier, not a "special" case one
-  if (peek_token ()->get_id () != IDENTIFIER)
-    {
-      switch (peek_token ()->get_id ())
-	{
-	case CHAR_LITERAL:
-	case STRING_LITERAL:
-	case BYTE_CHAR_LITERAL:
-	case BYTE_STRING_LITERAL:
-	case INT_LITERAL:
-	case FLOAT_LITERAL:
-	case TRUE_LITERAL:
-	case FALSE_LITERAL:
-	  // stream_pos++;
-	  return parse_meta_item_lit ();
-	case SUPER:
-	case SELF:
-	case CRATE:
-	case DOLLAR_SIGN:
-	  case SCOPE_RESOLUTION: {
-	    return parse_path_meta_item ();
-	  }
-	default:
-	  rust_error_at (peek_token ()->get_locus (),
-			 "unrecognised token '%s' in meta item",
-			 get_token_description (peek_token ()->get_id ()));
-	  return nullptr;
-	}
-    }
-
-  // else, check for path
-  if (peek_token (1)->get_id () == SCOPE_RESOLUTION)
-    {
-      // path
-      return parse_path_meta_item ();
-    }
-
-  Identifier ident = peek_token ()->as_string ();
-  if (is_end_meta_item_tok (peek_token (1)->get_id ()))
-    {
-      // meta word syntax
-      skip_token ();
-      return std::unique_ptr<MetaWord> (new MetaWord (std::move (ident)));
-    }
-
-  if (peek_token (1)->get_id () == EQUAL)
-    {
-      // maybe meta name value str syntax - check next 2 tokens
-      if (peek_token (2)->get_id () == STRING_LITERAL
-	  && is_end_meta_item_tok (peek_token (3)->get_id ()))
-	{
-	  // meta name value str syntax
-	  std::string value = peek_token (2)->as_string ();
-
-	  skip_token (2);
-
-	  return std::unique_ptr<MetaNameValueStr> (
-	    new MetaNameValueStr (std::move (ident), std::move (value)));
-	}
-      else
-	{
-	  // just interpret as path-based meta item
-	  return parse_path_meta_item ();
-	}
-    }
-
-  if (peek_token (1)->get_id () != LEFT_PAREN)
-    {
-      rust_error_at (peek_token (1)->get_locus (),
-		     "unexpected token '%s' after identifier in attribute",
-		     get_token_description (peek_token (1)->get_id ()));
-      return nullptr;
-    }
-
-  /* HACK: parse parenthesised sequence, and then try conversions to other
-   * stuff */
-  std::vector<std::unique_ptr<MetaItemInner> > meta_items
-    = parse_meta_item_seq ();
-
-  // pass for meta name value str
-  std::vector<MetaNameValueStr> meta_name_value_str_items;
-  for (const auto &item : meta_items)
-    {
-      std::unique_ptr<MetaNameValueStr> converted_item
-	= item->to_meta_name_value_str ();
-      if (converted_item == nullptr)
-	{
-	  meta_name_value_str_items.clear ();
-	  break;
-	}
-      meta_name_value_str_items.push_back (std::move (*converted_item));
-    }
-  // if valid, return this
-  if (!meta_name_value_str_items.empty ())
-    {
-      return std::unique_ptr<MetaListNameValueStr> (
-	new MetaListNameValueStr (std::move (ident),
-				  std::move (meta_name_value_str_items)));
-    }
-
-  // pass for meta list idents
-  /*std::vector<Identifier> ident_items;
-  for (const auto& item : meta_items) {
-      std::unique_ptr<Identifier> converted_ident(item->to_ident_item());
-      if (converted_ident == nullptr) {
-	  ident_items.clear();
-	  break;
-      }
-      ident_items.push_back(std::move(*converted_ident));
-  }
-  // if valid return this
-  if (!ident_items.empty()) {
-      return std::unique_ptr<MetaListIdents>(new
-  MetaListIdents(std::move(ident),
-  std::move(ident_items)));
-  }*/
-  // as currently no meta list ident, currently no path. may change in future
-
-  // pass for meta list paths
-  std::vector<SimplePath> path_items;
-  for (const auto &item : meta_items)
-    {
-      SimplePath converted_path (item->to_path_item ());
-      if (converted_path.is_empty ())
-	{
-	  path_items.clear ();
-	  break;
-	}
-      path_items.push_back (std::move (converted_path));
-    }
-  if (!path_items.empty ())
-    {
-      return std::unique_ptr<MetaListPaths> (
-	new MetaListPaths (std::move (ident), std::move (path_items)));
-    }
-
-  rust_error_at (Linemap::unknown_location (),
-		 "failed to parse any meta item inner");
-  return nullptr;
-}
-
-bool
-MacroParser::is_end_meta_item_tok (TokenId id) const
-{
-  return id == COMMA || id == RIGHT_PAREN;
-}
-
-std::unique_ptr<MetaItem>
-MacroParser::parse_path_meta_item ()
-{
-  SimplePath path = parse_simple_path ();
-  if (path.is_empty ())
-    {
-      rust_error_at (peek_token ()->get_locus (),
-		     "failed to parse simple path in attribute");
-      return nullptr;
-    }
-
-  switch (peek_token ()->get_id ())
-    {
-      case LEFT_PAREN: {
-	std::vector<std::unique_ptr<MetaItemInner> > meta_items
-	  = parse_meta_item_seq ();
-
-	return std::unique_ptr<MetaItemSeq> (
-	  new MetaItemSeq (std::move (path), std::move (meta_items)));
-      }
-      case EQUAL: {
-	skip_token ();
-
-	Location locus = peek_token ()->get_locus ();
-	Literal lit = parse_literal ();
-	if (lit.is_error ())
-	  {
-	    rust_error_at (peek_token ()->get_locus (),
-			   "failed to parse literal in attribute");
-	    return nullptr;
-	  }
-	LiteralExpr expr (Analysis::NodeMapping::get_error (), std::move (lit),
-			  locus);
-	// stream_pos++;
-	/* shouldn't be required anymore due to parsing literal actually
-	 * skipping the token */
-	return std::unique_ptr<MetaItemPathLit> (
-	  new MetaItemPathLit (std::move (path), std::move (expr)));
-      }
-    case COMMA:
-      // just simple path
-      return std::unique_ptr<MetaItemPath> (
-	new MetaItemPath (std::move (path)));
-    default:
-      rust_error_at (peek_token ()->get_locus (),
-		     "unrecognised token '%s' in meta item",
-		     get_token_description (peek_token ()->get_id ()));
-      return nullptr;
-    }
-}
-
-/* Parses a parenthesised sequence of meta item inners. Parentheses are
- * required here. */
-std::vector<std::unique_ptr<MetaItemInner> >
-MacroParser::parse_meta_item_seq ()
-{
-  if (stream_pos != 0)
-    {
-      // warning?
-      fprintf (stderr,
-	       "WARNING: stream pos for parse_meta_item_seq is not 0!\n");
-    }
-
-  // int i = 0;
-  int vec_length = token_stream.size ();
-  std::vector<std::unique_ptr<MetaItemInner> > meta_items;
-
-  if (peek_token ()->get_id () != LEFT_PAREN)
-    {
-      rust_error_at (peek_token ()->get_locus (),
-		     "missing left paren in delim token tree");
-      return {};
-    }
-  skip_token ();
-
-  while (stream_pos < vec_length && peek_token ()->get_id () != RIGHT_PAREN)
-    {
-      std::unique_ptr<MetaItemInner> inner = parse_meta_item_inner ();
-      if (inner == nullptr)
-	{
-	  rust_error_at (peek_token ()->get_locus (),
-			 "failed to parse inner meta item in attribute");
-	  return {};
-	}
-      meta_items.push_back (std::move (inner));
-
-      if (peek_token ()->get_id () != COMMA)
-	{
-	  break;
-	}
-      skip_token ();
-    }
-
-  if (peek_token ()->get_id () != RIGHT_PAREN)
-    {
-      rust_error_at (peek_token ()->get_locus (),
-		     "missing right paren in delim token tree");
-      return {};
-    }
-  skip_token ();
-
-  return meta_items;
-}
-
-/* Collects any nested token trees into a flat token stream, suitable for
- * parsing. */
-std::vector<std::unique_ptr<Token> >
-DelimTokenTree::to_token_stream () const
-{
-  std::vector<std::unique_ptr<Token> > tokens;
-
-  // simulate presence of delimiters
-  tokens.push_back (
-    std::unique_ptr<Token> (new Token (LEFT_PAREN, Linemap::unknown_location (),
-				       "", CORETYPE_UNKNOWN)));
-
-  for (const auto &tree : token_trees)
-    {
-      std::vector<std::unique_ptr<Token> > stream = tree->to_token_stream ();
-
-      tokens.insert (tokens.end (), std::make_move_iterator (stream.begin ()),
-		     std::make_move_iterator (stream.end ()));
-    }
-
-  tokens.push_back (std::unique_ptr<Token> (
-    new Token (RIGHT_PAREN, Linemap::unknown_location (), "",
-	       CORETYPE_UNKNOWN)));
-
-  tokens.shrink_to_fit ();
-
-  return tokens;
-}
-
-Literal
-MacroParser::parse_literal ()
-{
-  // marcos need to be removed from HIR
-  gcc_unreachable ();
-}
-
-SimplePath
-MacroParser::parse_simple_path ()
-{
-  bool has_opening_scope_res = false;
-  if (peek_token ()->get_id () == SCOPE_RESOLUTION)
-    {
-      has_opening_scope_res = true;
-      skip_token ();
-    }
-
-  std::vector<SimplePathSegment> segments;
-
-  SimplePathSegment segment = parse_simple_path_segment ();
-  if (segment.is_error ())
-    {
-      rust_error_at (
-	peek_token ()->get_locus (),
-	"failed to parse simple path segment in attribute simple path");
-      return SimplePath::create_empty ();
-    }
-  segments.push_back (std::move (segment));
-
-  while (peek_token ()->get_id () == SCOPE_RESOLUTION)
-    {
-      skip_token ();
-
-      SimplePathSegment segment = parse_simple_path_segment ();
-      if (segment.is_error ())
-	{
-	  rust_error_at (
-	    peek_token ()->get_locus (),
-	    "failed to parse simple path segment in attribute simple path");
-	  return SimplePath::create_empty ();
-	}
-      segments.push_back (std::move (segment));
-    }
-  segments.shrink_to_fit ();
-
-  return SimplePath (std::move (segments), has_opening_scope_res);
-}
-
-SimplePathSegment
-MacroParser::parse_simple_path_segment ()
-{
-  const std::unique_ptr<Token> &tok = peek_token ();
-  switch (tok->get_id ())
-    {
-    case IDENTIFIER:
-      skip_token ();
-      return SimplePathSegment (tok->as_string (), tok->get_locus ());
-    case SUPER:
-      skip_token ();
-      return SimplePathSegment ("super", tok->get_locus ());
-    case SELF:
-      skip_token ();
-      return SimplePathSegment ("self", tok->get_locus ());
-    case CRATE:
-      skip_token ();
-      return SimplePathSegment ("crate", tok->get_locus ());
-    case DOLLAR_SIGN:
-      if (peek_token (1)->get_id () == CRATE)
-	{
-	  skip_token (1);
-	  return SimplePathSegment ("$crate", tok->get_locus ());
-	}
-      gcc_fallthrough ();
-    default:
-      rust_error_at (tok->get_locus (),
-		     "unexpected token '%s' in simple path segment",
-		     get_token_description (tok->get_id ()));
-      return SimplePathSegment::create_error ();
-    }
-}
-
-std::unique_ptr<MetaItemLitExpr>
-MacroParser::parse_meta_item_lit ()
-{
-  Location locus = peek_token ()->get_locus ();
-  LiteralExpr lit_expr (Analysis::NodeMapping::get_error (), parse_literal (),
-			locus);
-  return std::unique_ptr<MetaItemLitExpr> (
-    new MetaItemLitExpr (std::move (lit_expr)));
-}
-
-std::vector<std::unique_ptr<Token> >
-Token::to_token_stream () const
-{
-  /* initialisation list doesn't work as it needs copy constructor, so have to
-   * do this */
-  std::vector<std::unique_ptr<Token> > dummy_vector;
-  dummy_vector.reserve (1);
-  dummy_vector.push_back (std::unique_ptr<Token> (clone_token_impl ()));
-  return dummy_vector;
-}
-
-Attribute
-MetaNameValueStr::to_attribute () const
-{
-  LiteralExpr lit_expr (Analysis::NodeMapping::get_error (), str,
-			Literal::LitType::STRING,
-			PrimitiveCoreType::CORETYPE_STR, Location ());
-  return Attribute (SimplePath::from_str (ident),
-		    std::unique_ptr<AttrInputLiteral> (
-		      new AttrInputLiteral (std::move (lit_expr))));
-}
-
-Attribute
-MetaItemPath::to_attribute () const
-{
-  return Attribute (path, nullptr);
-}
-
-Attribute
-MetaItemSeq::to_attribute () const
-{
-  std::vector<std::unique_ptr<MetaItemInner> > new_seq;
-  new_seq.reserve (seq.size ());
-  for (const auto &e : seq)
-    new_seq.push_back (e->clone_meta_item_inner ());
-
-  std::unique_ptr<AttrInputMetaItemContainer> new_seq_container (
-    new AttrInputMetaItemContainer (std::move (new_seq)));
-  return Attribute (path, std::move (new_seq_container));
-}
-
-Attribute
-MetaWord::to_attribute () const
-{
-  return Attribute (SimplePath::from_str (ident), nullptr);
-}
-
-Attribute
-MetaListPaths::to_attribute () const
-{
-  /* probably one of the most annoying conversions - have to lose specificity by
-   * turning it into just AttrInputMetaItemContainer (i.e. paths-only nature is
-   * no longer known). If conversions back are required, might have to do a
-   * "check all are paths" pass or something. */
-
-  std::vector<std::unique_ptr<MetaItemInner> > new_seq;
-  new_seq.reserve (paths.size ());
-  for (const auto &e : paths)
-    new_seq.push_back (std::unique_ptr<MetaItemPath> (new MetaItemPath (e)));
-
-  std::unique_ptr<AttrInputMetaItemContainer> new_seq_container (
-    new AttrInputMetaItemContainer (std::move (new_seq)));
-  return Attribute (SimplePath::from_str (ident),
-		    std::move (new_seq_container));
-}
-
-Attribute
-MetaListNameValueStr::to_attribute () const
-{
-  std::vector<std::unique_ptr<MetaItemInner> > new_seq;
-  new_seq.reserve (strs.size ());
-  for (const auto &e : strs)
-    new_seq.push_back (
-      std::unique_ptr<MetaNameValueStr> (new MetaNameValueStr (e)));
-
-  std::unique_ptr<AttrInputMetaItemContainer> new_seq_container (
-    new AttrInputMetaItemContainer (std::move (new_seq)));
-  return Attribute (SimplePath::from_str (ident),
-		    std::move (new_seq_container));
-}
-
-Attribute
-MetaItemPathLit::to_attribute () const
-{
-  return Attribute (path, std::unique_ptr<AttrInputLiteral> (
-			    new AttrInputLiteral (lit)));
-}
-
-/* Visitor implementations - these are short but inlining can't happen anyway
- * due to virtual functions and I didn't want to make the ast header includes
- * any longer than they already are. */
-
-void
-Token::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-DelimTokenTree::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
 }
 
 void
@@ -5047,24 +3960,6 @@ QualifiedPathInType::accept_vis (HIRVisitor &vis)
 
 void
 LiteralExpr::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-AttrInputLiteral::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-MetaItemLitExpr::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-MetaItemPathLit::accept_vis (HIRVisitor &vis)
 {
   vis.visit (*this);
 }
@@ -5592,12 +4487,6 @@ TraitItemFunc::accept_vis (HIRVisitor &vis)
 }
 
 void
-TraitItemMethod::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
 TraitItemConst::accept_vis (HIRVisitor &vis)
 {
   vis.visit (*this);
@@ -5616,13 +4505,7 @@ Trait::accept_vis (HIRVisitor &vis)
 }
 
 void
-InherentImpl::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-TraitImpl::accept_vis (HIRVisitor &vis)
+ImplBlock::accept_vis (HIRVisitor &vis)
 {
   vis.visit (*this);
 }
@@ -5641,36 +4524,6 @@ ExternalFunctionItem::accept_vis (HIRVisitor &vis)
 
 void
 ExternBlock::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-MacroMatchFragment::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-MacroMatchRepetition::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-MacroMatcher::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-MacroRulesDefinition::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-MacroInvocation::accept_vis (HIRVisitor &vis)
 {
   vis.visit (*this);
 }
@@ -5903,46 +4756,5 @@ BareFunctionType::accept_vis (HIRVisitor &vis)
   vis.visit (*this);
 }
 
-void
-MetaItemSeq::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-MetaItemPath::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-MetaListPaths::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-MetaNameValueStr::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-MetaListNameValueStr::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-AttrInputMetaItemContainer::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-MetaWord::accept_vis (HIRVisitor &vis)
-{
-  vis.visit (*this);
-}
 } // namespace HIR
 } // namespace Rust

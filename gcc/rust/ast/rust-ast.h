@@ -38,6 +38,7 @@ struct Session;
 namespace AST {
 // foward decl: ast visitor
 class ASTVisitor;
+using AttrVec = std::vector<Attribute>;
 
 // Delimiter types - used in macros and whatever.
 enum DelimType
@@ -181,7 +182,7 @@ public:
 	str = lexer_token_ptr->get_str ();
 
 	// DEBUG
-	fprintf (stderr, "ast token created with str '%s'\n", str.c_str ());
+	rust_debug ("ast token created with str '%s'", str.c_str ());
       }
     else
       {
@@ -189,14 +190,14 @@ public:
 	str = lexer_token_ptr->get_token_description ();
 
 	// DEBUG
-	fprintf (stderr, "ast token created with string '%s'\n", str.c_str ());
+	rust_debug ("ast token created with string '%s'", str.c_str ());
       }
 
     // DEBUG
     if (lexer_token_ptr->should_have_str () && !lexer_token_ptr->has_str ())
       {
-	fprintf (stderr,
-		 "BAD: for token '%s', should have string but does not!\n",
+	rust_debug (
+		 "BAD: for token '%s', should have string but does not!",
 		 lexer_token_ptr->get_token_description ());
       }
   }
@@ -583,7 +584,7 @@ public:
     return std::unique_ptr<MetaItemInner> (clone_meta_item_inner_impl ());
   }
 
-  virtual ~MetaItemInner () {}
+  virtual ~MetaItemInner ();
 
   virtual std::string as_string () const = 0;
 
@@ -591,10 +592,7 @@ public:
 
   /* HACK: used to simplify parsing - creates a copy of that type, or returns
    * null */
-  virtual std::unique_ptr<MetaNameValueStr> to_meta_name_value_str () const
-  {
-    return nullptr;
-  }
+  virtual std::unique_ptr<MetaNameValueStr> to_meta_name_value_str () const;
 
   // HACK: used to simplify parsing - same thing
   virtual SimplePath to_path_item () const
@@ -1232,6 +1230,8 @@ class LifetimeParam : public GenericParam
   Location locus;
 
 public:
+  Lifetime get_lifetime () const { return lifetime; }
+
   // Returns whether the lifetime param has any lifetime bounds.
   bool has_lifetime_bounds () const { return !lifetime_bounds.empty (); }
 
@@ -1282,8 +1282,12 @@ class MacroItem : public Item
 class TraitItem
 {
 protected:
+  TraitItem () : node_id (Analysis::Mappings::get ()->get_next_node_id ()) {}
+
   // Clone function implementation as pure virtual method
   virtual TraitItem *clone_trait_item_impl () const = 0;
+
+  NodeId node_id;
 
 public:
   virtual ~TraitItem () {}
@@ -1300,6 +1304,8 @@ public:
 
   virtual void mark_for_strip () = 0;
   virtual bool is_marked_for_strip () const = 0;
+
+  NodeId get_node_id () const { return node_id; }
 };
 
 /* Abstract base class for items used within an inherent impl block (the impl
@@ -1611,6 +1617,7 @@ public:
   }
 
   NodeId get_node_id () const { return node_id; }
+  const std::vector<Attribute> &get_inner_attrs () const { return inner_attrs; }
 };
 
 // Base path expression AST node - abstract

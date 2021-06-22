@@ -16,6 +16,7 @@
 // along with GCC; see the file COPYING3.  If not see
 // <http://www.gnu.org/licenses/>.
 
+#include "rust-diagnostics.h"
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
@@ -165,7 +166,7 @@ grs_langhook_init_options_struct (struct gcc_options * /* opts */)
 static void
 grs_langhook_parse_file (void)
 {
-  fprintf (stderr, "Preparing to parse files. \n");
+  rust_debug ("Preparing to parse files. ");
 
   session.parse_files (num_in_fnames, in_fnames);
 }

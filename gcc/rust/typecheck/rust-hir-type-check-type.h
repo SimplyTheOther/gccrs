@@ -118,18 +118,20 @@ public:
   {
     // lookup the Node this resolves to
     NodeId ref;
-    if (!resolver->lookup_resolved_type (path.get_mappings ().get_nodeid (),
-					 &ref))
+    auto nid = path.get_mappings ().get_nodeid ();
+    if (!resolver->lookup_resolved_type (nid, &ref))
       {
 	rust_fatal_error (path.get_locus (),
-			  "Failed to resolve node id to HIR");
+			  "failed to resolve node '%d' to HIR", nid);
 	return;
       }
 
     HirId hir_lookup;
     if (!context->lookup_type_by_node_id (ref, &hir_lookup))
       {
-	rust_error_at (path.get_locus (), "failed to lookup HIR node");
+	rust_error_at (path.get_locus (),
+		       "failed to lookup HIR %d for node '%s'", ref,
+		       path.as_string ().c_str ());
 	return;
       }
 
@@ -168,7 +170,7 @@ public:
     else if (!args.is_empty ())
       {
 	rust_error_at (path.get_locus (),
-		       "TypePath %s declares generic argument's but "
+		       "TypePath %s declares generic arguments but "
 		       "the type %s does not have any",
 		       path.as_string ().c_str (),
 		       translated->as_string ().c_str ());
@@ -209,8 +211,7 @@ private:
       {
 	std::string sym = mapping.get_param_ty ()->get_symbol ();
 	param_tys.insert (sym);
-	param_location_map[sym]
-	  = mapping.get_generic_param ()->get_locus_slow ();
+	param_location_map[sym] = mapping.get_generic_param ().get_locus ();
       }
 
     std::set<std::string> args;
@@ -254,6 +255,11 @@ public:
 
   void visit (HIR::TypeParam &param) override
   {
+    TyTy::BaseType *default_ty_param = nullptr;
+    if (param.has_type ())
+      {
+	default_ty_param = TypeCheckType::Resolve (param.get_type ().get ());
+      }
     resolved = new TyTy::ParamType (param.get_type_representation (),
 				    param.get_mappings ().get_hirid (), param);
   }

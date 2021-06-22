@@ -3150,7 +3150,7 @@ MacroExpander::parse_macro_to_meta_item (AST::MacroInvocData &invoc)
 
   if (converted_input == nullptr)
     {
-      fprintf (stderr, "DEBUG: failed to parse macro to meta item\n");
+      rust_debug ("DEBUG: failed to parse macro to meta item");
       // TODO: do something now? is this an actual error?
     }
   else
@@ -3293,7 +3293,7 @@ MacroExpander::expand_invoc (std::unique_ptr<AST::MacroInvocation> &invoc)
 /* Determines whether any cfg predicate is false and hence item with attributes
  * should be stripped. Note that attributes must be expanded before calling. */
 bool
-MacroExpander::fails_cfg (const std::vector<AST::Attribute> &attrs) const
+MacroExpander::fails_cfg (const AST::AttrVec &attrs) const
 {
   for (const auto &attr : attrs)
     {
@@ -3306,7 +3306,7 @@ MacroExpander::fails_cfg (const std::vector<AST::Attribute> &attrs) const
 /* Determines whether any cfg predicate is false and hence item with attributes
  * should be stripped. Will expand attributes as well. */
 bool
-MacroExpander::fails_cfg_with_expand (std::vector<AST::Attribute> &attrs) const
+MacroExpander::fails_cfg_with_expand (AST::AttrVec &attrs) const
 {
   // TODO: maybe have something that strips cfg attributes that evaluate true?
   for (auto &attr : attrs)
@@ -3318,18 +3318,17 @@ MacroExpander::fails_cfg_with_expand (std::vector<AST::Attribute> &attrs) const
 
 	  // DEBUG
 	  if (!attr.is_parsed_to_meta_item ())
-	    fprintf (stderr, "failed to parse attr to meta item, right before "
-			     "cfg predicate check\n");
+	    rust_debug ("failed to parse attr to meta item, right before "
+			"cfg predicate check");
 	  else
-	    fprintf (stderr, "attr has been successfully parsed to meta item, "
-			     "right before cfg predicate check\n");
+	    rust_debug ("attr has been successfully parsed to meta item, "
+			"right before cfg predicate check");
 
 	  if (!attr.check_cfg_predicate (session))
 	    {
 	      // DEBUG
-	      fprintf (
-		stderr,
-		"cfg predicate failed for attribute: \033[0;31m'%s'\033[0m\n",
+	      rust_debug (
+		"cfg predicate failed for attribute: \033[0;31m'%s'\033[0m",
 		attr.as_string ().c_str ());
 
 	      return true;
@@ -3337,10 +3336,9 @@ MacroExpander::fails_cfg_with_expand (std::vector<AST::Attribute> &attrs) const
 	  else
 	    {
 	      // DEBUG
-	      fprintf (stderr,
-		       "cfg predicate succeeded for attribute: "
-		       "\033[0;31m'%s'\033[0m\n",
-		       attr.as_string ().c_str ());
+	      rust_debug ("cfg predicate succeeded for attribute: "
+			  "\033[0;31m'%s'\033[0m",
+			  attr.as_string ().c_str ());
 	    }
 	}
     }
@@ -3349,7 +3347,7 @@ MacroExpander::fails_cfg_with_expand (std::vector<AST::Attribute> &attrs) const
 
 // Expands cfg_attr attributes.
 void
-MacroExpander::expand_cfg_attrs (std::vector<AST::Attribute> &attrs)
+MacroExpander::expand_cfg_attrs (AST::AttrVec &attrs)
 {
   for (std::size_t i = 0; i < attrs.size (); i++)
     {
@@ -3362,8 +3360,7 @@ MacroExpander::expand_cfg_attrs (std::vector<AST::Attribute> &attrs)
 	  if (attr.check_cfg_predicate (session))
 	    {
 	      // split off cfg_attr
-	      std::vector<AST::Attribute> new_attrs
-		= attr.separate_cfg_attrs ();
+	      AST::AttrVec new_attrs = attr.separate_cfg_attrs ();
 
 	      // remove attr from vector
 	      attrs.erase (attrs.begin () + i);

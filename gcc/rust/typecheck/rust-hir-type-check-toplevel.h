@@ -55,12 +55,24 @@ public:
       {
 	for (auto &generic_param : struct_decl.get_generic_params ())
 	  {
-	    auto param_type
-	      = TypeResolveGenericParam::Resolve (generic_param.get ());
-	    context->insert_type (generic_param->get_mappings (), param_type);
+	    switch (generic_param.get ()->get_kind ())
+	      {
+	      case HIR::GenericParam::GenericKind::LIFETIME:
+		// Skipping Lifetime completely until better handling.
+		break;
 
-	    substitutions.push_back (
-	      TyTy::SubstitutionParamMapping (generic_param, param_type));
+		case HIR::GenericParam::GenericKind::TYPE: {
+		  auto param_type
+		    = TypeResolveGenericParam::Resolve (generic_param.get ());
+		  context->insert_type (generic_param->get_mappings (),
+					param_type);
+
+		  substitutions.push_back (TyTy::SubstitutionParamMapping (
+		    static_cast<HIR::TypeParam &> (*generic_param),
+		    param_type));
+		}
+		break;
+	      }
 	  }
       }
 
@@ -95,12 +107,24 @@ public:
       {
 	for (auto &generic_param : struct_decl.get_generic_params ())
 	  {
-	    auto param_type
-	      = TypeResolveGenericParam::Resolve (generic_param.get ());
-	    context->insert_type (generic_param->get_mappings (), param_type);
+	    switch (generic_param.get ()->get_kind ())
+	      {
+	      case HIR::GenericParam::GenericKind::LIFETIME:
+		// Skipping Lifetime completely until better handling.
+		break;
 
-	    substitutions.push_back (
-	      TyTy::SubstitutionParamMapping (generic_param, param_type));
+		case HIR::GenericParam::GenericKind::TYPE: {
+		  auto param_type
+		    = TypeResolveGenericParam::Resolve (generic_param.get ());
+		  context->insert_type (generic_param->get_mappings (),
+					param_type);
+
+		  substitutions.push_back (TyTy::SubstitutionParamMapping (
+		    static_cast<HIR::TypeParam &> (*generic_param),
+		    param_type));
+		}
+		break;
+	      }
 	  }
       }
 
@@ -152,12 +176,24 @@ public:
       {
 	for (auto &generic_param : function.get_generic_params ())
 	  {
-	    auto param_type
-	      = TypeResolveGenericParam::Resolve (generic_param.get ());
-	    context->insert_type (generic_param->get_mappings (), param_type);
+	    switch (generic_param.get ()->get_kind ())
+	      {
+	      case HIR::GenericParam::GenericKind::LIFETIME:
+		// Skipping Lifetime completely until better handling.
+		break;
 
-	    substitutions.push_back (
-	      TyTy::SubstitutionParamMapping (generic_param, param_type));
+		case HIR::GenericParam::GenericKind::TYPE: {
+		  auto param_type
+		    = TypeResolveGenericParam::Resolve (generic_param.get ());
+		  context->insert_type (generic_param->get_mappings (),
+					param_type);
+
+		  substitutions.push_back (TyTy::SubstitutionParamMapping (
+		    static_cast<HIR::TypeParam &> (*generic_param),
+		    param_type));
+		}
+		break;
+	      }
 	  }
       }
 
@@ -193,24 +229,37 @@ public:
       }
 
     auto fnType = new TyTy::FnType (function.get_mappings ().get_hirid (),
+				    function.get_function_name (), false,
 				    std::move (params), ret_type,
 				    std::move (substitutions));
     context->insert_type (function.get_mappings (), fnType);
   }
 
-  void visit (HIR::InherentImpl &impl_block) override
+  void visit (HIR::ImplBlock &impl_block) override
   {
     std::vector<TyTy::SubstitutionParamMapping> substitutions;
     if (impl_block.has_generics ())
       {
 	for (auto &generic_param : impl_block.get_generic_params ())
 	  {
-	    auto param_type
-	      = TypeResolveGenericParam::Resolve (generic_param.get ());
-	    context->insert_type (generic_param->get_mappings (), param_type);
+	    switch (generic_param.get ()->get_kind ())
+	      {
+	      case HIR::GenericParam::GenericKind::LIFETIME:
+		// Skipping Lifetime completely until better handling.
+		break;
 
-	    substitutions.push_back (
-	      TyTy::SubstitutionParamMapping (generic_param, param_type));
+		case HIR::GenericParam::GenericKind::TYPE: {
+		  auto param_type
+		    = TypeResolveGenericParam::Resolve (generic_param.get ());
+		  context->insert_type (generic_param->get_mappings (),
+					param_type);
+
+		  substitutions.push_back (TyTy::SubstitutionParamMapping (
+		    static_cast<HIR::TypeParam &> (*generic_param),
+		    param_type));
+		}
+		break;
+	      }
 	  }
       }
 

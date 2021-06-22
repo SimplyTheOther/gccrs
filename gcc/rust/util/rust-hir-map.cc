@@ -70,11 +70,7 @@ NodeMapping::get_defid () const
 DefId
 NodeMapping::get_defid (CrateNum crate_num, LocalDefId local_defid)
 {
-  DefId val = 0;
-  val |= crate_num;
-  val = val << sizeof (uint32_t);
-  val |= local_defid;
-  return val;
+  return ((uint64_t) crate_num << 32) | local_defid;
 }
 
 std::string
@@ -107,7 +103,7 @@ Mappings::get ()
 {
   static std::unique_ptr<Mappings> instance;
   if (!instance)
-    instance = std::move (std::unique_ptr<Mappings> (new Mappings ()));
+    instance = std::unique_ptr<Mappings> (new Mappings ());
 
   return instance.get ();
 }
@@ -125,18 +121,23 @@ Mappings::set_current_crate (CrateNum crateNum)
 }
 
 CrateNum
-Mappings::get_current_crate ()
+Mappings::setup_crate_mappings (std::string crate_name)
 {
-  // HACK
-  if (hirIdIter.find (currentCrateNum) == hirIdIter.end ())
-    {
-      hirIdIter[currentCrateNum] = UNKNOWN_HIRID;
-      nodeIdIter[currentCrateNum] = UNKNOWN_NODEID;
-      localIdIter[currentCrateNum] = UNKNOWN_LOCAL_DEFID;
-      nodeIdToHirMappings[currentCrateNum] = {};
-      locations[currentCrateNum] = {};
-    }
+  CrateNum crate_num = get_next_crate_num ();
 
+  hirIdIter[crate_num] = UNKNOWN_HIRID;
+  nodeIdIter[crate_num] = UNKNOWN_NODEID;
+  localIdIter[crate_num] = UNKNOWN_LOCAL_DEFID;
+  nodeIdToHirMappings[crate_num] = {};
+  locations[crate_num] = {};
+  crate_names[crate_num] = crate_name;
+
+  return crate_num;
+}
+
+CrateNum
+Mappings::get_current_crate () const
+{
   return currentCrateNum;
 }
 
@@ -215,14 +216,14 @@ Mappings::insert_hir_crate (HIR::Crate *crate)
 void
 Mappings::insert_defid_mapping (DefId id, HIR::Item *item)
 {
-  CrateNum crateNum = (id & DEF_ID_CRATE_MASK) >> sizeof (uint32_t);
-  LocalDefId localDefId = id & DEF_ID_LOCAL_DEF_MASK;
+  CrateNum crate_num = (id & DEF_ID_CRATE_MASK) >> 32;
+  LocalDefId local_def_id = id & DEF_ID_LOCAL_DEF_MASK;
 
   rust_assert (lookup_defid (id) == nullptr);
-  rust_assert (lookup_local_defid (crateNum, localDefId) == nullptr);
+  rust_assert (lookup_local_defid (crate_num, local_def_id) == nullptr);
 
   defIdMappings[id] = item;
-  insert_local_defid_mapping (crateNum, localDefId, item);
+  insert_local_defid_mapping (crate_num, local_def_id, item);
 }
 
 HIR::Item *
@@ -260,16 +261,15 @@ Mappings::lookup_hir_item (CrateNum crateNum, HirId id)
 
 void
 Mappings::insert_hir_implitem (CrateNum crateNum, HirId id,
-			       HirId parent_impl_id,
-			       HIR::InherentImplItem *item)
+			       HirId parent_impl_id, HIR::ImplItem *item)
 {
   rust_assert (lookup_hir_implitem (crateNum, id, nullptr) == nullptr);
   hirImplItemMappings[crateNum][id]
-    = std::pair<HirId, HIR::InherentImplItem *> (parent_impl_id, item);
+    = std::pair<HirId, HIR::ImplItem *> (parent_impl_id, item);
   nodeIdToHirMappings[crateNum][item->get_impl_mappings ().get_nodeid ()] = id;
 }
 
-HIR::InherentImplItem *
+HIR::ImplItem *
 Mappings::lookup_hir_implitem (CrateNum crateNum, HirId id,
 			       HirId *parent_impl_id)
 {
@@ -281,7 +281,7 @@ Mappings::lookup_hir_implitem (CrateNum crateNum, HirId id,
   if (iy == it->second.end ())
     return nullptr;
 
-  std::pair<HirId, HIR::InherentImplItem *> &ref = iy->second;
+  std::pair<HirId, HIR::ImplItem *> &ref = iy->second;
   if (parent_impl_id != nullptr)
     *parent_impl_id = ref.first;
 
@@ -526,7 +526,7 @@ Mappings::resolve_nodeid_to_stmt (CrateNum crate, NodeId id, HIR::Stmt **stmt)
 
 void
 Mappings::iterate_impl_items (
-  std::function<bool (HirId, HIR::InherentImplItem *, HIR::InherentImpl *)> cb)
+  std::function<bool (HirId, HIR::ImplItem *, HIR::ImplBlock *)> cb)
 {
   for (auto it = hirImplItemMappings.begin (); it != hirImplItemMappings.end ();
        it++)

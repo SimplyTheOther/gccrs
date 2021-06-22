@@ -24,7 +24,6 @@
 #include "rust-tyty.h"
 #include "rust-tyty-call.h"
 #include "rust-hir-type-check-struct-field.h"
-#include "rust-hir-method-resolve.h"
 #include "rust-hir-path-probe.h"
 #include "rust-substitution-mapper.h"
 #include "rust-hir-const-fold.h"
@@ -221,44 +220,103 @@ public:
 		       "failed to resolve the PathExprSegment to any Method");
 	return;
       }
-
-    // filter all methods
-    auto possible_methods = MethodResolution::Probe (candidates);
-    if (possible_methods.size () == 0)
-      {
-	rust_error_at (expr.get_method_name ().get_locus (),
-		       "no method named %s found in scope",
-		       expr.get_method_name ().as_string ().c_str ());
-	return;
-      }
-    else if (possible_methods.size () > 1)
+    else if (candidates.size () > 1)
       {
 	ReportMultipleCandidateError::Report (
-	  possible_methods, expr.get_method_name ().get_segment (),
+	  candidates, expr.get_method_name ().get_segment (),
 	  expr.get_method_name ().get_locus ());
 	return;
       }
 
-    auto resolved_candidate = possible_methods.at (0);
-    HIR::InherentImplItem *resolved_method = resolved_candidate.impl_item;
+    auto resolved_candidate = candidates.at (0);
+    HIR::ImplItem *resolved_method = resolved_candidate.impl_item;
     TyTy::BaseType *lookup_tyty = resolved_candidate.ty;
 
-    TyTy::BaseType *lookup = lookup_tyty;
-    if (lookup_tyty->get_kind () == TyTy::TypeKind::FNDEF)
+    if (lookup_tyty->get_kind () != TyTy::TypeKind::FNDEF)
       {
-	TyTy::FnType *fn = static_cast<TyTy::FnType *> (lookup);
-	if (receiver_tyty->get_kind () == TyTy::TypeKind::ADT)
+	RichLocation r (expr.get_method_name ().get_locus ());
+	r.add_range (resolved_method->get_impl_locus ());
+	rust_error_at (r, "associated impl item is not a method");
+	return;
+      }
+
+    TyTy::BaseType *lookup = lookup_tyty;
+    TyTy::FnType *fn = static_cast<TyTy::FnType *> (lookup);
+    if (!fn->is_method ())
+      {
+	RichLocation r (expr.get_method_name ().get_locus ());
+	r.add_range (resolved_method->get_impl_locus ());
+	rust_error_at (r, "associated function is not a method");
+	return;
+      }
+
+    if (receiver_tyty->get_kind () == TyTy::TypeKind::ADT)
+      {
+	TyTy::ADTType *adt = static_cast<TyTy::ADTType *> (receiver_tyty);
+	if (adt->has_substitutions () && fn->needs_substitution ())
 	  {
-	    TyTy::ADTType *adt = static_cast<TyTy::ADTType *> (receiver_tyty);
-	    if (adt->has_substitutions () && fn->needs_substitution ())
+	    // consider the case where we have:
+	    //
+	    // struct Foo<X,Y>(X,Y);
+	    //
+	    // impl<T> Foo<T, i32> {
+	    //   fn test<X>(self, a:X) -> (T,X) { (self.0, a) }
+	    // }
+	    //
+	    // In this case we end up with an fn type of:
+	    //
+	    // fn <T,X> test(self:Foo<T,i32>, a:X) -> (T,X)
+	    //
+	    // This means the instance or self we are calling this method for
+	    // will be substituted such that we can get the inherited type
+	    // arguments but then need to use the turbo fish if available or
+	    // infer the remaining arguments. Luckily rust does not allow for
+	    // default types GenericParams on impl blocks since these must
+	    // always be at the end of the list
+
+	    auto s = fn->get_self_type ();
+	    rust_assert (s->can_eq (adt));
+	    rust_assert (s->get_kind () == TyTy::TypeKind::ADT);
+	    TyTy::ADTType *self_adt = static_cast<TyTy::ADTType *> (s);
+
+	    // we need to grab the Self substitutions as the inherit type
+	    // parameters for this
+	    if (self_adt->needs_substitution ())
 	      {
 		rust_assert (adt->was_substituted ());
-		auto used_args_in_prev_segment = GetUsedSubstArgs::From (adt);
-		lookup
-		  = SubstMapperInternal::Resolve (fn,
-						  used_args_in_prev_segment);
+
+		TyTy::SubstitutionArgumentMappings used_args_in_prev_segment
+		  = GetUsedSubstArgs::From (adt);
+
+		TyTy::SubstitutionArgumentMappings inherit_type_args
+		  = self_adt->solve_mappings_from_receiver_for_self (
+		    used_args_in_prev_segment);
+
+		// there may or may not be inherited type arguments
+		if (!inherit_type_args.is_error ())
+		  {
+		    // need to apply the inherited type arguments to the
+		    // function
+		    lookup = fn->handle_substitions (inherit_type_args);
+		  }
 	      }
 	  }
+      }
+
+    // apply any remaining generic arguments
+    if (expr.get_method_name ().has_generic_args ())
+      {
+	HIR::GenericArgs &args = expr.get_method_name ().get_generic_args ();
+	lookup
+	  = SubstMapper::Resolve (lookup, expr.get_method_name ().get_locus (),
+				  &args);
+	if (lookup->get_kind () == TyTy::TypeKind::ERROR)
+	  return;
+      }
+    else if (lookup->needs_generic_substitutions ())
+      {
+	lookup = SubstMapper::InferSubst (lookup,
+					  expr.get_method_name ().get_locus ());
       }
 
     TyTy::BaseType *function_ret_tyty
@@ -596,7 +654,8 @@ public:
 		      == TyTy::InferType::INTEGRAL));
 	  if (!valid)
 	    {
-	      rust_error_at (expr.get_locus (), "cannot apply unary ! to %s",
+	      rust_error_at (expr.get_locus (),
+			     "cannot apply unary %<!%> to %s",
 			     negated_expr_ty->as_string ().c_str ());
 	      return;
 	    }
@@ -696,6 +755,7 @@ public:
   void visit (HIR::ArrayExpr &expr) override
   {
     HIR::ArrayElems *elements = expr.get_internal_elements ();
+    root_array_expr_locus = expr.get_locus ();
 
     elements->accept_vis (*this);
     if (infered_array_elems == nullptr)
@@ -717,7 +777,8 @@ public:
       return true;
     });
 
-    infered_array_elems = TyTy::TyVar::get_implicit_infer_var ().get_tyty ();
+    infered_array_elems
+      = TyTy::TyVar::get_implicit_infer_var (root_array_expr_locus).get_tyty ();
 
     for (auto &type : types)
       {
@@ -804,11 +865,15 @@ public:
 
   void visit (HIR::PathInExpression &expr) override
   {
-    // resolve root_segment
-    TyTy::BaseType *tyseg = resolve_root_path (expr);
+    NodeId resolved_node_id = UNKNOWN_NODEID;
+
+    size_t offset = -1;
+    TyTy::BaseType *tyseg
+      = resolve_root_path (expr, &offset, &resolved_node_id);
     if (tyseg->get_kind () == TyTy::TypeKind::ERROR)
       return;
-    else if (expr.get_num_segments () == 1)
+
+    if (expr.get_num_segments () == 1)
       {
 	Location locus = expr.get_segments ().back ().get_locus ();
 
@@ -826,8 +891,7 @@ public:
       }
 
     TyTy::BaseType *prev_segment = tyseg;
-    NodeId resolved_node_id = UNKNOWN_NODEID;
-    for (size_t i = 1; i < expr.get_num_segments (); i++)
+    for (size_t i = offset; i < expr.get_num_segments (); i++)
       {
 	HIR::PathExprSegment &seg = expr.get_segments ().at (i);
 
@@ -920,7 +984,8 @@ public:
     if (!block_expr->is_unit ())
       {
 	rust_error_at (expr.get_loop_block ()->get_locus_slow (),
-		       "expected () got %s", block_expr->as_string ().c_str ());
+		       "expected %<()%> got %s",
+		       block_expr->as_string ().c_str ());
 	return;
       }
 
@@ -948,7 +1013,8 @@ public:
     if (!block_expr->is_unit ())
       {
 	rust_error_at (expr.get_loop_block ()->get_locus_slow (),
-		       "expected () got %s", block_expr->as_string ().c_str ());
+		       "expected %<()%> got %s",
+		       block_expr->as_string ().c_str ());
 	return;
       }
 
@@ -960,7 +1026,7 @@ public:
   {
     if (!inside_loop)
       {
-	rust_error_at (expr.get_locus (), "cannot `break` outside of a loop");
+	rust_error_at (expr.get_locus (), "cannot %<break%> outside of a loop");
 	return;
       }
 
@@ -973,7 +1039,7 @@ public:
 	if (loop_context->get_kind () == TyTy::TypeKind::ERROR)
 	  {
 	    rust_error_at (expr.get_locus (),
-			   "can only break with a value inside `loop`");
+			   "can only break with a value inside %<loop%>");
 	    return;
 	  }
 
@@ -989,7 +1055,7 @@ public:
     if (!inside_loop)
       {
 	rust_error_at (expr.get_locus (),
-		       "cannot `continue` outside of a loop");
+		       "cannot %<continue%> outside of a loop");
 	return;
       }
 
@@ -1028,69 +1094,134 @@ private:
       folded_array_capacity (nullptr), inside_loop (inside_loop)
   {}
 
-  TyTy::BaseType *resolve_root_path (HIR::PathInExpression &expr)
+  TyTy::BaseType *resolve_root_path (HIR::PathInExpression &expr,
+				     size_t *offset,
+				     NodeId *root_resolved_node_id)
   {
-    HIR::PathExprSegment &root = expr.get_root_seg ();
-    NodeId ast_node_id = root.get_mappings ().get_nodeid ();
-
-    // then lookup the reference_node_id
-    NodeId ref_node_id = UNKNOWN_NODEID;
-    if (resolver->lookup_resolved_name (ast_node_id, &ref_node_id))
+    TyTy::BaseType *root_tyty = nullptr;
+    *offset = 0;
+    for (size_t i = 0; i < expr.get_num_segments (); i++)
       {
-	// these ref_node_ids will resolve to a pattern declaration but we are
-	// interested in the definition that this refers to get the parent id
-	Definition def;
-	if (!resolver->lookup_definition (ref_node_id, &def))
+	HIR::PathExprSegment &seg = expr.get_segments ().at (i);
+	bool have_more_segments = i < expr.get_num_segments ();
+	bool is_root = *offset == 0;
+	NodeId ast_node_id = seg.get_mappings ().get_nodeid ();
+
+	// then lookup the reference_node_id
+	NodeId ref_node_id = UNKNOWN_NODEID;
+	if (resolver->lookup_resolved_name (ast_node_id, &ref_node_id))
 	  {
-	    rust_error_at (expr.get_locus (),
-			   "unknown reference for resolved name");
-	    return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
+	    // these ref_node_ids will resolve to a pattern declaration but we
+	    // are interested in the definition that this refers to get the
+	    // parent id
+	    Definition def;
+	    if (!resolver->lookup_definition (ref_node_id, &def))
+	      {
+		rust_error_at (expr.get_locus (),
+			       "unknown reference for resolved name");
+		return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
+	      }
+	    ref_node_id = def.parent;
 	  }
-	ref_node_id = def.parent;
-      }
-    else
-      {
-	resolver->lookup_resolved_type (ast_node_id, &ref_node_id);
-      }
-
-    if (ref_node_id == UNKNOWN_NODEID)
-      {
-	rust_error_at (root.get_locus (),
-		       "failed to type resolve root segment");
-	return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
-      }
-
-    // node back to HIR
-    HirId ref;
-    if (!mappings->lookup_node_to_hir (expr.get_mappings ().get_crate_num (),
-				       ref_node_id, &ref))
-      {
-	rust_error_at (expr.get_locus (), "reverse lookup failure");
-	return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
-      }
-
-    TyTy::BaseType *lookup = nullptr;
-    if (!context->lookup_type (ref, &lookup))
-      {
-	rust_error_at (expr.get_locus (), "failed to resolve root segment");
-	return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
-      }
-
-    // turbo-fish segment path::<ty>
-    if (root.has_generic_args ())
-      {
-	if (!lookup->can_substitute ())
+	else
 	  {
-	    rust_error_at (expr.get_locus (),
-			   "substitutions not supported for %s",
-			   lookup->as_string ().c_str ());
-	    return new TyTy::ErrorType (lookup->get_ref ());
+	    resolver->lookup_resolved_type (ast_node_id, &ref_node_id);
 	  }
-	lookup = SubstMapper::Resolve (lookup, expr.get_locus (),
-				       &root.get_generic_args ());
+
+	if (ref_node_id == UNKNOWN_NODEID)
+	  {
+	    if (is_root)
+	      {
+		rust_error_at (seg.get_locus (),
+			       "failed to type resolve root segment");
+		return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
+	      }
+	    return root_tyty;
+	  }
+
+	// node back to HIR
+	HirId ref;
+	if (!mappings->lookup_node_to_hir (
+	      expr.get_mappings ().get_crate_num (), ref_node_id, &ref))
+	  {
+	    if (is_root)
+	      {
+		rust_error_at (seg.get_locus (), "reverse lookup failure");
+		return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
+	      }
+	    return root_tyty;
+	  }
+
+	// FIXME
+	// modules are not going to have an explicit TyTy.In this case we
+	// can probably do some kind of check. By looking up if the HirId ref
+	// node is a module and continue. If the path expression is single
+	// segment of module we can error with expected value but found module
+	// or something.
+	//
+	// Something like this
+	//
+	// bool seg_is_module = mappings->lookup_module (ref);
+	// if (seg_is_module)
+	//   {
+	//     if (have_more_segments)
+	//       continue;
+	//
+	//     rust_error_at (seg.get_locus (), "expected value");
+	//     return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
+	//   }
+
+	TyTy::BaseType *lookup = nullptr;
+	if (!context->lookup_type (ref, &lookup))
+	  {
+	    if (is_root)
+	      {
+		rust_error_at (seg.get_locus (),
+			       "failed to resolve root segment");
+		return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
+	      }
+	    return root_tyty;
+	  }
+
+	// if we have a previous segment type
+	if (root_tyty != nullptr)
+	  {
+	    // if this next segment needs substitution we must apply the
+	    // previous type arguments
+	    //
+	    // such as: GenericStruct::<_>::new(123, 456)
+	    if (lookup->needs_generic_substitutions ())
+	      {
+		if (!root_tyty->needs_generic_substitutions ())
+		  {
+		    auto used_args_in_prev_segment
+		      = GetUsedSubstArgs::From (root_tyty);
+		    lookup = SubstMapperInternal::Resolve (
+		      lookup, used_args_in_prev_segment);
+		  }
+	      }
+	  }
+
+	// turbo-fish segment path::<ty>
+	if (seg.has_generic_args ())
+	  {
+	    if (!lookup->can_substitute ())
+	      {
+		rust_error_at (seg.get_locus (),
+			       "substitutions not supported for %s",
+			       lookup->as_string ().c_str ());
+		return new TyTy::ErrorType (lookup->get_ref ());
+	      }
+	    lookup = SubstMapper::Resolve (lookup, expr.get_locus (),
+					   &seg.get_generic_args ());
+	  }
+
+	*root_resolved_node_id = ref_node_id;
+	*offset = *offset + 1;
+	root_tyty = lookup;
       }
 
-    return lookup;
+    return root_tyty;
   }
 
   bool
@@ -1152,6 +1283,7 @@ private:
      Stores the type of array elements, if `expr` is ArrayExpr. */
   TyTy::BaseType *infered_array_elems;
   Bexpression *folded_array_capacity;
+  Location root_array_expr_locus;
 
   bool inside_loop;
 }; // namespace Resolver
