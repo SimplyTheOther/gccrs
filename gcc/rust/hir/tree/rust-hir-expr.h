@@ -300,8 +300,6 @@ public:
 
   void accept_vis (HIRVisitor &vis) override;
 
-  Expr *get_expr () { return main_or_left_expr.get (); }
-
 protected:
   /* Use covariance to implement clone function as returning this object rather
    * than base */
@@ -1065,6 +1063,15 @@ public:
   }
 
   bool is_unit () const { return tuple_elems.size () == 0; }
+
+  void iterate (std::function<bool (Expr *)> cb)
+  {
+    for (auto &tuple_elem : tuple_elems)
+      {
+	if (!cb (tuple_elem.get ()))
+	  return;
+      }
+  }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -3380,6 +3387,8 @@ public:
 
   void accept_vis (HIRVisitor &vis) override;
 
+  std::unique_ptr<Expr> &get_cond () { return condition; }
+
 protected:
   /* Use covariance to implement clone function as returning this object rather
    * than base */
@@ -3442,6 +3451,8 @@ public:
   ForLoopExpr &operator= (ForLoopExpr &&other) = default;
 
   void accept_vis (HIRVisitor &vis) override;
+
+  std::unique_ptr<Expr> &get_iterator_expr () { return iterator_expr; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather

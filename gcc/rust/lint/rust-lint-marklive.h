@@ -39,6 +39,58 @@ public:
   void visit (HIR::PathInExpression &expr) override;
   void visit (HIR::IdentifierExpr &expr) override;
 
+  void visit (HIR::BorrowExpr &expr) override
+  {
+    expr.get_expr ().get ()->accept_vis (*this);
+  }
+
+  void visit (HIR::DereferenceExpr &expr) override
+  {
+    expr.get_expr ().get ()->accept_vis (*this);
+  }
+
+  void visit (HIR::NegationExpr &expr) override
+  {
+    expr.get_expr ().get ()->accept_vis (*this);
+  }
+
+  void visit (HIR::LazyBooleanExpr &expr) override
+  {
+    expr.get_lhs ()->accept_vis (*this);
+    expr.get_rhs ()->accept_vis (*this);
+  }
+
+  void visit (HIR::TypeCastExpr &expr) override
+  {
+    expr.get_expr ().get ()->accept_vis (*this);
+  }
+
+  void visit (HIR::GroupedExpr &expr) override
+  {
+    expr.get_expr_in_parens ()->accept_vis (*this);
+  }
+
+  void visit (HIR::ArrayExpr &expr) override
+  {
+    expr.get_internal_elements ()->accept_vis (*this);
+  }
+
+  void visit (HIR::ArrayElemsValues &expr) override
+  {
+    expr.iterate ([&] (HIR::Expr *expr) mutable -> bool {
+      expr->accept_vis (*this);
+      return true;
+    });
+  }
+
+  void visit (HIR::TupleExpr &expr) override
+  {
+    expr.iterate ([&] (HIR::Expr *expr) mutable -> bool {
+      expr->accept_vis (*this);
+      return true;
+    });
+  }
+
   void visit (HIR::BlockExpr &expr) override
   {
     expr.iterate_stmts ([&] (HIR::Stmt *s) mutable -> bool {
@@ -50,9 +102,45 @@ public:
 	expr.get_final_expr ().get ()->accept_vis (*this);
       }
   }
+
+  void visit (HIR::LoopExpr &expr) override
+  {
+    expr.get_loop_block ()->accept_vis (*this);
+  }
+
+  void visit (HIR::BreakExpr &expr) override
+  {
+    if (expr.has_break_expr ())
+      expr.get_expr ()->accept_vis (*this);
+  }
+
+  void visit (HIR::WhileLoopExpr &expr) override
+  {
+    expr.get_loop_block ()->accept_vis (*this);
+    expr.get_predicate_expr ()->accept_vis (*this);
+  }
+
   void visit (HIR::Function &function) override
   {
     function.get_definition ().get ()->accept_vis (*this);
+  }
+
+  void visit (HIR::ReturnExpr &expr) override
+  {
+    if (expr.has_return_expr ())
+      expr.get_expr ()->accept_vis (*this);
+  }
+
+  void visit (HIR::WhileLetLoopExpr &expr) override
+  {
+    expr.get_loop_block ()->accept_vis (*this);
+    expr.get_cond ()->accept_vis (*this);
+  }
+
+  void visit (HIR::ForLoopExpr &expr) override
+  {
+    expr.get_loop_block ()->accept_vis (*this);
+    expr.get_iterator_expr ()->accept_vis (*this);
   }
 
   void visit (HIR::ExprStmtWithoutBlock &stmt) override
@@ -113,12 +201,19 @@ public:
       }
   }
 
+  void visit (HIR::StructExprStruct &stct) override
+  {
+    stct.get_struct_name ().accept_vis (*this);
+  }
+
   void visit (HIR::StructExprStructFields &stct) override
   {
     stct.iterate ([&] (HIR::StructExprField *field) -> bool {
       field->accept_vis (*this);
       return true;
     });
+
+    stct.get_struct_name ().accept_vis (*this);
     if (stct.has_struct_base ())
       {
 	stct.struct_base->base_struct.get ()->accept_vis (*this);

@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020, 2021 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -942,23 +942,26 @@ Lexer::parse_in_exponent_part ()
 	}
 
       // parse another decimal number for exponent
-      auto str_length_pair = parse_in_decimal ();
-      str += str_length_pair.first;
-      additional_length_offset += str_length_pair.second;
+      auto str_length = parse_in_decimal ();
+      str += std::get<0> (str_length);
+      additional_length_offset += std::get<1> (str_length);
     }
   return std::make_pair (str, additional_length_offset);
 }
 
 // Parses a decimal integer.
-std::pair<std::string, int>
+std::tuple<std::string, int, bool>
 Lexer::parse_in_decimal ()
 {
+  /* A pure decimal contains only digits.  */
+  bool pure_decimal = true;
   int additional_length_offset = 0;
   std::string str;
   while (ISDIGIT (current_char) || current_char == '_')
     {
       if (current_char == '_')
 	{
+	  pure_decimal = false;
 	  // don't add _ to number
 	  skip_input ();
 	  current_char = peek_input ();
@@ -974,7 +977,7 @@ Lexer::parse_in_decimal ()
       skip_input ();
       current_char = peek_input ();
     }
-  return std::make_pair (str, additional_length_offset);
+  return std::make_tuple (str, additional_length_offset, pure_decimal);
 }
 
 /* Parses escapes (and string continues) in "byte" strings and characters. Does
@@ -1436,7 +1439,7 @@ Lexer::parse_byte_string (Location loc)
 
   str.shrink_to_fit ();
 
-  return Token::make_byte_string (loc, str);
+  return Token::make_byte_string (loc, std::move (str));
 }
 
 // Parses a raw byte string.
@@ -1509,7 +1512,7 @@ Lexer::parse_raw_byte_string (Location loc)
 
   str.shrink_to_fit ();
 
-  return Token::make_byte_string (loc, str);
+  return Token::make_byte_string (loc, std::move (str));
 }
 
 // Parses a raw identifier.
@@ -1559,7 +1562,7 @@ Lexer::parse_raw_identifier (Location loc)
     {
       str.shrink_to_fit ();
 
-      return Token::make_identifier (loc, str);
+      return Token::make_identifier (loc, std::move (str));
     }
 }
 
@@ -1623,7 +1626,7 @@ Lexer::parse_string (Location loc)
     }
 
   str.shrink_to_fit ();
-  return Token::make_string (loc, str);
+  return Token::make_string (loc, std::move (str));
 }
 
 // Parses an identifier or keyword.
@@ -1659,7 +1662,7 @@ Lexer::parse_identifier_or_keyword (Location loc)
 
   TokenId keyword = classify_keyword (str);
   if (keyword == IDENTIFIER)
-    return Token::make_identifier (loc, str);
+    return Token::make_identifier (loc, std::move (str));
   else
     return Token::make (keyword, loc);
 }
@@ -1736,7 +1739,7 @@ Lexer::parse_raw_string (Location loc, int initial_hash_count)
 
   str.shrink_to_fit ();
 
-  return Token::make_string (loc, str);
+  return Token::make_string (loc, std::move (str));
 }
 
 template <typename IsDigitFunc>
@@ -1797,7 +1800,7 @@ Lexer::parse_non_decimal_int_literal (Location loc, IsDigitFunc is_digit_func,
 						 : "<insert unknown base>")));
       return nullptr;
     }
-  return Token::make_int (loc, existent_str, type_hint);
+  return Token::make_int (loc, std::move (existent_str), type_hint);
 }
 
 // Parses a hex, binary or octal int literal.
@@ -1842,13 +1845,14 @@ Lexer::parse_decimal_int_or_float (Location loc)
   str += current_char;
 
   int length = 1;
+  bool first_zero = current_char == '0';
 
   current_char = peek_input ();
 
   // parse initial decimal integer (or first integer part of float) literal
-  auto initial_decimal_pair = parse_in_decimal ();
-  str += initial_decimal_pair.first;
-  length += initial_decimal_pair.second;
+  auto initial_decimal = parse_in_decimal ();
+  str += std::get<0> (initial_decimal);
+  length += std::get<1> (initial_decimal);
 
   // detect float literal
   if (current_char == '.' && is_float_digit (peek_input (1)))
@@ -1862,9 +1866,9 @@ Lexer::parse_decimal_int_or_float (Location loc)
       length++;
 
       // parse another decimal number for float
-      auto second_decimal_pair = parse_in_decimal ();
-      str += second_decimal_pair.first;
-      length += second_decimal_pair.second;
+      auto second_decimal = parse_in_decimal ();
+      str += std::get<0> (second_decimal);
+      length += std::get<1> (second_decimal);
 
       // parse in exponent part if it exists
       auto exponent_pair = parse_in_exponent_part ();
@@ -1889,7 +1893,7 @@ Lexer::parse_decimal_int_or_float (Location loc)
       current_column += length;
 
       str.shrink_to_fit ();
-      return Token::make_float (loc, str, type_hint);
+      return Token::make_float (loc, std::move (str), type_hint);
     }
   else if (current_char == '.' && check_valid_float_dot_end (peek_input (1)))
     {
@@ -1909,7 +1913,7 @@ Lexer::parse_decimal_int_or_float (Location loc)
       current_column += length;
 
       str.shrink_to_fit ();
-      return Token::make_float (loc, str, CORETYPE_UNKNOWN);
+      return Token::make_float (loc, std::move (str), CORETYPE_UNKNOWN);
     }
   else if (current_char == 'E' || current_char == 'e')
     {
@@ -1938,7 +1942,7 @@ Lexer::parse_decimal_int_or_float (Location loc)
       current_column += length;
 
       str.shrink_to_fit ();
-      return Token::make_float (loc, str, type_hint);
+      return Token::make_float (loc, std::move (str), type_hint);
     }
   else
     {
@@ -1947,12 +1951,19 @@ Lexer::parse_decimal_int_or_float (Location loc)
       // parse in type suffix if it exists
       auto type_suffix_pair = parse_in_type_suffix ();
       PrimitiveCoreType type_hint = type_suffix_pair.first;
+      /* A "real" pure decimal doesn't have a suffix and no zero prefix.  */
+      if (type_hint == CORETYPE_UNKNOWN)
+	{
+	  bool pure_decimal = std::get<2> (initial_decimal);
+	  if (pure_decimal && (!first_zero || str.size () == 1))
+	    type_hint = CORETYPE_PURE_DECIMAL;
+	}
       length += type_suffix_pair.second;
 
       current_column += length;
 
       str.shrink_to_fit ();
-      return Token::make_int (loc, str, type_hint);
+      return Token::make_int (loc, std::move (str), type_hint);
     }
 }
 
@@ -2026,7 +2037,7 @@ Lexer::parse_char_or_lifetime (Location loc)
 	  current_column += length;
 
 	  str.shrink_to_fit ();
-	  return Token::make_lifetime (loc, str);
+	  return Token::make_lifetime (loc, std::move (str));
 	}
       else
 	{

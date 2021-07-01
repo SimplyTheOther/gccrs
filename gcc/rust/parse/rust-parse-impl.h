@@ -495,7 +495,6 @@ Parser<ManagedTokenSource>::parse_inner_attribute ()
     return AST::Attribute::create_empty ();
 
   AST::Attribute actual_attribute = parse_attribute_body ();
-  lexer.skip_token ();
 
   if (!skip_token (RIGHT_SQUARE))
     return AST::Attribute::create_empty ();
@@ -785,6 +784,7 @@ Parser<ManagedTokenSource>::parse_attr_input ()
 	// create actual LiteralExpr
 	AST::LiteralExpr lit_expr (t->get_str (), lit_type, t->get_type_hint (),
 				   {}, t->get_locus ());
+	lexer.skip_token ();
 
 	std::unique_ptr<AST::AttrInput> attr_input_lit (
 	  new AST::AttrInputLiteral (std::move (lit_expr)));
@@ -3980,7 +3980,12 @@ Parser<ManagedTokenSource>::parse_struct (AST::Visibility vis,
       lexer.skip_token ();
 
       // parse tuple fields
-      std::vector<AST::TupleField> tuple_fields = parse_tuple_fields ();
+      std::vector<AST::TupleField> tuple_fields;
+      // Might be empty tuple for unit tuple struct.
+      if (lexer.peek_token ()->get_id () == RIGHT_PAREN)
+	tuple_fields = std::vector<AST::TupleField> ();
+      else
+	tuple_fields = parse_tuple_fields ();
 
       // tuple parameters must have closing parenthesis
       if (!skip_token (RIGHT_PAREN))
@@ -4410,7 +4415,12 @@ Parser<ManagedTokenSource>::parse_enum_item ()
 	// tuple enum item
 	lexer.skip_token ();
 
-	std::vector<AST::TupleField> tuple_fields = parse_tuple_fields ();
+	std::vector<AST::TupleField> tuple_fields;
+	// Might be empty tuple for unit tuple enum variant.
+	if (lexer.peek_token ()->get_id () == RIGHT_PAREN)
+	  tuple_fields = std::vector<AST::TupleField> ();
+	else
+	  tuple_fields = parse_tuple_fields ();
 
 	if (!skip_token (RIGHT_PAREN))
 	  {
@@ -14073,6 +14083,12 @@ Parser<ManagedTokenSource>::parse_tuple_index_expr (
   std::string index = index_tok->get_str ();
 
   // convert to integer
+  if (!index_tok->is_pure_decimal ())
+    {
+      Error error (index_tok->get_locus (),
+		   "tuple index should be a pure decimal literal");
+      add_error (std::move (error));
+    }
   int index_int = atoi (index.c_str ());
 
   Location locus = tuple_expr->get_locus_slow ();

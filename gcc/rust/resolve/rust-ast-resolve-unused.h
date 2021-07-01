@@ -35,8 +35,9 @@ public:
       bool ok = r->lookup_canonical_path (decl_node_id, &ident);
       rust_assert (ok);
 
+      bool name_starts_with_underscore = ident.get ().at (0) == '_';
       if (!r->have_references_for_node (decl_node_id)
-	  && ident.get ().at (0) != '_')
+	  && !name_starts_with_underscore)
 	{
 	  rust_warning_at (locus, 0, "unused name '%s'", ident.get ().c_str ());
 	}

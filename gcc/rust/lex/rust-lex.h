@@ -15,6 +15,12 @@ struct RAIIFile
 private:
   FILE *file;
 
+  void close ()
+  {
+    if (file != nullptr && file != stdin)
+      fclose (file);
+  }
+
 public:
   RAIIFile (const char *filename)
   {
@@ -31,17 +37,14 @@ public:
   RAIIFile (RAIIFile &&other) : file (other.file) { other.file = nullptr; }
   RAIIFile &operator= (RAIIFile &&other)
   {
+    close ();
     file = other.file;
     other.file = nullptr;
 
     return *this;
   }
 
-  ~RAIIFile ()
-  {
-    if (file != nullptr && file != stdin)
-      fclose (file);
-  }
+  ~RAIIFile () { close (); }
 
   FILE *get_raw () { return file; }
 };
@@ -68,7 +71,7 @@ private:
   // Builds a token from the input queue.
   TokenPtr build_token ();
 
-  std::pair<std::string, int> parse_in_decimal ();
+  std::tuple<std::string, int, bool> parse_in_decimal ();
   std::pair<std::string, int> parse_in_exponent_part ();
   std::pair<PrimitiveCoreType, int> parse_in_type_suffix ();
   std::tuple<char, int, bool> parse_escape (char opening_char);

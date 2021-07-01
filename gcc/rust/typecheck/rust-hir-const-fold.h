@@ -54,7 +54,7 @@ public:
   void visit (TyTy::TupleType &type) override
   {
     if (type.num_fields () == 0)
-      translated = backend->void_type ();
+      translated = backend->unit_type ();
     else
       gcc_unreachable ();
   }
@@ -341,7 +341,7 @@ public:
 
   void visit (HIR::NegationExpr &expr) override
   {
-    auto negated_expr = ConstFoldExpr::fold (expr.get_expr ());
+    auto negated_expr = ConstFoldExpr::fold (expr.get_expr ().get ());
     if (negated_expr == nullptr)
       return;
 

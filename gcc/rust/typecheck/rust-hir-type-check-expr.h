@@ -619,7 +619,8 @@ public:
 
   void visit (HIR::NegationExpr &expr) override
   {
-    auto negated_expr_ty = TypeCheckExpr::Resolve (expr.get_expr (), false);
+    auto negated_expr_ty
+      = TypeCheckExpr::Resolve (expr.get_expr ().get (), false);
 
     // https://doc.rust-lang.org/reference/expressions/operator-expr.html#negation-operators
     switch (expr.get_expr_type ())
@@ -826,6 +827,21 @@ public:
       = TypeCheckExpr::Resolve (elems.get_elem_to_copy (), false);
   }
 
+  // empty struct
+  void visit (HIR::StructExprStruct &struct_expr) override
+  {
+    TyTy::BaseType *struct_path_ty
+      = TypeCheckExpr::Resolve (&struct_expr.get_struct_name (), false);
+    if (struct_path_ty->get_kind () != TyTy::TypeKind::ADT)
+      {
+	rust_error_at (struct_expr.get_struct_name ().get_locus (),
+		       "expected an ADT type for constructor");
+	return;
+      }
+
+    infered = struct_path_ty;
+  }
+
   void visit (HIR::StructExprStructFields &struct_expr) override
   {
     infered = TypeCheckStructExpr::Resolve (&struct_expr);
@@ -899,7 +915,9 @@ public:
 	auto candidates = PathProbeType::Probe (tyseg, seg.get_segment ());
 	if (candidates.size () == 0)
 	  {
-	    rust_error_at (seg.get_locus (), "failed to resolve path segment");
+	    rust_error_at (
+	      seg.get_locus (),
+	      "failed to resolve path segment using an impl Probe");
 	    return;
 	  }
 	else if (candidates.size () > 1)
@@ -1103,7 +1121,6 @@ private:
     for (size_t i = 0; i < expr.get_num_segments (); i++)
       {
 	HIR::PathExprSegment &seg = expr.get_segments ().at (i);
-	bool have_more_segments = i < expr.get_num_segments ();
 	bool is_root = *offset == 0;
 	NodeId ast_node_id = seg.get_mappings ().get_nodeid ();
 
