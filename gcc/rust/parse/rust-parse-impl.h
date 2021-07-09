@@ -393,13 +393,6 @@ template <typename ManagedTokenSource>
 AST::Crate
 Parser<ManagedTokenSource>::parse_crate ()
 {
-  /* TODO: determine if has utf8bom and shebang. Currently, they are eliminated
-   * by the lexing phase. Neither are useful for the compiler anyway, so maybe a
-   * better idea would be to eliminate
-   * the has_utf8bom and has_shebang variables from the crate data structure. */
-  bool has_utf8bom = false;
-  bool has_shebang = false;
-
   // parse inner attributes
   AST::AttrVec inner_attrs = parse_inner_attributes ();
 
@@ -430,8 +423,7 @@ Parser<ManagedTokenSource>::parse_crate ()
   for (const auto &error : error_table)
     error.emit_error ();
 
-  return AST::Crate (std::move (items), std::move (inner_attrs), has_utf8bom,
-		     has_shebang);
+  return AST::Crate (std::move (items), std::move (inner_attrs));
 }
 
 // Parse a contiguous block of inner attributes.
@@ -484,7 +476,7 @@ Parser<ManagedTokenSource>::parse_inner_attribute ()
   if (lexer.peek_token ()->get_id () != EXCLAM)
     {
       Error error (lexer.peek_token ()->get_locus (),
-		   "expected %<!%> or %<[%> for inner attribute or shebang");
+		   "expected %<!%> or %<[%> for inner attribute");
       add_error (std::move (error));
 
       return AST::Attribute::create_empty ();
@@ -4150,6 +4142,8 @@ Parser<ManagedTokenSource>::parse_struct_field ()
   // parse visibility, if it exists
   AST::Visibility vis = parse_visibility ();
 
+  Location locus = lexer.peek_token ()->get_locus ();
+
   // parse field name
   const_TokenPtr field_name_tok = lexer.peek_token ();
   if (field_name_tok->get_id () != IDENTIFIER)
@@ -4180,7 +4174,7 @@ Parser<ManagedTokenSource>::parse_struct_field ()
     }
 
   return AST::StructField (std::move (field_name), std::move (field_type),
-			   std::move (vis), std::move (outer_attrs));
+			   std::move (vis), locus, std::move (outer_attrs));
 }
 
 // Parses tuple fields in tuple/tuple struct declarations.

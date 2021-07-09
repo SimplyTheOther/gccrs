@@ -40,8 +40,6 @@ HIR::Crate
 ASTLowering::go ()
 {
   std::vector<std::unique_ptr<HIR::Item> > items;
-  bool has_utf8bom = false;
-  bool has_shebang = false;
 
   for (auto it = astCrate.items.begin (); it != astCrate.items.end (); it++)
     {
@@ -56,8 +54,7 @@ ASTLowering::go ()
 				 mappings->get_next_hir_id (crate_num),
 				 UNKNOWN_LOCAL_DEFID);
 
-  return HIR::Crate (std::move (items), astCrate.get_inner_attrs (), mapping,
-		     has_utf8bom, has_shebang);
+  return HIR::Crate (std::move (items), astCrate.get_inner_attrs (), mapping);
 }
 
 // rust-ast-lower-block.h
