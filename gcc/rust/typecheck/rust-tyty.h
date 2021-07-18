@@ -122,6 +122,7 @@ public:
 };
 
 class TyVisitor;
+class TyConstVisitor;
 class BaseType
 {
 public:
@@ -140,8 +141,9 @@ public:
 
   void set_ty_ref (HirId id) { ty_ref = id; }
 
-  /* Visitor pattern for double dispatch. BaseRules implements TyVisitor. */
   virtual void accept_vis (TyVisitor &vis) = 0;
+
+  virtual void accept_vis (TyConstVisitor &vis) const = 0;
 
   virtual std::string as_string () const = 0;
 
@@ -155,7 +157,7 @@ public:
 
   // similar to unify but does not actually perform type unification but
   // determines whether they are compatible
-  virtual bool can_eq (BaseType *other, bool emit_errors) = 0;
+  virtual bool can_eq (const BaseType *other, bool emit_errors) const = 0;
 
   // Check value equality between two ty. Type inference rules are ignored. Two
   //   ty are considered equal if they're of the same kind, and
@@ -269,12 +271,13 @@ public:
   {}
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   BaseType *unify (BaseType *other) override;
 
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   BaseType *clone () final override;
 
@@ -302,13 +305,14 @@ public:
   {}
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   bool is_unit () const override { return true; }
 
   std::string as_string () const override;
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   BaseType *clone () final override;
 
@@ -332,11 +336,12 @@ public:
   {}
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   BaseType *clone () final override;
 
@@ -415,13 +420,14 @@ public:
   static TupleType *get_unit_type (HirId ref) { return new TupleType (ref); }
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   bool is_unit () const override { return this->fields.empty (); }
 
   std::string as_string () const override;
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -849,11 +855,12 @@ public:
   bool is_unit () const override { return this->fields.empty (); }
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -873,6 +880,11 @@ public:
   const StructFieldType *get_field (size_t index) const;
 
   StructFieldType *get_field (size_t index) { return fields.at (index); }
+
+  const StructFieldType *get_imm_field (size_t index) const
+  {
+    return fields.at (index);
+  }
 
   StructFieldType *get_field (const std::string &lookup,
 			      size_t *index = nullptr) const
@@ -929,7 +941,7 @@ private:
 class FnType : public BaseType, public SubstitutionRef
 {
 public:
-  FnType (HirId ref, std::string identifier, bool is_method,
+  FnType (HirId ref, DefId id, std::string identifier, bool is_method,
 	  std::vector<std::pair<HIR::Pattern *, BaseType *> > params,
 	  BaseType *type, std::vector<SubstitutionParamMapping> subst_refs,
 	  std::set<HirId> refs = std::set<HirId> ())
@@ -937,10 +949,14 @@ public:
       SubstitutionRef (std::move (subst_refs),
 		       SubstitutionArgumentMappings::error ()),
       params (std::move (params)), type (type), is_method_flag (is_method),
-      identifier (identifier)
-  {}
+      identifier (identifier), id (id)
+  {
+    LocalDefId local_def_id = id & DEF_ID_LOCAL_DEF_MASK;
+    rust_assert (local_def_id != UNKNOWN_LOCAL_DEFID);
+  }
 
-  FnType (HirId ref, HirId ty_ref, std::string identifier, bool is_method,
+  FnType (HirId ref, HirId ty_ref, DefId id, std::string identifier,
+	  bool is_method,
 	  std::vector<std::pair<HIR::Pattern *, BaseType *> > params,
 	  BaseType *type, std::vector<SubstitutionParamMapping> subst_refs,
 	  std::set<HirId> refs = std::set<HirId> ())
@@ -948,10 +964,14 @@ public:
       SubstitutionRef (std::move (subst_refs),
 		       SubstitutionArgumentMappings::error ()),
       params (params), type (type), is_method_flag (is_method),
-      identifier (identifier)
-  {}
+      identifier (identifier), id (id)
+  {
+    LocalDefId local_def_id = id & DEF_ID_LOCAL_DEF_MASK;
+    rust_assert (local_def_id != UNKNOWN_LOCAL_DEFID);
+  }
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
@@ -960,7 +980,7 @@ public:
   std::string get_identifier () const { return identifier; }
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -973,6 +993,8 @@ public:
 
     return is_method_flag;
   }
+
+  DefId get_id () const { return id; }
 
   // get the Self type for the method
   BaseType *get_self_type () const
@@ -1026,6 +1048,7 @@ private:
   BaseType *type;
   bool is_method_flag;
   std::string identifier;
+  DefId id;
 };
 
 class FnPtr : public BaseType
@@ -1052,11 +1075,12 @@ public:
   BaseType *param_at (size_t idx) const { return params.at (idx).get_tyty (); }
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -1092,13 +1116,14 @@ public:
   {}
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   std::string get_name () const override final { return as_string (); }
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -1131,13 +1156,14 @@ public:
   {}
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   std::string get_name () const override final { return as_string (); }
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   BaseType *clone () final override;
 };
@@ -1164,13 +1190,14 @@ public:
   {}
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   std::string get_name () const override final { return as_string (); }
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   IntKind get_int_kind () const { return int_kind; }
 
@@ -1204,13 +1231,14 @@ public:
   {}
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   std::string get_name () const override final { return as_string (); }
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   UintKind get_uint_kind () const { return uint_kind; }
 
@@ -1242,13 +1270,14 @@ public:
   {}
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   std::string get_name () const override final { return as_string (); }
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   FloatKind get_float_kind () const { return float_kind; }
 
@@ -1282,13 +1311,14 @@ public:
   }
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   std::string get_name () const override final { return as_string (); }
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   BaseType *clone () final override;
 };
@@ -1315,13 +1345,14 @@ public:
   }
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   std::string get_name () const override final { return as_string (); }
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   BaseType *clone () final override;
 };
@@ -1348,13 +1379,14 @@ public:
   }
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   std::string get_name () const override final { return as_string (); }
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   BaseType *clone () final override;
 };
@@ -1385,13 +1417,14 @@ public:
   BaseType *get_base () const;
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   std::string get_name () const override final { return as_string (); }
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -1432,11 +1465,12 @@ public:
   std::string get_name () const override final { return as_string (); }
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -1465,11 +1499,12 @@ public:
   {}
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   BaseType *clone () final override;
 
@@ -1493,11 +1528,12 @@ public:
   {}
 
   void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
 
   std::string as_string () const override;
 
   BaseType *unify (BaseType *other) override;
-  bool can_eq (BaseType *other, bool emit_errors) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
   BaseType *clone () final override;
 
