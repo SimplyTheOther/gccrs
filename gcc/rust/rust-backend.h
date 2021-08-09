@@ -163,6 +163,13 @@ public:
 		 Btype *result_struct, Location location)
     = 0;
 
+  virtual Btype *
+  function_type_varadic (const Btyped_identifier &receiver,
+			 const std::vector<Btyped_identifier> &parameters,
+			 const std::vector<Btyped_identifier> &results,
+			 Btype *result_struct, Location location)
+    = 0;
+
   virtual Btype *function_ptr_type (Btype *result,
 				    const std::vector<Btype *> &praameters,
 				    Location location)
@@ -170,6 +177,9 @@ public:
 
   // Get a struct type.
   virtual Btype *struct_type (const std::vector<Btyped_identifier> &fields) = 0;
+
+  // Get a union type.
+  virtual Btype *union_type (const std::vector<Btyped_identifier> &fields) = 0;
 
   // Get an array type.
   virtual Btype *array_type (Btype *element_type, Bexpression *length) = 0;
@@ -332,6 +342,9 @@ public:
   virtual Bexpression *string_constant_expression (const std::string &val) = 0;
 
   // Get a char literal
+  virtual Bexpression *char_constant_expression (char c) = 0;
+
+  // Get a char literal
   virtual Bexpression *wchar_constant_expression (wchar_t c) = 0;
 
   // Return an expression for the boolean value VAL.
@@ -414,7 +427,7 @@ public:
   // corresponding fields in BTYPE.
   virtual Bexpression *
   constructor_expression (Btype *btype, const std::vector<Bexpression *> &vals,
-			  Location)
+			  int, Location)
     = 0;
 
   // Return an expression that constructs an array of BTYPE with INDEXES and
@@ -777,27 +790,23 @@ public:
   // recover and must be visible for correct panic recovery.
   static const unsigned int function_is_inlinable = 1 << 2;
 
-  // Set if the function may not split the stack.  This is set for the
-  // implementation of recover itself, among other things.
-  static const unsigned int function_no_split_stack = 1 << 3;
-
   // Set if the function does not return.  This is set for the
   // implementation of panic.
-  static const unsigned int function_does_not_return = 1 << 4;
+  static const unsigned int function_does_not_return = 1 << 3;
 
   // Set if the function should be put in a unique section if
   // possible.  This is used for field tracking.
-  static const unsigned int function_in_unique_section = 1 << 5;
+  static const unsigned int function_in_unique_section = 1 << 4;
 
   // Set if the function should be available for inlining in the
   // backend, but should not be emitted as a standalone function.  Any
   // call to the function that is not inlined should be treated as a
   // call to a function defined in a different compilation unit.  This
   // is like a C99 function marked inline but not extern.
-  static const unsigned int function_only_inline = 1 << 6;
+  static const unsigned int function_only_inline = 1 << 5;
 
   // const function
-  static const unsigned int function_read_only = 1 << 7;
+  static const unsigned int function_read_only = 1 << 6;
 
   // Declare or define a function of FNTYPE.
   // NAME is the Go name of the function.  ASM_NAME, if not the empty

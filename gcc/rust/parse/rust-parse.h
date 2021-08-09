@@ -141,7 +141,6 @@ private:
   std::unique_ptr<AST::MacroMatchRepetition> parse_macro_match_repetition ();
 
   // Top-level item-related
-  std::vector<std::unique_ptr<AST::Item> > parse_items ();
   std::unique_ptr<AST::Item> parse_item (bool called_from_statement);
   std::unique_ptr<AST::VisItem> parse_vis_item (AST::AttrVec outer_attrs);
   std::unique_ptr<AST::MacroItem> parse_macro_item (AST::AttrVec outer_attrs);
@@ -504,8 +503,6 @@ private:
   AST::LoopLabel parse_loop_label ();
   std::unique_ptr<AST::AsyncBlockExpr>
   parse_async_block_expr (AST::AttrVec outer_attrs = AST::AttrVec ());
-  std::unique_ptr<AST::UnsafeBlockExpr>
-  parse_unsafe_block_expr (AST::AttrVec outer_attrs = AST::AttrVec ());
   std::unique_ptr<AST::GroupedExpr> parse_grouped_expr (AST::AttrVec outer_attrs
 							= AST::AttrVec ());
   std::unique_ptr<AST::ClosureExpr> parse_closure_expr (AST::AttrVec outer_attrs
@@ -522,6 +519,9 @@ private:
   std::unique_ptr<AST::ContinueExpr>
   parse_continue_expr (AST::AttrVec outer_attrs = AST::AttrVec (),
 		       bool pratt_parse = false);
+  std::unique_ptr<AST::UnsafeBlockExpr>
+  parse_unsafe_block_expr (AST::AttrVec outer_attrs = AST::AttrVec (),
+			   bool pratt_parse = false);
   std::unique_ptr<AST::ArrayExpr> parse_array_expr (AST::AttrVec outer_attrs
 						    = AST::AttrVec (),
 						    bool pratt_parse = false);
@@ -579,10 +579,15 @@ private:
   bool done_end_of_file ();
 
   void add_error (Error error) { error_table.push_back (std::move (error)); }
+  std::vector<Error> &get_errors () { return error_table; }
 
 public:
   // Construct parser with specified "managed" token source.
   Parser (ManagedTokenSource tokenSource) : lexer (std::move (tokenSource)) {}
+
+  // Parse items without parsing an entire crate. This function is the main
+  // parsing loop of AST::Crate::parse_crate().
+  std::vector<std::unique_ptr<AST::Item> > parse_items ();
 
   // Main entry point for parser.
   AST::Crate parse_crate ();

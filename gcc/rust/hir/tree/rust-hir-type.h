@@ -33,26 +33,23 @@ class TraitBound : public TypeParamBound
 {
   bool in_parens;
   bool opening_question_mark;
-
-  // bool has_for_lifetimes;
-  // LifetimeParams for_lifetimes;
-  std::vector<LifetimeParam> for_lifetimes; // inlined LifetimeParams
-
+  std::vector<LifetimeParam> for_lifetimes;
   TypePath type_path;
-
   Location locus;
+
+  Analysis::NodeMapping mappings;
 
 public:
   // Returns whether trait bound has "for" lifetimes
   bool has_for_lifetimes () const { return !for_lifetimes.empty (); }
 
-  TraitBound (TypePath type_path, Location locus, bool in_parens = false,
-	      bool opening_question_mark = false,
+  TraitBound (Analysis::NodeMapping mapping, TypePath type_path, Location locus,
+	      bool in_parens = false, bool opening_question_mark = false,
 	      std::vector<LifetimeParam> for_lifetimes
 	      = std::vector<LifetimeParam> ())
     : in_parens (in_parens), opening_question_mark (opening_question_mark),
       for_lifetimes (std::move (for_lifetimes)),
-      type_path (std::move (type_path)), locus (locus)
+      type_path (std::move (type_path)), locus (locus), mappings (mapping)
   {}
 
   std::string as_string () const override;
@@ -60,6 +57,19 @@ public:
   Location get_locus () const { return locus; }
 
   void accept_vis (HIRVisitor &vis) override;
+
+  Analysis::NodeMapping get_mappings () const override final
+  {
+    return mappings;
+  }
+
+  Location get_locus_slow () const override final { return get_locus (); }
+
+  BoundType get_bound_type () const final override { return TRAITBOUND; }
+
+  TypePath &get_path () { return type_path; }
+
+  const TypePath &get_path () const { return type_path; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -446,41 +456,31 @@ public:
 // A type consisting of a pointer without safety or liveness guarantees
 class RawPointerType : public TypeNoBounds
 {
-public:
-  enum PointerType
-  {
-    MUT,
-    CONST
-  };
-
 private:
-  PointerType pointer_type;
-  std::unique_ptr<TypeNoBounds> type;
+  bool is_mutable;
+  std::unique_ptr<Type> type;
   Location locus;
 
 public:
-  // Returns whether the pointer is mutable or constant.
-  PointerType get_pointer_type () const { return pointer_type; }
-
   // Constructor requires pointer for polymorphism reasons
-  RawPointerType (Analysis::NodeMapping mappings, PointerType pointer_type,
-		  std::unique_ptr<TypeNoBounds> type_no_bounds, Location locus)
-    : TypeNoBounds (mappings), pointer_type (pointer_type),
-      type (std::move (type_no_bounds)), locus (locus)
+  RawPointerType (Analysis::NodeMapping mappings, bool is_mutable,
+		  std::unique_ptr<Type> type, Location locus)
+    : TypeNoBounds (mappings), is_mutable (is_mutable), type (std::move (type)),
+      locus (locus)
   {}
 
   // Copy constructor calls custom polymorphic clone function
   RawPointerType (RawPointerType const &other)
-    : TypeNoBounds (other.mappings), pointer_type (other.pointer_type),
-      type (other.type->clone_type_no_bounds ()), locus (other.locus)
+    : TypeNoBounds (other.mappings), is_mutable (other.is_mutable),
+      type (other.type->clone_type ()), locus (other.locus)
   {}
 
   // overload assignment operator to use custom clone method
   RawPointerType &operator= (RawPointerType const &other)
   {
     mappings = other.mappings;
-    pointer_type = other.pointer_type;
-    type = other.type->clone_type_no_bounds ();
+    is_mutable = other.is_mutable;
+    type = other.type->clone_type ();
     locus = other.locus;
     return *this;
   }
@@ -494,6 +494,14 @@ public:
   Location get_locus () const { return locus; }
 
   void accept_vis (HIRVisitor &vis) override;
+
+  std::unique_ptr<Type> &get_type () { return type; }
+
+  bool is_mut () const { return is_mutable; }
+
+  bool is_const () const { return !is_mutable; }
+
+  std::unique_ptr<Type> &get_base_type () { return type; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather

@@ -2113,11 +2113,11 @@ Lifetime::as_string () const
 
   switch (lifetime_type)
     {
-    case NAMED:
+    case AST::Lifetime::LifetimeType::NAMED:
       return "'" + lifetime_name;
-    case STATIC:
+    case AST::Lifetime::LifetimeType::STATIC:
       return "'static";
-    case WILDCARD:
+    case AST::Lifetime::LifetimeType::WILDCARD:
       return "'_";
     default:
       return "ERROR-MARK-STRING: lifetime type failure";
@@ -2747,7 +2747,8 @@ TypePath::to_trait_bound (bool in_parens) const
   // create clone FIXME is this required? or is copy constructor automatically
   // called?
   TypePath copy (*this);
-  return new TraitBound (std::move (copy), copy.get_locus (), in_parens);
+  return new TraitBound (mappings, std::move (copy), copy.get_locus (),
+			 in_parens);
 }
 
 std::string
@@ -2806,23 +2807,8 @@ ReferenceType::as_string () const
 std::string
 RawPointerType::as_string () const
 {
-  std::string str ("*");
-
-  switch (pointer_type)
-    {
-    case MUT:
-      str += "mut ";
-      break;
-    case CONST:
-      str += "const ";
-      break;
-    default:
-      return "ERROR_MARK_STRING - unknown pointer type in raw pointer type";
-    }
-
-  str += type->as_string ();
-
-  return str;
+  return std::string ("*") + (is_mut () ? "mut " : "const ")
+	 + type->as_string ();
 }
 
 std::string
@@ -3414,8 +3400,9 @@ ExternalFunctionItem::as_string () const
 	}
     }
 
-  // add type on new line
-  str += "\n (return) Type: " + return_type->as_string ();
+  // add type on new line)
+  str += "\n (return) Type: "
+	 + (has_return_type () ? return_type->as_string () : "()");
 
   // where clause
   str += "\n Where clause: ";

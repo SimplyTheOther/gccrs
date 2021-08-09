@@ -56,6 +56,7 @@ public:
     locus = other.locus;
     context = other.context;
 
+    inherited_substitutions.clear ();
     inherited_substitutions.reserve (other.inherited_substitutions.size ());
     for (size_t i = 0; i < other.inherited_substitutions.size (); i++)
       inherited_substitutions.push_back (other.inherited_substitutions.at (i));
@@ -198,6 +199,12 @@ public:
 
   bool is_error () const { return hir_trait_ref == nullptr; }
 
+  static TraitReference &error_node ()
+  {
+    static TraitReference trait_error_node = TraitReference::error ();
+    return trait_error_node;
+  }
+
   Location get_locus () const { return hir_trait_ref->get_locus (); }
 
   std::string get_name () const
@@ -219,6 +226,25 @@ public:
     return "HIR Trait: " + get_name () + "->"
 	   + hir_trait_ref->get_mappings ().as_string () + " [" + item_buf
 	   + "]";
+  }
+
+  const Analysis::NodeMapping &get_mappings () const
+  {
+    return hir_trait_ref->get_mappings ();
+  }
+
+  bool lookup_trait_item (const std::string &ident,
+			  const TraitItemReference **ref) const
+  {
+    for (auto &item : item_refs)
+      {
+	if (ident.compare (item.get_identifier ()) == 0)
+	  {
+	    *ref = &item;
+	    return true;
+	  }
+      }
+    return false;
   }
 
   const TraitItemReference &

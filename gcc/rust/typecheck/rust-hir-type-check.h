@@ -92,13 +92,28 @@ public:
     trait_context.emplace (id, std::move (ref));
   }
 
-  bool lookup_trait_reference (DefId id, TraitReference &ref)
+  bool lookup_trait_reference (DefId id, TraitReference **ref)
   {
     auto it = trait_context.find (id);
     if (it == trait_context.end ())
       return false;
 
-    ref = it->second;
+    *ref = &it->second;
+    return true;
+  }
+
+  void insert_receiver (HirId id, TyTy::BaseType *t)
+  {
+    receiver_context[id] = t;
+  }
+
+  bool lookup_receiver (HirId id, TyTy::BaseType **ref)
+  {
+    auto it = receiver_context.find (id);
+    if (it == receiver_context.end ())
+      return false;
+
+    *ref = it->second;
     return true;
   }
 
@@ -111,6 +126,7 @@ private:
   std::vector<TyTy::BaseType *> return_type_stack;
   std::vector<TyTy::BaseType *> loop_type_stack;
   std::map<DefId, TraitReference> trait_context;
+  std::map<HirId, TyTy::BaseType *> receiver_context;
 };
 
 class TypeResolution

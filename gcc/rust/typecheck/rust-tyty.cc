@@ -23,14 +23,87 @@
 #include "rust-hir-type-check-type.h"
 #include "rust-tyty-rules.h"
 #include "rust-tyty-cmp.h"
+#include "rust-tyty-coercion.h"
+#include "rust-tyty-cast.h"
 #include "rust-hir-map.h"
 #include "rust-substitution-mapper.h"
+#include "rust-hir-trait-ref.h"
+#include "rust-hir-type-bounds.h"
 
 extern ::Backend *
 rust_get_backend ();
 
 namespace Rust {
 namespace TyTy {
+
+bool
+BaseType::satisfies_bound (const TypeBoundPredicate &predicate) const
+{
+  const Resolver::TraitReference *query = predicate.get ();
+  for (auto &bound : specified_bounds)
+    {
+      const Resolver::TraitReference *item = bound.get ();
+      bool found = item->get_mappings ().get_defid ()
+		   == query->get_mappings ().get_defid ();
+      if (found)
+	return true;
+    }
+
+  std::vector<Resolver::TraitReference *> probed
+    = Resolver::TypeBoundsProbe::Probe (this);
+  for (const Resolver::TraitReference *bound : probed)
+    {
+      bool found = bound->get_mappings ().get_defid ()
+		   == query->get_mappings ().get_defid ();
+      if (found)
+	return true;
+    }
+
+  return false;
+}
+
+bool
+BaseType::bounds_compatible (const BaseType &other, Location locus) const
+{
+  std::vector<std::reference_wrapper<const TypeBoundPredicate>>
+    unsatisfied_bounds;
+  for (auto &bound : get_specified_bounds ())
+    {
+      if (!other.satisfies_bound (bound))
+	unsatisfied_bounds.push_back (bound);
+    }
+
+  // lets emit a single error for this
+  if (unsatisfied_bounds.size () > 0)
+    {
+      RichLocation r (locus);
+      std::string missing_preds;
+      for (size_t i = 0; i < unsatisfied_bounds.size (); i++)
+	{
+	  const TypeBoundPredicate &pred = unsatisfied_bounds.at (i);
+	  r.add_range (pred.get_locus ());
+	  missing_preds += pred.get_name ();
+
+	  bool have_next = (i + 1) < unsatisfied_bounds.size ();
+	  if (have_next)
+	    missing_preds += ", ";
+	}
+
+      rust_error_at (r, "bounds not satisfied for %s %<%s%> is not satisfied",
+		     other.get_name ().c_str (), missing_preds.c_str ());
+    }
+
+  return unsatisfied_bounds.size () == 0;
+}
+
+void
+BaseType::inherit_bounds (const BaseType &other)
+{
+  for (auto &bound : other.get_specified_bounds ())
+    {
+      add_bound (bound);
+    }
+}
 
 TyVar::TyVar (HirId ref) : ref (ref)
 {
@@ -111,7 +184,21 @@ InferType::can_eq (const BaseType *other, bool emit_errors) const
 }
 
 BaseType *
-InferType::clone ()
+InferType::coerce (BaseType *other)
+{
+  InferCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+InferType::cast (BaseType *other)
+{
+  InferCastRules r (this);
+  return r.cast (other);
+}
+
+BaseType *
+InferType::clone () const
 {
   return new InferType (get_ref (), get_ty_ref (), get_infer_kind (),
 			get_combined_refs ());
@@ -173,7 +260,19 @@ ErrorType::can_eq (const BaseType *other, bool emit_errors) const
 }
 
 BaseType *
-ErrorType::clone ()
+ErrorType::coerce (BaseType *other)
+{
+  return this;
+}
+
+BaseType *
+ErrorType::cast (BaseType *other)
+{
+  return this;
+}
+
+BaseType *
+ErrorType::clone () const
 {
   return new ErrorType (get_ref (), get_ty_ref (), get_combined_refs ());
 }
@@ -215,6 +314,7 @@ SubstitutionParamMapping::override_context ()
 
   auto mappings = Analysis::Mappings::get ();
   auto context = Resolver::TypeCheckContext::get ();
+
   context->insert_type (Analysis::NodeMapping (mappings->get_current_crate (),
 					       UNKNOWN_NODEID,
 					       param->get_ref (),
@@ -438,6 +538,20 @@ ADTType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+ADTType::coerce (BaseType *other)
+{
+  ADTCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+ADTType::cast (BaseType *other)
+{
+  ADTCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 ADTType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -489,13 +603,13 @@ ADTType::is_equal (const BaseType &other) const
 }
 
 BaseType *
-ADTType::clone ()
+ADTType::clone () const
 {
   std::vector<StructFieldType *> cloned_fields;
   for (auto &f : fields)
     cloned_fields.push_back ((StructFieldType *) f->clone ());
 
-  return new ADTType (get_ref (), get_ty_ref (), identifier, get_is_tuple (),
+  return new ADTType (get_ref (), get_ty_ref (), identifier, get_adt_kind (),
 		      cloned_fields, clone_substs (), used_arguments,
 		      get_combined_refs ());
 }
@@ -513,7 +627,7 @@ ADTType::handle_substitions (SubstitutionArgumentMappings subst_mappings)
       bool ok
 	= subst_mappings.get_argument_for_symbol (sub.get_param_ty (), &arg);
       if (ok)
-	sub.fill_param_ty (arg.get_tyty ());
+	sub.fill_param_ty (arg.get_tyty (), subst_mappings.get_locus ());
     }
 
   adt->iterate_fields ([&] (StructFieldType *field) mutable -> bool {
@@ -605,6 +719,20 @@ TupleType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+TupleType::coerce (BaseType *other)
+{
+  TupleCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+TupleType::cast (BaseType *other)
+{
+  TupleCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 TupleType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -631,7 +759,7 @@ TupleType::is_equal (const BaseType &other) const
 }
 
 BaseType *
-TupleType::clone ()
+TupleType::clone () const
 {
   return new TupleType (get_ref (), get_ty_ref (), fields,
 			get_combined_refs ());
@@ -695,6 +823,20 @@ FnType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+FnType::coerce (BaseType *other)
+{
+  FnCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+FnType::cast (BaseType *other)
+{
+  FnCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 FnType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -738,15 +880,15 @@ FnType::is_equal (const BaseType &other) const
 }
 
 BaseType *
-FnType::clone ()
+FnType::clone () const
 {
-  std::vector<std::pair<HIR::Pattern *, BaseType *> > cloned_params;
+  std::vector<std::pair<HIR::Pattern *, BaseType *>> cloned_params;
   for (auto &p : params)
     cloned_params.push_back (
       std::pair<HIR::Pattern *, BaseType *> (p.first, p.second->clone ()));
 
   return new FnType (get_ref (), get_ty_ref (), get_id (), get_identifier (),
-		     is_method_flag, std::move (cloned_params),
+		     flags, std::move (cloned_params),
 		     get_return_type ()->clone (), clone_substs (),
 		     get_combined_refs ());
 }
@@ -765,7 +907,7 @@ FnType::handle_substitions (SubstitutionArgumentMappings subst_mappings)
       bool ok
 	= subst_mappings.get_argument_for_symbol (sub.get_param_ty (), &arg);
       if (ok)
-	sub.fill_param_ty (arg.get_tyty ());
+	sub.fill_param_ty (arg.get_tyty (), subst_mappings.get_locus ());
     }
 
   auto fty = fn->get_return_type ();
@@ -896,6 +1038,20 @@ FnPtr::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+FnPtr::coerce (BaseType *other)
+{
+  FnptrCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+FnPtr::cast (BaseType *other)
+{
+  FnptrCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 FnPtr::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -927,7 +1083,7 @@ FnPtr::is_equal (const BaseType &other) const
 }
 
 BaseType *
-FnPtr::clone ()
+FnPtr::clone () const
 {
   std::vector<TyVar> cloned_params;
   for (auto &p : params)
@@ -969,6 +1125,20 @@ ArrayType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+ArrayType::coerce (BaseType *other)
+{
+  ArrayCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+ArrayType::cast (BaseType *other)
+{
+  ArrayCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 ArrayType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -999,7 +1169,7 @@ ArrayType::get_element_type () const
 }
 
 BaseType *
-ArrayType::clone ()
+ArrayType::clone () const
 {
   return new ArrayType (get_ref (), get_ty_ref (), get_capacity (),
 			element_type, get_combined_refs ());
@@ -1030,6 +1200,20 @@ BoolType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+BoolType::coerce (BaseType *other)
+{
+  BoolCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+BoolType::cast (BaseType *other)
+{
+  BoolCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 BoolType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -1038,7 +1222,7 @@ BoolType::can_eq (const BaseType *other, bool emit_errors) const
 }
 
 BaseType *
-BoolType::clone ()
+BoolType::clone () const
 {
   return new BoolType (get_ref (), get_ty_ref (), get_combined_refs ());
 }
@@ -1082,6 +1266,20 @@ IntType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+IntType::coerce (BaseType *other)
+{
+  IntCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+IntType::cast (BaseType *other)
+{
+  IntCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 IntType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -1090,7 +1288,7 @@ IntType::can_eq (const BaseType *other, bool emit_errors) const
 }
 
 BaseType *
-IntType::clone ()
+IntType::clone () const
 {
   return new IntType (get_ref (), get_ty_ref (), get_int_kind (),
 		      get_combined_refs ());
@@ -1145,6 +1343,20 @@ UintType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+UintType::coerce (BaseType *other)
+{
+  UintCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+UintType::cast (BaseType *other)
+{
+  UintCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 UintType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -1153,7 +1365,7 @@ UintType::can_eq (const BaseType *other, bool emit_errors) const
 }
 
 BaseType *
-UintType::clone ()
+UintType::clone () const
 {
   return new UintType (get_ref (), get_ty_ref (), get_uint_kind (),
 		       get_combined_refs ());
@@ -1202,6 +1414,20 @@ FloatType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+FloatType::coerce (BaseType *other)
+{
+  FloatCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+FloatType::cast (BaseType *other)
+{
+  FloatCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 FloatType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -1210,7 +1436,7 @@ FloatType::can_eq (const BaseType *other, bool emit_errors) const
 }
 
 BaseType *
-FloatType::clone ()
+FloatType::clone () const
 {
   return new FloatType (get_ref (), get_ty_ref (), get_float_kind (),
 			get_combined_refs ());
@@ -1251,6 +1477,20 @@ USizeType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+USizeType::coerce (BaseType *other)
+{
+  USizeCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+USizeType::cast (BaseType *other)
+{
+  USizeCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 USizeType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -1259,7 +1499,7 @@ USizeType::can_eq (const BaseType *other, bool emit_errors) const
 }
 
 BaseType *
-USizeType::clone ()
+USizeType::clone () const
 {
   return new USizeType (get_ref (), get_ty_ref (), get_combined_refs ());
 }
@@ -1289,6 +1529,20 @@ ISizeType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+ISizeType::coerce (BaseType *other)
+{
+  ISizeCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+ISizeType::cast (BaseType *other)
+{
+  ISizeCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 ISizeType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -1297,7 +1551,7 @@ ISizeType::can_eq (const BaseType *other, bool emit_errors) const
 }
 
 BaseType *
-ISizeType::clone ()
+ISizeType::clone () const
 {
   return new ISizeType (get_ref (), get_ty_ref (), get_combined_refs ());
 }
@@ -1327,6 +1581,20 @@ CharType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+CharType::coerce (BaseType *other)
+{
+  CharCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+CharType::cast (BaseType *other)
+{
+  CharCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 CharType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -1335,7 +1603,7 @@ CharType::can_eq (const BaseType *other, bool emit_errors) const
 }
 
 BaseType *
-CharType::clone ()
+CharType::clone () const
 {
   return new CharType (get_ref (), get_ty_ref (), get_combined_refs ());
 }
@@ -1355,7 +1623,8 @@ ReferenceType::accept_vis (TyConstVisitor &vis) const
 std::string
 ReferenceType::as_string () const
 {
-  return "&" + get_base ()->as_string ();
+  return std::string ("&") + (is_mutable () ? "mut" : "") + " "
+	 + get_base ()->as_string ();
 }
 
 BaseType *
@@ -1363,6 +1632,20 @@ ReferenceType::unify (BaseType *other)
 {
   ReferenceRules r (this);
   return r.unify (other);
+}
+
+BaseType *
+ReferenceType::coerce (BaseType *other)
+{
+  ReferenceCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+ReferenceType::cast (BaseType *other)
+{
+  ReferenceCastRules r (this);
+  return r.cast (other);
 }
 
 bool
@@ -1389,9 +1672,9 @@ ReferenceType::get_base () const
 }
 
 BaseType *
-ReferenceType::clone ()
+ReferenceType::clone () const
 {
-  return new ReferenceType (get_ref (), get_ty_ref (), base,
+  return new ReferenceType (get_ref (), get_ty_ref (), base, is_mutable (),
 			    get_combined_refs ());
 }
 
@@ -1401,6 +1684,92 @@ ReferenceType::handle_substitions (SubstitutionArgumentMappings mappings)
   auto mappings_table = Analysis::Mappings::get ();
 
   ReferenceType *ref = static_cast<ReferenceType *> (clone ());
+  ref->set_ty_ref (mappings_table->get_next_hir_id ());
+
+  // might be &T or &ADT so this needs to be recursive
+  auto base = ref->get_base ();
+  BaseType *concrete = Resolver::SubstMapperInternal::Resolve (base, mappings);
+  ref->base = TyVar (concrete->get_ty_ref ());
+
+  return ref;
+}
+
+void
+PointerType::accept_vis (TyVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+PointerType::accept_vis (TyConstVisitor &vis) const
+{
+  vis.visit (*this);
+}
+
+std::string
+PointerType::as_string () const
+{
+  return std::string ("* ") + (is_mutable () ? "mut" : "const") + " "
+	 + get_base ()->as_string ();
+}
+
+BaseType *
+PointerType::unify (BaseType *other)
+{
+  PointerRules r (this);
+  return r.unify (other);
+}
+
+BaseType *
+PointerType::coerce (BaseType *other)
+{
+  PointerCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+PointerType::cast (BaseType *other)
+{
+  PointerCastRules r (this);
+  return r.cast (other);
+}
+
+bool
+PointerType::can_eq (const BaseType *other, bool emit_errors) const
+{
+  PointerCmp r (this, emit_errors);
+  return r.can_eq (other);
+}
+
+bool
+PointerType::is_equal (const BaseType &other) const
+{
+  if (get_kind () != other.get_kind ())
+    return false;
+
+  auto other2 = static_cast<const PointerType &> (other);
+  return get_base ()->is_equal (*other2.get_base ());
+}
+
+BaseType *
+PointerType::get_base () const
+{
+  return base.get_tyty ();
+}
+
+BaseType *
+PointerType::clone () const
+{
+  return new PointerType (get_ref (), get_ty_ref (), base, is_mutable (),
+			  get_combined_refs ());
+}
+
+PointerType *
+PointerType::handle_substitions (SubstitutionArgumentMappings mappings)
+{
+  auto mappings_table = Analysis::Mappings::get ();
+
+  PointerType *ref = static_cast<PointerType *> (clone ());
   ref->set_ty_ref (mappings_table->get_next_hir_id ());
 
   // might be &T or &ADT so this needs to be recursive
@@ -1446,6 +1815,20 @@ ParamType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+ParamType::coerce (BaseType *other)
+{
+  ParamCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+ParamType::cast (BaseType *other)
+{
+  ParamCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 ParamType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -1454,10 +1837,10 @@ ParamType::can_eq (const BaseType *other, bool emit_errors) const
 }
 
 BaseType *
-ParamType::clone ()
+ParamType::clone () const
 {
-  return new ParamType (get_symbol (), get_ref (), get_ty_ref (),
-			get_generic_param (), get_combined_refs ());
+  return new ParamType (get_symbol (), get_ref (), get_ty_ref (), param,
+			get_specified_bounds (), get_combined_refs ());
 }
 
 std::string
@@ -1469,8 +1852,6 @@ ParamType::get_symbol () const
 BaseType *
 ParamType::resolve () const
 {
-  rust_assert (can_resolve ());
-
   TyVar var (get_ty_ref ());
   BaseType *r = var.get_tyty ();
 
@@ -1484,7 +1865,10 @@ ParamType::resolve () const
       r = v.get_tyty ();
     }
 
-  return TyVar (r->get_ty_ref ()).get_tyty ();
+  if (r->get_kind () == TypeKind::PARAM && (r->get_ref () == r->get_ty_ref ()))
+    return TyVar (r->get_ty_ref ()).get_tyty ();
+
+  return r;
 }
 
 bool
@@ -1522,7 +1906,7 @@ ParamType::handle_substitions (SubstitutionArgumentMappings mappings)
 }
 
 BaseType *
-StrType::clone ()
+StrType::clone () const
 {
   return new StrType (get_ref (), get_ty_ref (), get_combined_refs ());
 }
@@ -1550,6 +1934,20 @@ StrType::unify (BaseType *other)
 {
   StrRules r (this);
   return r.unify (other);
+}
+
+BaseType *
+StrType::coerce (BaseType *other)
+{
+  StrCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+StrType::cast (BaseType *other)
+{
+  StrCastRules r (this);
+  return r.cast (other);
 }
 
 bool
@@ -1590,6 +1988,20 @@ NeverType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+NeverType::coerce (BaseType *other)
+{
+  NeverCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+NeverType::cast (BaseType *other)
+{
+  NeverCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 NeverType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -1598,7 +2010,7 @@ NeverType::can_eq (const BaseType *other, bool emit_errors) const
 }
 
 BaseType *
-NeverType::clone ()
+NeverType::clone () const
 {
   return new NeverType (get_ref (), get_ty_ref (), get_combined_refs ());
 }
@@ -1628,6 +2040,20 @@ PlaceholderType::unify (BaseType *other)
   return r.unify (other);
 }
 
+BaseType *
+PlaceholderType::coerce (BaseType *other)
+{
+  PlaceholderCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+PlaceholderType::cast (BaseType *other)
+{
+  PlaceholderCastRules r (this);
+  return r.cast (other);
+}
+
 bool
 PlaceholderType::can_eq (const BaseType *other, bool emit_errors) const
 {
@@ -1636,7 +2062,7 @@ PlaceholderType::can_eq (const BaseType *other, bool emit_errors) const
 }
 
 BaseType *
-PlaceholderType::clone ()
+PlaceholderType::clone () const
 {
   return new PlaceholderType (get_ref (), get_ty_ref (), get_combined_refs ());
 }
@@ -1646,7 +2072,7 @@ PlaceholderType::clone ()
 void
 TypeCheckCallExpr::visit (ADTType &type)
 {
-  if (!type.get_is_tuple ())
+  if (!type.is_tuple_struct ())
     {
       rust_error_at (
 	call.get_locus (),
@@ -1702,15 +2128,27 @@ TypeCheckCallExpr::visit (FnType &type)
 {
   if (call.num_params () != type.num_params ())
     {
-      rust_error_at (call.get_locus (),
-		     "unexpected number of arguments %lu expected %lu",
-		     call.num_params (), type.num_params ());
-      return;
+      if (type.is_varadic ())
+	{
+	  if (call.num_params () < type.num_params ())
+	    {
+	      rust_error_at (call.get_locus (),
+			     "unexpected number of arguments %lu expected %lu",
+			     call.num_params (), type.num_params ());
+	      return;
+	    }
+	}
+      else
+	{
+	  rust_error_at (call.get_locus (),
+			 "unexpected number of arguments %lu expected %lu",
+			 call.num_params (), type.num_params ());
+	  return;
+	}
     }
 
   size_t i = 0;
   call.iterate_params ([&] (HIR::Expr *param) mutable -> bool {
-    auto fnparam = type.param_at (i);
     auto argument_expr_tyty = Resolver::TypeCheckExpr::Resolve (param, false);
     if (argument_expr_tyty == nullptr)
       {
@@ -1719,12 +2157,19 @@ TypeCheckCallExpr::visit (FnType &type)
 	return false;
       }
 
-    auto resolved_argument_type = fnparam.second->unify (argument_expr_tyty);
-    if (resolved_argument_type == nullptr)
+    auto resolved_argument_type = argument_expr_tyty;
+
+    // it might be a varadic function
+    if (i < type.num_params ())
       {
-	rust_error_at (param->get_locus_slow (),
-		       "Type Resolution failure on parameter");
-	return false;
+	auto fnparam = type.param_at (i);
+	resolved_argument_type = fnparam.second->unify (argument_expr_tyty);
+	if (resolved_argument_type == nullptr)
+	  {
+	    rust_error_at (param->get_locus_slow (),
+			   "Type Resolution failure on parameter");
+	    return false;
+	  }
       }
 
     context->insert_type (param->get_mappings (), resolved_argument_type);
@@ -1733,7 +2178,7 @@ TypeCheckCallExpr::visit (FnType &type)
     return true;
   });
 
-  if (i != call.num_params ())
+  if (i < call.num_params ())
     {
       rust_error_at (call.get_locus (),
 		     "unexpected number of arguments %lu expected %lu", i,

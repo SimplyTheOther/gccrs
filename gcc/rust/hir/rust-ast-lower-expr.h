@@ -135,6 +135,11 @@ public:
     translated = ASTLoweringBlock::translate (&expr, &terminated);
   }
 
+  void visit (AST::UnsafeBlockExpr &expr) override
+  {
+    translated = ASTLoweringBlock::translate (&expr, &terminated);
+  }
+
   void visit (AST::PathInExpression &expr) override
   {
     translated = ASTLowerPathInExpression::translate (&expr);
@@ -402,6 +407,25 @@ public:
       = new HIR::NegationExpr (mapping,
 			       std::unique_ptr<HIR::Expr> (negated_value),
 			       expr.get_expr_type (), expr.get_outer_attrs (),
+			       expr.get_locus ());
+  }
+
+  void visit (AST::TypeCastExpr &expr) override
+  {
+    HIR::Expr *expr_to_cast_to
+      = ASTLoweringExpr::translate (expr.get_casted_expr ().get ());
+    HIR::Type *type_to_cast_to
+      = lower_type_no_bounds (expr.get_type_to_cast_to ().get ());
+
+    auto crate_num = mappings->get_current_crate ();
+    Analysis::NodeMapping mapping (crate_num, expr.get_node_id (),
+				   mappings->get_next_hir_id (crate_num),
+				   UNKNOWN_LOCAL_DEFID);
+
+    translated
+      = new HIR::TypeCastExpr (mapping,
+			       std::unique_ptr<HIR::Expr> (expr_to_cast_to),
+			       std::unique_ptr<HIR::Type> (type_to_cast_to),
 			       expr.get_locus ());
   }
 

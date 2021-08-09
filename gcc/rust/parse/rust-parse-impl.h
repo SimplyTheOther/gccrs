@@ -388,15 +388,12 @@ Parser<ManagedTokenSource>::done_end_of_file ()
   return lexer.peek_token ()->get_id () == END_OF_FILE;
 }
 
-// Parses a crate (compilation unit) - entry point
+// Parses a sequence of items within a module or the implicit top-level module
+// in a crate
 template <typename ManagedTokenSource>
-AST::Crate
-Parser<ManagedTokenSource>::parse_crate ()
+std::vector<std::unique_ptr<AST::Item>>
+Parser<ManagedTokenSource>::parse_items ()
 {
-  // parse inner attributes
-  AST::AttrVec inner_attrs = parse_inner_attributes ();
-
-  // parse items
   std::vector<std::unique_ptr<AST::Item>> items;
 
   const_TokenPtr t = lexer.peek_token ();
@@ -418,6 +415,20 @@ Parser<ManagedTokenSource>::parse_crate ()
 
       t = lexer.peek_token ();
     }
+
+  return items;
+}
+
+// Parses a crate (compilation unit) - entry point
+template <typename ManagedTokenSource>
+AST::Crate
+Parser<ManagedTokenSource>::parse_crate ()
+{
+  // parse inner attributes
+  AST::AttrVec inner_attrs = parse_inner_attributes ();
+
+  // parse items
+  std::vector<std::unique_ptr<AST::Item>> items = parse_items ();
 
   // emit all errors
   for (const auto &error : error_table)
@@ -992,37 +1003,6 @@ Parser<ManagedTokenSource>::parse_token_tree ()
     }
 }
 
-/* Parses a sequence of items within a module or the implicit top-level module
- * in a crate. Note: this is not currently used as parsing an item sequence
- * individually is pretty simple and allows for better error diagnostics and
- * detection. */
-template <typename ManagedTokenSource>
-std::vector<std::unique_ptr<AST::Item>>
-Parser<ManagedTokenSource>::parse_items ()
-{
-  std::vector<std::unique_ptr<AST::Item>> items;
-
-  // TODO: replace with do-while loop?
-  // infinite loop to save on comparisons (may be a tight loop) - breaks when
-  // next item is null
-  while (true)
-    {
-      std::unique_ptr<AST::Item> item = parse_item (false);
-
-      if (item != nullptr)
-	{
-	  items.push_back (std::move (item));
-	}
-      else
-	{
-	  break;
-	}
-    }
-
-  items.shrink_to_fit ();
-  return items;
-}
-
 // Parses a single item
 template <typename ManagedTokenSource>
 std::unique_ptr<AST::Item>
@@ -1083,7 +1063,8 @@ Parser<ManagedTokenSource>::parse_item (bool called_from_statement)
     // crappy hack to do union "keyword"
     case IDENTIFIER:
       // TODO: ensure std::string and literal comparison works
-      if (t->get_str () == "union")
+      if (t->get_str () == "union"
+	  && lexer.peek_token (1)->get_id () == IDENTIFIER)
 	{
 	  return parse_vis_item (std::move (outer_attrs));
 	  // or should this go straight to parsing union?
@@ -1274,8 +1255,8 @@ Parser<ManagedTokenSource>::parse_vis_item (AST::AttrVec outer_attrs)
     // TODO: implement union keyword but not really because of
     // context-dependence case UNION: crappy hack to do union "keyword"
     case IDENTIFIER:
-      // TODO: ensure std::string and literal comparison works
-      if (t->get_str () == "union")
+      if (t->get_str () == "union"
+	  && lexer.peek_token (1)->get_id () == IDENTIFIER)
 	{
 	  return parse_union (std::move (vis), std::move (outer_attrs));
 	  // or should item switch go straight to parsing union?
@@ -1897,6 +1878,9 @@ Parser<ManagedTokenSource>::parse_macro_match_fragment ()
 
   // get MacroFragSpec for macro
   const_TokenPtr t = expect_token (IDENTIFIER);
+  if (t == nullptr)
+    return nullptr;
+
   AST::MacroFragSpec frag = AST::get_frag_spec_from_str (t->get_str ());
   if (frag == AST::INVALID)
     {
@@ -2117,10 +2101,10 @@ Parser<ManagedTokenSource>::parse_module (AST::Visibility vis,
     case SEMICOLON:
       lexer.skip_token ();
 
-      return std::unique_ptr<AST::ModuleNoBody> (
-	new AST::ModuleNoBody (std::move (name), std::move (vis),
-			       std::move (outer_attrs),
-			       locus)); // module name?
+      return std::unique_ptr<AST::Module> (
+	new AST::Module (std::move (name), std::move (vis),
+			 std::move (outer_attrs),
+			 locus)); // module name?
       case LEFT_CURLY: {
 	lexer.skip_token ();
 
@@ -2153,10 +2137,10 @@ Parser<ManagedTokenSource>::parse_module (AST::Visibility vis,
 	    return nullptr;
 	  }
 
-	return std::unique_ptr<AST::ModuleBodied> (
-	  new AST::ModuleBodied (std::move (name), locus, std::move (items),
-				 std::move (vis), std::move (inner_attrs),
-				 std::move (outer_attrs))); // module name?
+	return std::unique_ptr<AST::Module> (
+	  new AST::Module (std::move (name), locus, std::move (items),
+			   std::move (vis), std::move (inner_attrs),
+			   std::move (outer_attrs))); // module name?
       }
     default:
       add_error (
@@ -4294,6 +4278,8 @@ Parser<ManagedTokenSource>::parse_tuple_field ()
   // parse visibility if it exists
   AST::Visibility vis = parse_visibility ();
 
+  Location locus = lexer.peek_token ()->get_locus ();
+
   // parse type, which is required
   std::unique_ptr<AST::Type> field_type = parse_type ();
   if (field_type == nullptr)
@@ -4307,7 +4293,7 @@ Parser<ManagedTokenSource>::parse_tuple_field ()
       return AST::TupleField::create_error ();
     }
 
-  return AST::TupleField (std::move (field_type), std::move (vis),
+  return AST::TupleField (std::move (field_type), std::move (vis), locus,
 			  std::move (outer_attrs));
 }
 
@@ -4322,6 +4308,9 @@ Parser<ManagedTokenSource>::parse_enum (AST::Visibility vis,
 
   // parse enum name
   const_TokenPtr enum_name_tok = expect_token (IDENTIFIER);
+  if (enum_name_tok == nullptr)
+    return nullptr;
+
   Identifier enum_name = enum_name_tok->get_str ();
 
   // parse generic params (of enum container, not enum variants) if they exist
@@ -4524,7 +4513,6 @@ Parser<ManagedTokenSource>::parse_union (AST::Visibility vis,
   const_TokenPtr union_keyword = expect_token (IDENTIFIER);
   rust_assert (union_keyword->get_str () == "union");
   Location locus = union_keyword->get_locus ();
-  lexer.skip_token ();
 
   // parse actual union name
   const_TokenPtr union_name_tok = expect_token (IDENTIFIER);
@@ -4648,6 +4636,9 @@ Parser<ManagedTokenSource>::parse_static_item (AST::Visibility vis,
     }
 
   const_TokenPtr ident_tok = expect_token (IDENTIFIER);
+  if (ident_tok == nullptr)
+    return nullptr;
+
   Identifier ident = ident_tok->get_str ();
 
   if (!skip_token (COLON))
@@ -4698,6 +4689,9 @@ Parser<ManagedTokenSource>::parse_trait (AST::Visibility vis,
 
   // parse trait name
   const_TokenPtr ident_tok = expect_token (IDENTIFIER);
+  if (ident_tok == nullptr)
+    return nullptr;
+
   Identifier ident = ident_tok->get_str ();
 
   // parse generic parameters (if they exist)
@@ -4803,6 +4797,9 @@ Parser<ManagedTokenSource>::parse_trait_item ()
 
 	// parse function or method name
 	const_TokenPtr ident_tok = expect_token (IDENTIFIER);
+	if (ident_tok == nullptr)
+	  return nullptr;
+
 	Identifier ident = ident_tok->get_str ();
 
 	// parse generic params
@@ -4935,6 +4932,9 @@ Parser<ManagedTokenSource>::parse_trait_type (AST::AttrVec outer_attrs)
   skip_token (TYPE);
 
   const_TokenPtr ident_tok = expect_token (IDENTIFIER);
+  if (ident_tok == nullptr)
+    return nullptr;
+
   Identifier ident = ident_tok->get_str ();
 
   std::vector<std::unique_ptr<AST::TypeParamBound>> bounds;
@@ -4971,6 +4971,9 @@ Parser<ManagedTokenSource>::parse_trait_const (AST::AttrVec outer_attrs)
 
   // parse constant item name
   const_TokenPtr ident_tok = expect_token (IDENTIFIER);
+  if (ident_tok == nullptr)
+    return nullptr;
+
   Identifier ident = ident_tok->get_str ();
 
   if (!skip_token (COLON))
@@ -5336,6 +5339,9 @@ Parser<ManagedTokenSource>::parse_inherent_impl_function_or_method (
 
   // parse function or method name
   const_TokenPtr ident_tok = expect_token (IDENTIFIER);
+  if (ident_tok == nullptr)
+    return nullptr;
+
   Identifier ident = ident_tok->get_str ();
 
   // parse generic params
@@ -6054,8 +6060,8 @@ Parser<ManagedTokenSource>::parse_stmt ()
       break;
     // crappy hack to do union "keyword"
     case IDENTIFIER:
-      // TODO: ensure std::string and literal comparison works
-      if (t->get_str () == "union")
+      if (t->get_str () == "union"
+	  && lexer.peek_token (1)->get_id () == IDENTIFIER)
 	{
 	  return parse_vis_item (std::move (outer_attrs));
 	  // or should this go straight to parsing union?
@@ -7085,7 +7091,7 @@ Parser<ManagedTokenSource>::parse_expr_with_block (AST::AttrVec outer_attrs)
       break;
       case WHILE: {
 	// while or while let, so more lookahead to find out
-	if (lexer.peek_token ()->get_id () == LET)
+	if (lexer.peek_token (1)->get_id () == LET)
 	  {
 	    // while let loop expr
 	    expr_parsed = parse_while_let_loop_expr (std::move (outer_attrs));
@@ -8704,10 +8710,17 @@ Parser<ManagedTokenSource>::parse_async_block_expr (AST::AttrVec outer_attrs)
 // Parses an unsafe block expression.
 template <typename ManagedTokenSource>
 std::unique_ptr<AST::UnsafeBlockExpr>
-Parser<ManagedTokenSource>::parse_unsafe_block_expr (AST::AttrVec outer_attrs)
+Parser<ManagedTokenSource>::parse_unsafe_block_expr (AST::AttrVec outer_attrs,
+						     bool pratt_parse)
 {
-  Location locus = lexer.peek_token ()->get_locus ();
-  skip_token (UNSAFE);
+  Location locus;
+  if (!pratt_parse)
+    {
+      locus = lexer.peek_token ()->get_locus ();
+      skip_token (UNSAFE);
+    }
+  else
+    locus = lexer.peek_token ()->get_locus () - 1;
 
   // parse block expression (required)
   std::unique_ptr<AST::BlockExpr> block_expr = parse_block_expr ();
@@ -9996,13 +10009,6 @@ Parser<ManagedTokenSource>::parse_type_no_bounds ()
 				       std::move (tok_tree)),
 		  {}, locus));
 	    }
-	  case PLUS:
-	    // type param bounds - not allowed, here for error message
-	    add_error (Error (t->get_locus (),
-			      "type param bounds (in TraitObjectType) are not "
-			      "allowed as TypeNoBounds"));
-
-	    return nullptr;
 	  default:
 	    // assume that this is a type path and not an error
 	    return std::unique_ptr<AST::TypePath> (
@@ -11667,8 +11673,8 @@ Parser<ManagedTokenSource>::parse_stmt_or_expr_without_block ()
       }
     // crappy hack to do union "keyword"
     case IDENTIFIER:
-      // TODO: ensure std::string and literal comparison works
-      if (t->get_str () == "union")
+      if (t->get_str () == "union"
+	  && lexer.peek_token (1)->get_id () == IDENTIFIER)
 	{
 	  std::unique_ptr<AST::VisItem> item (
 	    parse_vis_item (std::move (outer_attrs)));
@@ -12348,6 +12354,18 @@ Parser<ManagedTokenSource>::parse_expr (int right_binding_power,
 					ParseRestrictions restrictions)
 {
   const_TokenPtr current_token = lexer.peek_token ();
+  // Special hack because we are allowed to return nullptr, in that case we
+  // don't want to skip the token, since we don't actually parse it. But if
+  // null isn't allowed it indicates an error, and we want to skip past that.
+  // So return early if it is one of the tokens that ends an expression
+  // (or at least cannot start a new expression).
+  if (restrictions.expr_can_be_null)
+    {
+      TokenId id = current_token->get_id ();
+      if (id == SEMICOLON || id == RIGHT_PAREN || id == RIGHT_CURLY
+	  || id == RIGHT_SQUARE)
+	return nullptr;
+    }
   lexer.skip_token ();
 
   // parse null denotation (unary part of expression)
@@ -12545,9 +12563,17 @@ Parser<ManagedTokenSource>::null_denotation (const_TokenPtr tok,
       return std::unique_ptr<AST::LiteralExpr> (
 	new AST::LiteralExpr (tok->get_str (), AST::Literal::STRING,
 			      tok->get_type_hint (), {}, tok->get_locus ()));
+    case BYTE_STRING_LITERAL:
+      return std::unique_ptr<AST::LiteralExpr> (
+	new AST::LiteralExpr (tok->get_str (), AST::Literal::BYTE_STRING,
+			      tok->get_type_hint (), {}, tok->get_locus ()));
     case CHAR_LITERAL:
       return std::unique_ptr<AST::LiteralExpr> (
 	new AST::LiteralExpr (tok->get_str (), AST::Literal::CHAR,
+			      tok->get_type_hint (), {}, tok->get_locus ()));
+    case BYTE_CHAR_LITERAL:
+      return std::unique_ptr<AST::LiteralExpr> (
+	new AST::LiteralExpr (tok->get_str (), AST::Literal::BYTE,
 			      tok->get_type_hint (), {}, tok->get_locus ()));
     case TRUE_LITERAL:
       return std::unique_ptr<AST::LiteralExpr> (
@@ -12823,6 +12849,8 @@ Parser<ManagedTokenSource>::null_denotation (const_TokenPtr tok,
     case LEFT_SQUARE:
       // array definition expr (not indexing)
       return parse_array_expr (std::move (outer_attrs), true);
+    case UNSAFE:
+      return parse_unsafe_block_expr (std::move (outer_attrs), true);
     default:
       if (!restrictions.expr_can_be_null)
 	add_error (Error (tok->get_locus (),
@@ -14026,6 +14054,9 @@ Parser<ManagedTokenSource>::parse_led_range_exclusive_expr (
 {
   // FIXME: this probably parses expressions accidently or whatever
   // try parsing RHS (as tok has already been consumed in parse_expression)
+  // Can be nullptr, in which case it is a RangeFromExpr, otherwise a
+  // RangeFromToExpr.
+  restrictions.expr_can_be_null = true;
   std::unique_ptr<AST::Expr> right
     = parse_expr (LBP_DOT_DOT, AST::AttrVec (), restrictions);
 
@@ -14183,6 +14214,9 @@ Parser<ManagedTokenSource>::parse_field_access_expr (
   /* get field name identifier (assume that this is a field access expr and not
    * await, for instance) */
   const_TokenPtr ident_tok = expect_token (IDENTIFIER);
+  if (ident_tok == nullptr)
+    return nullptr;
+
   Identifier ident = ident_tok->get_str ();
 
   Location locus = struct_expr->get_locus_slow ();

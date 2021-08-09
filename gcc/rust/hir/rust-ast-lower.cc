@@ -21,6 +21,7 @@
 #include "rust-ast-lower-implitem.h"
 #include "rust-ast-lower-expr.h"
 #include "rust-ast-lower-block.h"
+#include "rust-ast-lower-type.h"
 
 namespace Rust {
 namespace HIR {
@@ -262,6 +263,12 @@ ASTLowerPathInExpression::visit (AST::PathInExpression &expr)
   std::vector<HIR::PathExprSegment> path_segments;
   expr.iterate_path_segments ([&] (AST::PathExprSegment &s) mutable -> bool {
     path_segments.push_back (lower_path_expr_seg (s));
+
+    // insert the mappings for the segment
+    HIR::PathExprSegment *lowered_seg = &path_segments.back ();
+    mappings->insert_hir_path_expr_seg (
+      lowered_seg->get_mappings ().get_crate_num (),
+      lowered_seg->get_mappings ().get_hirid (), lowered_seg);
     return true;
   });
 
@@ -392,6 +399,20 @@ ASTLowerTypePath::visit (AST::TypePathSegmentGeneric &segment)
     std::move (mapping), segment_name, has_separating_scope_resolution,
     std::move (lifetime_args), std::move (type_args), std::move (binding_args),
     segment.get_locus ());
+}
+
+// rust-ast-lower-base
+
+HIR::Type *
+ASTLoweringBase::lower_type_no_bounds (AST::TypeNoBounds *type)
+{
+  return ASTLoweringType::translate (type);
+}
+
+HIR::TypeParamBound *
+ASTLoweringBase::lower_bound (AST::TypeParamBound *bound)
+{
+  return ASTLoweringTypeBounds::translate (bound);
 }
 
 } // namespace HIR

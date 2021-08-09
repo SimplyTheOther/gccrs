@@ -190,7 +190,17 @@ public:
     TyTy::BaseType *base
       = TypeCheckType::Resolve (type.get_base_type ().get ());
     translated = new TyTy::ReferenceType (type.get_mappings ().get_hirid (),
-					  TyTy::TyVar (base->get_ref ()));
+					  TyTy::TyVar (base->get_ref ()),
+					  type.get_has_mut ());
+  }
+
+  void visit (HIR::RawPointerType &type) override
+  {
+    TyTy::BaseType *base
+      = TypeCheckType::Resolve (type.get_base_type ().get ());
+    translated
+      = new TyTy::PointerType (type.get_mappings ().get_hirid (),
+			       TyTy::TyVar (base->get_ref ()), type.is_mut ());
   }
 
   void visit (HIR::InferredType &type) override
@@ -205,7 +215,7 @@ private:
   {}
 
   void
-  check_for_unconstrained (std::vector<std::unique_ptr<HIR::Type> > &type_args)
+  check_for_unconstrained (std::vector<std::unique_ptr<HIR::Type>> &type_args)
   {
     std::map<std::string, Location> param_location_map;
     std::set<std::string> param_tys;
@@ -260,8 +270,34 @@ public:
     if (param.has_type ())
       TypeCheckType::Resolve (param.get_type ().get ());
 
+    std::vector<TyTy::TypeBoundPredicate> specified_bounds;
+    if (param.has_type_param_bounds ())
+      {
+	for (auto &bound : param.get_type_param_bounds ())
+	  {
+	    switch (bound->get_bound_type ())
+	      {
+		case HIR::TypeParamBound::BoundType::TRAITBOUND: {
+		  HIR::TraitBound *b
+		    = static_cast<HIR::TraitBound *> (bound.get ());
+
+		  TraitReference *trait = resolve_trait_path (b->get_path ());
+		  TyTy::TypeBoundPredicate predicate (
+		    trait->get_mappings ().get_defid (), b->get_locus ());
+
+		  specified_bounds.push_back (std::move (predicate));
+		}
+		break;
+
+	      default:
+		break;
+	      }
+	  }
+      }
+
     resolved = new TyTy::ParamType (param.get_type_representation (),
-				    param.get_mappings ().get_hirid (), param);
+				    param.get_mappings ().get_hirid (), param,
+				    specified_bounds);
   }
 
 private:

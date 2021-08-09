@@ -81,6 +81,20 @@ public:
       });
   }
 
+  void visit (AST::Union &union_decl) override
+  {
+    auto path
+      = prefix.append (CanonicalPath::new_seg (union_decl.get_node_id (),
+					       union_decl.get_identifier ()));
+    resolver->get_type_scope ().insert (
+      path, union_decl.get_node_id (), union_decl.get_locus (), false,
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (union_decl.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
+      });
+  }
+
   void visit (AST::StaticItem &var) override
   {
     auto path = prefix.append (
@@ -189,6 +203,14 @@ public:
 
     for (auto &item : trait.get_trait_items ())
       ResolveTopLevelTraitItems::go (item.get (), path);
+  }
+
+  void visit (AST::ExternBlock &extern_block) override
+  {
+    for (auto &item : extern_block.get_extern_items ())
+      {
+	ResolveToplevelExternItem::go (item.get (), prefix);
+      }
   }
 
 private:

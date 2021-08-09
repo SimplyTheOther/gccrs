@@ -25,6 +25,10 @@
 #include "rust-diagnostics.h"
 
 namespace Rust {
+namespace Resolver {
+class TraitReference;
+}
+
 namespace TyTy {
 
 // https://rustc-dev-guide.rust-lang.org/type-inference.html#inference-variables
@@ -35,6 +39,7 @@ enum TypeKind
   ADT,
   STR,
   REF,
+  POINTER,
   PARAM,
   ARRAY,
   FNDEF,
@@ -71,6 +76,9 @@ public:
 
       case TypeKind::REF:
 	return "REF";
+
+      case TypeKind::POINTER:
+	return "POINTER";
 
       case TypeKind::PARAM:
 	return "PARAM";
@@ -121,9 +129,65 @@ public:
   }
 };
 
+class TypeBoundPredicate
+{
+public:
+  TypeBoundPredicate (DefId reference, Location locus)
+    : reference (reference), locus (locus)
+  {}
+
+  std::string as_string () const;
+
+  const Resolver::TraitReference *get () const;
+
+  Location get_locus () const { return locus; }
+
+  std::string get_name () const;
+
+private:
+  DefId reference;
+  Location locus;
+};
+
+class TypeBoundsMappings
+{
+protected:
+  TypeBoundsMappings (std::vector<TypeBoundPredicate> specified_bounds)
+    : specified_bounds (specified_bounds)
+  {}
+
+public:
+  std::vector<TypeBoundPredicate> &get_specified_bounds ()
+  {
+    return specified_bounds;
+  }
+
+  const std::vector<TypeBoundPredicate> &get_specified_bounds () const
+  {
+    return specified_bounds;
+  }
+
+  std::string bounds_as_string () const
+  {
+    std::string buf;
+    for (auto &b : specified_bounds)
+      buf += b.as_string () + ", ";
+
+    return "bounds:[" + buf + "]";
+  }
+
+protected:
+  void add_bound (TypeBoundPredicate predicate)
+  {
+    specified_bounds.push_back (predicate);
+  }
+
+  std::vector<TypeBoundPredicate> specified_bounds;
+};
+
 class TyVisitor;
 class TyConstVisitor;
-class BaseType
+class BaseType : public TypeBoundsMappings
 {
 public:
   virtual ~BaseType () {}
@@ -156,8 +220,22 @@ public:
   virtual BaseType *unify (BaseType *other) = 0;
 
   // similar to unify but does not actually perform type unification but
-  // determines whether they are compatible
+  // determines whether they are compatible. Consider the following
+  //
+  // fn foo<T>() -> T { ... }
+  // fn foo() -> i32 { ... }
+  //
+  // when the function has been substituted they can be considered equal.
+  //
+  // It can also be used to optional emit errors for trait item compatibility
+  // checks
   virtual bool can_eq (const BaseType *other, bool emit_errors) const = 0;
+
+  // this is the base coercion interface for types
+  virtual BaseType *coerce (BaseType *other) = 0;
+
+  // this is the cast interface for TypeCastExpr
+  virtual BaseType *cast (BaseType *other) = 0;
 
   // Check value equality between two ty. Type inference rules are ignored. Two
   //   ty are considered equal if they're of the same kind, and
@@ -168,6 +246,12 @@ public:
     return get_kind () == other.get_kind ();
   }
 
+  bool satisfies_bound (const TypeBoundPredicate &predicate) const;
+
+  bool bounds_compatible (const BaseType &other, Location locus) const;
+
+  void inherit_bounds (const BaseType &other);
+
   virtual bool is_unit () const { return false; }
 
   virtual bool is_concrete () const { return true; }
@@ -176,10 +260,10 @@ public:
 
   /* Returns a pointer to a clone of this. The caller is responsible for
    * releasing the memory of the returned ty. */
-  virtual BaseType *clone () = 0;
+  virtual BaseType *clone () const = 0;
 
   // get_combined_refs returns the chain of node refs involved in unification
-  std::set<HirId> get_combined_refs () { return combined; }
+  std::set<HirId> get_combined_refs () const { return combined; }
 
   void append_reference (HirId id) { combined.insert (id); }
 
@@ -222,8 +306,15 @@ public:
 protected:
   BaseType (HirId ref, HirId ty_ref, TypeKind kind,
 	    std::set<HirId> refs = std::set<HirId> ())
-    : kind (kind), ref (ref), ty_ref (ty_ref), combined (refs),
-      mappings (Analysis::Mappings::get ())
+    : TypeBoundsMappings ({}), kind (kind), ref (ref), ty_ref (ty_ref),
+      combined (refs), mappings (Analysis::Mappings::get ())
+  {}
+
+  BaseType (HirId ref, HirId ty_ref, TypeKind kind,
+	    std::vector<TypeBoundPredicate> specified_bounds,
+	    std::set<HirId> refs = std::set<HirId> ())
+    : TypeBoundsMappings (specified_bounds), kind (kind), ref (ref),
+      ty_ref (ty_ref), combined (refs), mappings (Analysis::Mappings::get ())
   {}
 
   TypeKind kind;
@@ -279,7 +370,10 @@ public:
 
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
 
-  BaseType *clone () final override;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
+
+  BaseType *clone () const final override;
 
   InferTypeKind get_infer_kind () const { return infer_kind; }
 
@@ -313,8 +407,10 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   std::string get_name () const override final { return as_string (); }
 };
@@ -324,15 +420,18 @@ class ParamType : public BaseType
 {
 public:
   ParamType (std::string symbol, HirId ref, HIR::GenericParam &param,
+	     std::vector<TypeBoundPredicate> specified_bounds,
 	     std::set<HirId> refs = std::set<HirId> ())
-    : BaseType (ref, ref, TypeKind::PARAM, refs), symbol (symbol), param (param)
+    : BaseType (ref, ref, TypeKind::PARAM, specified_bounds, refs),
+      symbol (symbol), param (param)
   {}
 
   ParamType (std::string symbol, HirId ref, HirId ty_ref,
 	     HIR::GenericParam &param,
+	     std::vector<TypeBoundPredicate> specified_bounds,
 	     std::set<HirId> refs = std::set<HirId> ())
-    : BaseType (ref, ty_ref, TypeKind::PARAM, refs), symbol (symbol),
-      param (param)
+    : BaseType (ref, ty_ref, TypeKind::PARAM, specified_bounds, refs),
+      symbol (symbol), param (param)
   {}
 
   void accept_vis (TyVisitor &vis) override;
@@ -342,8 +441,10 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   std::string get_symbol () const;
 
@@ -428,6 +529,8 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -435,7 +538,7 @@ public:
 
   BaseType *get_field (size_t index) const;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   bool is_concrete () const override final
   {
@@ -487,8 +590,18 @@ public:
 
   std::string as_string () const { return param->as_string (); }
 
-  void fill_param_ty (BaseType *type)
+  void fill_param_ty (BaseType *type, Location locus)
   {
+    if (type->get_kind () == TyTy::TypeKind::INFER)
+      {
+	type->inherit_bounds (*param);
+      }
+    else
+      {
+	if (!param->bounds_compatible (*type, locus))
+	  return;
+      }
+
     if (type->get_kind () == TypeKind::PARAM)
       {
 	delete param;
@@ -500,7 +613,7 @@ public:
       }
   }
 
-  SubstitutionParamMapping clone ()
+  SubstitutionParamMapping clone () const
   {
     return SubstitutionParamMapping (generic, static_cast<ParamType *> (
 						param->clone ()));
@@ -701,7 +814,7 @@ public:
     return substitutions;
   }
 
-  std::vector<SubstitutionParamMapping> clone_substs ()
+  std::vector<SubstitutionParamMapping> clone_substs () const
   {
     std::vector<SubstitutionParamMapping> clone;
 
@@ -828,7 +941,15 @@ protected:
 class ADTType : public BaseType, public SubstitutionRef
 {
 public:
-  ADTType (HirId ref, std::string identifier, bool is_tuple,
+  enum ADTKind
+  {
+    STRUCT_STRUCT,
+    TUPLE_STRUCT,
+    UNION,
+    // ENUM ?
+  };
+
+  ADTType (HirId ref, std::string identifier, ADTKind adt_kind,
 	   std::vector<StructFieldType *> fields,
 	   std::vector<SubstitutionParamMapping> subst_refs,
 	   SubstitutionArgumentMappings generic_arguments
@@ -836,10 +957,10 @@ public:
 	   std::set<HirId> refs = std::set<HirId> ())
     : BaseType (ref, ref, TypeKind::ADT, refs),
       SubstitutionRef (std::move (subst_refs), std::move (generic_arguments)),
-      identifier (identifier), fields (fields), is_tuple (is_tuple)
+      identifier (identifier), fields (fields), adt_kind (adt_kind)
   {}
 
-  ADTType (HirId ref, HirId ty_ref, std::string identifier, bool is_tuple,
+  ADTType (HirId ref, HirId ty_ref, std::string identifier, ADTKind adt_kind,
 	   std::vector<StructFieldType *> fields,
 	   std::vector<SubstitutionParamMapping> subst_refs,
 	   SubstitutionArgumentMappings generic_arguments
@@ -847,10 +968,12 @@ public:
 	   std::set<HirId> refs = std::set<HirId> ())
     : BaseType (ref, ty_ref, TypeKind::ADT, refs),
       SubstitutionRef (std::move (subst_refs), std::move (generic_arguments)),
-      identifier (identifier), fields (fields), is_tuple (is_tuple)
+      identifier (identifier), fields (fields), adt_kind (adt_kind)
   {}
 
-  bool get_is_tuple () { return is_tuple; }
+  ADTKind get_adt_kind () const { return adt_kind; }
+  bool is_tuple_struct () const { return adt_kind == TUPLE_STRUCT; }
+  bool is_union () const { return adt_kind == UNION; }
 
   bool is_unit () const override { return this->fields.empty (); }
 
@@ -861,6 +984,8 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -903,7 +1028,7 @@ public:
     return nullptr;
   }
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   std::vector<StructFieldType *> &get_fields () { return fields; }
   const std::vector<StructFieldType *> &get_fields () const { return fields; }
@@ -935,20 +1060,25 @@ public:
 private:
   std::string identifier;
   std::vector<StructFieldType *> fields;
-  bool is_tuple;
+  ADTType::ADTKind adt_kind;
 };
 
 class FnType : public BaseType, public SubstitutionRef
 {
 public:
-  FnType (HirId ref, DefId id, std::string identifier, bool is_method,
-	  std::vector<std::pair<HIR::Pattern *, BaseType *> > params,
+#define FNTYPE_DEFAULT_FLAGS 0x00
+#define FNTYPE_IS_METHOD_FLAG 0x01
+#define FNTYPE_IS_EXTERN_FLAG 0x02
+#define FNTYPE_IS_VARADIC_FLAG 0X04
+
+  FnType (HirId ref, DefId id, std::string identifier, uint8_t flags,
+	  std::vector<std::pair<HIR::Pattern *, BaseType *>> params,
 	  BaseType *type, std::vector<SubstitutionParamMapping> subst_refs,
 	  std::set<HirId> refs = std::set<HirId> ())
     : BaseType (ref, ref, TypeKind::FNDEF, refs),
       SubstitutionRef (std::move (subst_refs),
 		       SubstitutionArgumentMappings::error ()),
-      params (std::move (params)), type (type), is_method_flag (is_method),
+      params (std::move (params)), type (type), flags (flags),
       identifier (identifier), id (id)
   {
     LocalDefId local_def_id = id & DEF_ID_LOCAL_DEF_MASK;
@@ -956,15 +1086,15 @@ public:
   }
 
   FnType (HirId ref, HirId ty_ref, DefId id, std::string identifier,
-	  bool is_method,
-	  std::vector<std::pair<HIR::Pattern *, BaseType *> > params,
+	  uint8_t flags,
+	  std::vector<std::pair<HIR::Pattern *, BaseType *>> params,
 	  BaseType *type, std::vector<SubstitutionParamMapping> subst_refs,
 	  std::set<HirId> refs = std::set<HirId> ())
     : BaseType (ref, ty_ref, TypeKind::FNDEF, refs),
       SubstitutionRef (std::move (subst_refs),
 		       SubstitutionArgumentMappings::error ()),
-      params (params), type (type), is_method_flag (is_method),
-      identifier (identifier), id (id)
+      params (params), type (type), flags (flags), identifier (identifier),
+      id (id)
   {
     LocalDefId local_def_id = id & DEF_ID_LOCAL_DEF_MASK;
     rust_assert (local_def_id != UNKNOWN_LOCAL_DEFID);
@@ -981,6 +1111,8 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -991,8 +1123,12 @@ public:
     if (num_params () == 0)
       return false;
 
-    return is_method_flag;
+    return (flags & FNTYPE_IS_METHOD_FLAG) != 0;
   }
+
+  bool is_extern () const { return (flags & FNTYPE_IS_EXTERN_FLAG) != 0; }
+
+  bool is_varadic () const { return (flags & FNTYPE_IS_VARADIC_FLAG) != 0; }
 
   DefId get_id () const { return id; }
 
@@ -1004,12 +1140,12 @@ public:
     return get_params ().at (0).second;
   }
 
-  std::vector<std::pair<HIR::Pattern *, BaseType *> > &get_params ()
+  std::vector<std::pair<HIR::Pattern *, BaseType *>> &get_params ()
   {
     return params;
   }
 
-  const std::vector<std::pair<HIR::Pattern *, BaseType *> > &get_params () const
+  const std::vector<std::pair<HIR::Pattern *, BaseType *>> &get_params () const
   {
     return params;
   }
@@ -1026,7 +1162,7 @@ public:
 
   BaseType *get_return_type () const { return type; }
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   bool needs_generic_substitutions () const override final
   {
@@ -1044,9 +1180,9 @@ public:
   handle_substitions (SubstitutionArgumentMappings mappings) override final;
 
 private:
-  std::vector<std::pair<HIR::Pattern *, BaseType *> > params;
+  std::vector<std::pair<HIR::Pattern *, BaseType *>> params;
   BaseType *type;
-  bool is_method_flag;
+  uint8_t flags;
   std::string identifier;
   DefId id;
 };
@@ -1081,10 +1217,12 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
   bool is_equal (const BaseType &other) const override;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   void iterate_params (std::function<bool (BaseType *)> cb) const
   {
@@ -1124,6 +1262,8 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -1132,7 +1272,7 @@ public:
 
   BaseType *get_element_type () const;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   bool is_concrete () const final override
   {
@@ -1164,8 +1304,10 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 };
 
 class IntType : public BaseType
@@ -1198,10 +1340,12 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
   IntKind get_int_kind () const { return int_kind; }
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -1239,10 +1383,12 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
   UintKind get_uint_kind () const { return uint_kind; }
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -1278,10 +1424,12 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
   FloatKind get_float_kind () const { return float_kind; }
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   bool is_equal (const BaseType &other) const override;
 
@@ -1293,22 +1441,12 @@ class USizeType : public BaseType
 {
 public:
   USizeType (HirId ref, std::set<HirId> refs = std::set<HirId> ())
-    : BaseType (ref, ref, TypeKind::USIZE)
-  {
-    // TODO unused; should 'refs' be passed as the last argument to the
-    // 'BaseType' constructor call?  Potential change in behavior (if 'refs' is
-    // provided by caller)?
-    (void) refs;
-  }
+    : BaseType (ref, ref, TypeKind::USIZE, refs)
+  {}
 
   USizeType (HirId ref, HirId ty_ref, std::set<HirId> refs = std::set<HirId> ())
-    : BaseType (ref, ty_ref, TypeKind::USIZE)
-  {
-    // TODO unused; should 'refs' be passed as the last argument to the
-    // 'BaseType' constructor call?  Potential change in behavior (if 'refs' is
-    // provided by caller)?
-    (void) refs;
-  }
+    : BaseType (ref, ty_ref, TypeKind::USIZE, refs)
+  {}
 
   void accept_vis (TyVisitor &vis) override;
   void accept_vis (TyConstVisitor &vis) const override;
@@ -1319,30 +1457,22 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 };
 
 class ISizeType : public BaseType
 {
 public:
   ISizeType (HirId ref, std::set<HirId> refs = std::set<HirId> ())
-    : BaseType (ref, ref, TypeKind::ISIZE)
-  {
-    // TODO unused; should 'refs' be passed as the last argument to the
-    // 'BaseType' constructor call?  Potential change in behavior (if 'refs' is
-    // provided by caller)?
-    (void) refs;
-  }
+    : BaseType (ref, ref, TypeKind::ISIZE, refs)
+  {}
 
   ISizeType (HirId ref, HirId ty_ref, std::set<HirId> refs = std::set<HirId> ())
-    : BaseType (ref, ty_ref, TypeKind::ISIZE)
-  {
-    // TODO unused; should 'refs' be passed as the last argument to the
-    // 'BaseType' constructor call?  Potential change in behavior (if 'refs' is
-    // provided by caller)?
-    (void) refs;
-  }
+    : BaseType (ref, ty_ref, TypeKind::ISIZE, refs)
+  {}
 
   void accept_vis (TyVisitor &vis) override;
   void accept_vis (TyConstVisitor &vis) const override;
@@ -1353,30 +1483,22 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 };
 
 class CharType : public BaseType
 {
 public:
   CharType (HirId ref, std::set<HirId> refs = std::set<HirId> ())
-    : BaseType (ref, ref, TypeKind::CHAR)
-  {
-    // TODO unused; should 'refs' be passed as the last argument to the
-    // 'BaseType' constructor call?  Potential change in behavior (if 'refs' is
-    // provided by caller)?
-    (void) refs;
-  }
+    : BaseType (ref, ref, TypeKind::CHAR, refs)
+  {}
 
   CharType (HirId ref, HirId ty_ref, std::set<HirId> refs = std::set<HirId> ())
-    : BaseType (ref, ty_ref, TypeKind::CHAR)
-  {
-    // TODO unused; should 'refs' be passed as the last argument to the
-    // 'BaseType' constructor call?  Potential change in behavior (if 'refs' is
-    // provided by caller)?
-    (void) refs;
-  }
+    : BaseType (ref, ty_ref, TypeKind::CHAR, refs)
+  {}
 
   void accept_vis (TyVisitor &vis) override;
   void accept_vis (TyConstVisitor &vis) const override;
@@ -1387,32 +1509,24 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 };
 
 class ReferenceType : public BaseType
 {
 public:
-  ReferenceType (HirId ref, TyVar base,
+  ReferenceType (HirId ref, TyVar base, bool is_mut,
 		 std::set<HirId> refs = std::set<HirId> ())
-    : BaseType (ref, ref, TypeKind::REF), base (base)
-  {
-    // TODO unused; should 'refs' be passed as the last argument to the
-    // 'BaseType' constructor call?  Potential change in behavior (if 'refs' is
-    // provided by caller)?
-    (void) refs;
-  }
+    : BaseType (ref, ref, TypeKind::REF, refs), base (base), is_mut (is_mut)
+  {}
 
-  ReferenceType (HirId ref, HirId ty_ref, TyVar base,
+  ReferenceType (HirId ref, HirId ty_ref, TyVar base, bool is_mut,
 		 std::set<HirId> refs = std::set<HirId> ())
-    : BaseType (ref, ty_ref, TypeKind::REF), base (base)
-  {
-    // TODO unused; should 'refs' be passed as the last argument to the
-    // 'BaseType' constructor call?  Potential change in behavior (if 'refs' is
-    // provided by caller)?
-    (void) refs;
-  }
+    : BaseType (ref, ty_ref, TypeKind::REF, refs), base (base), is_mut (is_mut)
+  {}
 
   BaseType *get_base () const;
 
@@ -1425,10 +1539,12 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
   bool is_equal (const BaseType &other) const override;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   bool contains_type_parameters () const override final
   {
@@ -1437,30 +1553,71 @@ public:
 
   ReferenceType *handle_substitions (SubstitutionArgumentMappings mappings);
 
+  bool is_mutable () const { return is_mut; }
+
 private:
   TyVar base;
+  bool is_mut;
+};
+
+class PointerType : public BaseType
+{
+public:
+  PointerType (HirId ref, TyVar base, bool is_mut,
+	       std::set<HirId> refs = std::set<HirId> ())
+    : BaseType (ref, ref, TypeKind::POINTER, refs), base (base), is_mut (is_mut)
+  {}
+
+  PointerType (HirId ref, HirId ty_ref, TyVar base, bool is_mut,
+	       std::set<HirId> refs = std::set<HirId> ())
+    : BaseType (ref, ty_ref, TypeKind::POINTER, refs), base (base),
+      is_mut (is_mut)
+  {}
+
+  BaseType *get_base () const;
+
+  void accept_vis (TyVisitor &vis) override;
+  void accept_vis (TyConstVisitor &vis) const override;
+
+  std::string as_string () const override;
+
+  std::string get_name () const override final { return as_string (); }
+
+  BaseType *unify (BaseType *other) override;
+  bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
+
+  bool is_equal (const BaseType &other) const override;
+
+  BaseType *clone () const final override;
+
+  bool contains_type_parameters () const override final
+  {
+    return get_base ()->contains_type_parameters ();
+  }
+
+  PointerType *handle_substitions (SubstitutionArgumentMappings mappings);
+
+  bool is_mutable () const { return is_mut; }
+
+  bool is_const () const { return !is_mut; }
+
+private:
+  TyVar base;
+  bool is_mut;
 };
 
 class StrType : public BaseType
 {
 public:
   StrType (HirId ref, std::set<HirId> refs = std::set<HirId> ())
-    : BaseType (ref, ref, TypeKind::STR)
-  {
-    // TODO unused; should 'refs' be passed as the last argument to the
-    // 'BaseType' constructor call?  Potential change in behavior (if 'refs' is
-    // provided by caller)?
-    (void) refs;
-  }
+    : BaseType (ref, ref, TypeKind::STR, refs)
+  {}
 
   StrType (HirId ref, HirId ty_ref, std::set<HirId> refs = std::set<HirId> ())
-    : BaseType (ref, ty_ref, TypeKind::STR)
-  {
-    // TODO unused; should 'refs' be passed as the last argument to the
-    // 'BaseType' constructor call?  Potential change in behavior (if 'refs' is
-    // provided by caller)?
-    (void) refs;
-  }
+    : BaseType (ref, ty_ref, TypeKind::STR, refs)
+  {}
 
   std::string get_name () const override final { return as_string (); }
 
@@ -1471,10 +1628,12 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
   bool is_equal (const BaseType &other) const override;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 };
 
 // https://doc.rust-lang.org/std/primitive.never.html
@@ -1505,8 +1664,10 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   std::string get_name () const override final { return as_string (); }
 
@@ -1534,8 +1695,10 @@ public:
 
   BaseType *unify (BaseType *other) override;
   bool can_eq (const BaseType *other, bool emit_errors) const override final;
+  BaseType *coerce (BaseType *other) override;
+  BaseType *cast (BaseType *other) override;
 
-  BaseType *clone () final override;
+  BaseType *clone () const final override;
 
   std::string get_name () const override final { return as_string (); }
 

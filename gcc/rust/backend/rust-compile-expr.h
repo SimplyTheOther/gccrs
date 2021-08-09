@@ -80,7 +80,7 @@ public:
       }
 
     translated
-      = ctx->get_backend ()->constructor_expression (tuple_type, vals,
+      = ctx->get_backend ()->constructor_expression (tuple_type, vals, -1,
 						     expr.get_locus ());
   }
 
@@ -278,7 +278,14 @@ public:
 	}
 	return;
 
-	case HIR::Literal::STRING: {
+	case HIR::Literal::BYTE: {
+	  char c = literal_value->as_string ().c_str ()[0];
+	  translated = ctx->get_backend ()->char_constant_expression (c);
+	}
+	return;
+
+      case HIR::Literal::STRING:
+	case HIR::Literal::BYTE_STRING: {
 	  auto base = ctx->get_backend ()->string_constant_expression (
 	    literal_value->as_string ());
 	  translated
@@ -410,6 +417,24 @@ public:
       = ctx->get_backend ()->negation_expression (op, negated_expr, location);
   }
 
+  void visit (HIR::TypeCastExpr &expr) override
+  {
+    TyTy::BaseType *tyty_to_cast_to = nullptr;
+    if (!ctx->get_tyctx ()->lookup_type (expr.get_mappings ().get_hirid (),
+					 &tyty_to_cast_to))
+      {
+	translated = ctx->get_backend ()->error_expression ();
+	return;
+      }
+
+    auto type_to_cast_to = TyTyResolveCompile::compile (ctx, tyty_to_cast_to);
+    auto casted_expr
+      = CompileExpr::Compile (expr.get_casted_expr ().get (), ctx);
+    translated
+      = ctx->get_backend ()->convert_expression (type_to_cast_to, casted_expr,
+						 expr.get_locus ());
+  }
+
   void visit (HIR::IfExpr &expr) override
   {
     auto stmt = CompileConditionalBlocks::compile (&expr, ctx, nullptr);
@@ -527,6 +552,11 @@ public:
       }
   }
 
+  void visit (HIR::UnsafeBlockExpr &expr) override
+  {
+    expr.get_block_expr ()->accept_vis (*this);
+  }
+
   void visit (HIR::StructExprStruct &struct_expr) override
   {
     TyTy::BaseType *tyty = nullptr;
@@ -565,6 +595,7 @@ public:
 
     translated
       = ctx->get_backend ()->constructor_expression (type, vals,
+						     struct_expr.union_index,
 						     struct_expr.get_locus ());
   }
 

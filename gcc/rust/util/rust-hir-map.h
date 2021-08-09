@@ -53,8 +53,10 @@ class NodeMapping
 {
 public:
   NodeMapping (CrateNum crateNum, NodeId nodeId, HirId hirId,
-	       LocalDefId localDefId);
-  ~NodeMapping ();
+	       LocalDefId localDefId)
+    : crateNum (crateNum), nodeId (nodeId), hirId (hirId),
+      localDefId (localDefId)
+  {}
 
   static NodeMapping get_error ();
 
@@ -67,6 +69,14 @@ public:
   static DefId get_defid (CrateNum crate_num, LocalDefId local_defid);
 
   std::string as_string () const;
+
+  bool is_equal (const NodeMapping &other) const
+  {
+    return get_crate_num () == other.get_crate_num ()
+	   && get_nodeid () == other.get_nodeid ()
+	   && get_hirid () == other.get_hirid ()
+	   && get_local_defid () == other.get_local_defid ();
+  }
 
 private:
   CrateNum crateNum;
@@ -128,6 +138,14 @@ public:
   void insert_hir_item (CrateNum crateNum, HirId id, HIR::Item *item);
   HIR::Item *lookup_hir_item (CrateNum crateNum, HirId id);
 
+  void insert_hir_trait_item (CrateNum crateNum, HirId id,
+			      HIR::TraitItem *item);
+  HIR::TraitItem *lookup_hir_trait_item (CrateNum crateNum, HirId id);
+
+  void insert_hir_extern_item (CrateNum crateNum, HirId id,
+			       HIR::ExternalItem *item);
+  HIR::ExternalItem *lookup_hir_extern_item (CrateNum crateNum, HirId id);
+
   void insert_hir_impl_block (CrateNum crateNum, HirId id,
 			      HIR::ImplBlock *item);
   HIR::ImplBlock *lookup_hir_impl_block (CrateNum crateNum, HirId id);
@@ -139,6 +157,14 @@ public:
 
   void insert_hir_expr (CrateNum crateNum, HirId id, HIR::Expr *expr);
   HIR::Expr *lookup_hir_expr (CrateNum crateNum, HirId id);
+
+  void insert_hir_path_expr_seg (CrateNum crateNum, HirId id,
+				 HIR::PathExprSegment *expr);
+  HIR::PathExprSegment *lookup_hir_path_expr_seg (CrateNum crateNum, HirId id);
+
+  void insert_hir_generic_param (CrateNum crateNum, HirId id,
+				 HIR::GenericParam *expr);
+  HIR::GenericParam *lookup_hir_generic_param (CrateNum crateNum, HirId id);
 
   void insert_hir_type (CrateNum crateNum, HirId id, HIR::Type *type);
   HIR::Type *lookup_hir_type (CrateNum crateNum, HirId id);
@@ -198,11 +224,27 @@ public:
   void iterate_impl_items (
     std::function<bool (HirId, HIR::ImplItem *, HIR::ImplBlock *)> cb);
 
+  void iterate_impl_blocks (std::function<bool (HirId, HIR::ImplBlock *)> cb);
+
   bool is_impl_item (HirId id)
   {
     HirId parent_impl_block_id = UNKNOWN_HIRID;
     return lookup_hir_implitem (get_current_crate (), id, &parent_impl_block_id)
 	   != nullptr;
+  }
+
+  void insert_trait_item_mapping (HirId trait_item_id, HIR::Trait *trait)
+  {
+    rust_assert (hirTraitItemsToTraitMappings.find (trait_item_id)
+		 == hirTraitItemsToTraitMappings.end ());
+    hirTraitItemsToTraitMappings[trait_item_id] = trait;
+  }
+
+  HIR::Trait *lookup_trait_item_mapping (HirId trait_item_id)
+  {
+    auto lookup = hirTraitItemsToTraitMappings.find (trait_item_id);
+    rust_assert (lookup != hirTraitItemsToTraitMappings.end ());
+    return lookup->second;
   }
 
 private:
@@ -232,6 +274,14 @@ private:
   std::map<CrateNum, std::map<HirId, HIR::SelfParam *> > hirSelfParamMappings;
   std::map<HirId, HIR::ImplBlock *> hirImplItemsToImplMappings;
   std::map<CrateNum, std::map<HirId, HIR::ImplBlock *> > hirImplBlockMappings;
+  std::map<CrateNum, std::map<HirId, HIR::TraitItem *> > hirTraitItemMappings;
+  std::map<CrateNum, std::map<HirId, HIR::ExternalItem *> >
+    hirExternItemMappings;
+  std::map<CrateNum, std::map<HirId, HIR::PathExprSegment *> >
+    hirPathSegMappings;
+  std::map<CrateNum, std::map<HirId, HIR::GenericParam *> >
+    hirGenericParamMappings;
+  std::map<HirId, HIR::Trait *> hirTraitItemsToTraitMappings;
 
   // location info
   std::map<CrateNum, std::map<NodeId, Location> > locations;

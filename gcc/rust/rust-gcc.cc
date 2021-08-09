@@ -256,9 +256,16 @@ public:
 			const std::vector<Btyped_identifier> &, Btype *,
 			const Location);
 
+  Btype *function_type_varadic (const Btyped_identifier &,
+				const std::vector<Btyped_identifier> &,
+				const std::vector<Btyped_identifier> &, Btype *,
+				const Location);
+
   Btype *function_ptr_type (Btype *, const std::vector<Btype *> &, Location);
 
   Btype *struct_type (const std::vector<Btyped_identifier> &);
+
+  Btype *union_type (const std::vector<Btyped_identifier> &);
 
   Btype *array_type (Btype *, Bexpression *);
 
@@ -333,6 +340,8 @@ public:
 
   Bexpression *wchar_constant_expression (wchar_t c);
 
+  Bexpression *char_constant_expression (char c);
+
   Bexpression *boolean_constant_expression (bool val);
 
   Bexpression *real_part_expression (Bexpression *bcomplex, Location);
@@ -370,7 +379,7 @@ public:
 					Location);
 
   Bexpression *constructor_expression (Btype *,
-				       const std::vector<Bexpression *> &,
+				       const std::vector<Bexpression *> &, int,
 				       Location);
 
   Bexpression *array_constructor_expression (Btype *,
@@ -524,7 +533,7 @@ private:
 
   Bfunction *make_function (tree t) { return new Bfunction (t); }
 
-  Btype *fill_in_struct (Btype *, const std::vector<Btyped_identifier> &);
+  Btype *fill_in_fields (Btype *, const std::vector<Btyped_identifier> &);
 
   Btype *fill_in_array (Btype *, Btype *, Bexpression *);
 
@@ -1047,6 +1056,62 @@ Gcc_backend::function_type (const Btyped_identifier &receiver,
 }
 
 Btype *
+Gcc_backend::function_type_varadic (
+  const Btyped_identifier &receiver,
+  const std::vector<Btyped_identifier> &parameters,
+  const std::vector<Btyped_identifier> &results, Btype *result_struct, Location)
+{
+  size_t n = parameters.size () + (receiver.btype != NULL ? 1 : 0);
+  tree *args = XALLOCAVEC (tree, n);
+  size_t offs = 0;
+
+  if (receiver.btype != NULL)
+    {
+      tree t = receiver.btype->get_tree ();
+      if (t == error_mark_node)
+	return this->error_type ();
+
+      args[offs++] = t;
+    }
+
+  for (std::vector<Btyped_identifier>::const_iterator p = parameters.begin ();
+       p != parameters.end (); ++p)
+    {
+      tree t = p->btype->get_tree ();
+      if (t == error_mark_node)
+	return this->error_type ();
+      args[offs++] = t;
+    }
+
+  tree result;
+  if (results.empty ())
+    result = void_type_node;
+  else if (results.size () == 1)
+    result = results.front ().btype->get_tree ();
+  else
+    {
+      gcc_assert (result_struct != NULL);
+      result = result_struct->get_tree ();
+    }
+  if (result == error_mark_node)
+    return this->error_type ();
+
+  // The libffi library cannot represent a zero-sized object.  To
+  // avoid causing confusion on 32-bit SPARC, we treat a function that
+  // returns a zero-sized value as returning void.  That should do no
+  // harm since there is no actual value to be returned.  See
+  // https://gcc.gnu.org/PR72814 for details.
+  if (result != void_type_node && int_size_in_bytes (result) == 0)
+    result = void_type_node;
+
+  tree fntype = build_varargs_function_type_array (result, n, args);
+  if (fntype == error_mark_node)
+    return this->error_type ();
+
+  return this->make_type (build_pointer_type (fntype));
+}
+
+Btype *
 Gcc_backend::function_ptr_type (Btype *result_type,
 				const std::vector<Btype *> &parameters,
 				Location /* locus */)
@@ -1082,14 +1147,23 @@ Gcc_backend::function_ptr_type (Btype *result_type,
 Btype *
 Gcc_backend::struct_type (const std::vector<Btyped_identifier> &fields)
 {
-  return this->fill_in_struct (this->make_type (make_node (RECORD_TYPE)),
+  return this->fill_in_fields (this->make_type (make_node (RECORD_TYPE)),
 			       fields);
 }
 
-// Fill in the fields of a struct type.
+// Make a union type.
 
 Btype *
-Gcc_backend::fill_in_struct (Btype *fill,
+Gcc_backend::union_type (const std::vector<Btyped_identifier> &fields)
+{
+  return this->fill_in_fields (this->make_type (make_node (UNION_TYPE)),
+			       fields);
+}
+
+// Fill in the fields of a struct or union type.
+
+Btype *
+Gcc_backend::fill_in_fields (Btype *fill,
 			     const std::vector<Btyped_identifier> &fields)
 {
   tree fill_tree = fill->get_tree ();
@@ -1248,7 +1322,7 @@ Gcc_backend::set_placeholder_struct_type (
 {
   tree t = placeholder->get_tree ();
   gcc_assert (TREE_CODE (t) == RECORD_TYPE && TYPE_FIELDS (t) == NULL_TREE);
-  Btype *r = this->fill_in_struct (placeholder, fields);
+  Btype *r = this->fill_in_fields (placeholder, fields);
 
   if (TYPE_NAME (t) != NULL_TREE)
     {
@@ -1258,7 +1332,7 @@ Gcc_backend::set_placeholder_struct_type (
       DECL_ORIGINAL_TYPE (TYPE_NAME (t)) = copy;
       TYPE_SIZE (copy) = NULL_TREE;
       Btype *bc = this->make_type (copy);
-      this->fill_in_struct (bc, fields);
+      this->fill_in_fields (bc, fields);
       delete bc;
     }
 
@@ -1557,6 +1631,13 @@ Gcc_backend::wchar_constant_expression (wchar_t c)
   return this->make_expression (ret);
 }
 
+Bexpression *
+Gcc_backend::char_constant_expression (char c)
+{
+  tree ret = build_int_cst (this->char_type ()->get_tree (), c);
+  return this->make_expression (ret);
+}
+
 // Make a constant boolean expression.
 
 Bexpression *
@@ -1688,7 +1769,8 @@ Gcc_backend::struct_field_expression (Bexpression *bstruct, size_t index,
   if (struct_tree == error_mark_node
       || TREE_TYPE (struct_tree) == error_mark_node)
     return this->error_expression ();
-  gcc_assert (TREE_CODE (TREE_TYPE (struct_tree)) == RECORD_TYPE);
+  gcc_assert (TREE_CODE (TREE_TYPE (struct_tree)) == RECORD_TYPE
+	      || TREE_CODE (TREE_TYPE (struct_tree)) == UNION_TYPE);
   tree field = TYPE_FIELDS (TREE_TYPE (struct_tree));
   if (field == NULL_TREE)
     {
@@ -1858,14 +1940,16 @@ Gcc_backend::negation_expression (NegationOperator op, Bexpression *expr,
   /* For negation operators, the resulting type should be the same as its
      operand. */
   auto tree_type = TREE_TYPE (expr_tree);
+  auto original_type = tree_type;
   auto tree_code = operator_to_tree_code (op);
 
   /* For floating point operations we may need to extend the precision of type.
      For example, a 64-bit machine may not support operations on float32. */
   bool floating_point = is_floating_point (expr_tree);
+  auto extended_type = NULL_TREE;
   if (floating_point)
     {
-      auto extended_type = excess_precision_type (tree_type);
+      extended_type = excess_precision_type (tree_type);
       if (extended_type != NULL_TREE)
 	{
 	  expr_tree = convert (extended_type, expr_tree);
@@ -1876,6 +1960,8 @@ Gcc_backend::negation_expression (NegationOperator op, Bexpression *expr,
   /* Construct a new tree and build an expression from it. */
   auto new_tree = fold_build1_loc (location.gcc_location (), tree_code,
 				   tree_type, expr_tree);
+  if (floating_point && extended_type != NULL_TREE)
+    new_tree = convert (original_type, expr_tree);
   return this->make_expression (new_tree);
 }
 
@@ -1900,13 +1986,15 @@ Gcc_backend::arithmetic_or_logical_expression (ArithmeticOrLogicalOperator op,
   /* For arithmetic or logical operators, the resulting type should be the same
      as the lhs operand. */
   auto tree_type = TREE_TYPE (left_tree);
+  auto original_type = tree_type;
   auto tree_code = operator_to_tree_code (op, floating_point);
 
   /* For floating point operations we may need to extend the precision of type.
      For example, a 64-bit machine may not support operations on float32. */
+  auto extended_type = NULL_TREE;
   if (floating_point)
     {
-      auto extended_type = excess_precision_type (tree_type);
+      extended_type = excess_precision_type (tree_type);
       if (extended_type != NULL_TREE)
 	{
 	  left_tree = convert (extended_type, left_tree);
@@ -1918,6 +2006,8 @@ Gcc_backend::arithmetic_or_logical_expression (ArithmeticOrLogicalOperator op,
   /* Construct a new tree and build an expression from it. */
   auto new_tree = fold_build2_loc (location.gcc_location (), tree_code,
 				   tree_type, left_tree, right_tree);
+  if (floating_point && extended_type != NULL_TREE)
+    new_tree = convert (original_type, new_tree);
   return this->make_expression (new_tree);
 }
 
@@ -1971,7 +2061,7 @@ Gcc_backend::lazy_boolean_expression (LazyBooleanOperator op, Bexpression *left,
 Bexpression *
 Gcc_backend::constructor_expression (Btype *btype,
 				     const std::vector<Bexpression *> &vals,
-				     Location location)
+				     int union_index, Location location)
 {
   tree type_tree = btype->get_tree ();
   if (type_tree == error_mark_node)
@@ -1983,11 +2073,15 @@ Gcc_backend::constructor_expression (Btype *btype,
   tree sink = NULL_TREE;
   bool is_constant = true;
   tree field = TYPE_FIELDS (type_tree);
-  for (std::vector<Bexpression *>::const_iterator p = vals.begin ();
-       p != vals.end (); ++p, field = DECL_CHAIN (field))
+  if (union_index != -1)
     {
-      gcc_assert (field != NULL_TREE);
-      tree val = (*p)->get_tree ();
+      gcc_assert (TREE_CODE (type_tree) == UNION_TYPE);
+      tree val = vals.front ()->get_tree ();
+      for (int i = 0; i < union_index; i++)
+	{
+	  gcc_assert (field != NULL_TREE);
+	  field = DECL_CHAIN (field);
+	}
       if (TREE_TYPE (field) == error_mark_node || val == error_mark_node
 	  || TREE_TYPE (val) == error_mark_node)
 	return this->error_expression ();
@@ -2000,17 +2094,49 @@ Gcc_backend::constructor_expression (Btype *btype,
 	  // would have been added as a map element for its
 	  // side-effects and construct an empty map.
 	  append_to_statement_list (val, &sink);
-	  continue;
 	}
-
-      constructor_elt empty = {NULL, NULL};
-      constructor_elt *elt = init->quick_push (empty);
-      elt->index = field;
-      elt->value = this->convert_tree (TREE_TYPE (field), val, location);
-      if (!TREE_CONSTANT (elt->value))
-	is_constant = false;
+      else
+	{
+	  constructor_elt empty = {NULL, NULL};
+	  constructor_elt *elt = init->quick_push (empty);
+	  elt->index = field;
+	  elt->value = this->convert_tree (TREE_TYPE (field), val, location);
+	  if (!TREE_CONSTANT (elt->value))
+	    is_constant = false;
+	}
     }
-  gcc_assert (field == NULL_TREE);
+  else
+    {
+      gcc_assert (TREE_CODE (type_tree) == RECORD_TYPE);
+      for (std::vector<Bexpression *>::const_iterator p = vals.begin ();
+	   p != vals.end (); ++p, field = DECL_CHAIN (field))
+	{
+	  gcc_assert (field != NULL_TREE);
+	  tree val = (*p)->get_tree ();
+	  if (TREE_TYPE (field) == error_mark_node || val == error_mark_node
+	      || TREE_TYPE (val) == error_mark_node)
+	    return this->error_expression ();
+
+	  if (int_size_in_bytes (TREE_TYPE (field)) == 0)
+	    {
+	      // GIMPLE cannot represent indices of zero-sized types so
+	      // trying to construct a map with zero-sized keys might lead
+	      // to errors.  Instead, we evaluate each expression that
+	      // would have been added as a map element for its
+	      // side-effects and construct an empty map.
+	      append_to_statement_list (val, &sink);
+	      continue;
+	    }
+
+	  constructor_elt empty = {NULL, NULL};
+	  constructor_elt *elt = init->quick_push (empty);
+	  elt->index = field;
+	  elt->value = this->convert_tree (TREE_TYPE (field), val, location);
+	  if (!TREE_CONSTANT (elt->value))
+	    is_constant = false;
+	}
+      gcc_assert (field == NULL_TREE);
+    }
   tree ret = build_constructor (type_tree, init);
   if (is_constant)
     TREE_CONSTANT (ret) = 1;
@@ -2711,6 +2837,7 @@ Gcc_backend::convert_tree (tree type_tree, tree expr_tree, Location location)
       || SCALAR_FLOAT_TYPE_P (type_tree) || COMPLEX_FLOAT_TYPE_P (type_tree))
     return fold_convert_loc (location.gcc_location (), type_tree, expr_tree);
   else if (TREE_CODE (type_tree) == RECORD_TYPE
+	   || TREE_CODE (type_tree) == UNION_TYPE
 	   || TREE_CODE (type_tree) == ARRAY_TYPE)
     {
       gcc_assert (int_size_in_bytes (type_tree)
@@ -3263,11 +3390,6 @@ Gcc_backend::function (Btype *fntype, const std::string &name,
     }
   if ((flags & function_is_inlinable) == 0)
     DECL_UNINLINABLE (decl) = 1;
-  if ((flags & function_no_split_stack) != 0)
-    {
-      tree attr = get_identifier ("no_split_stack");
-      DECL_ATTRIBUTES (decl) = tree_cons (attr, NULL_TREE, NULL_TREE);
-    }
   if ((flags & function_does_not_return) != 0)
     TREE_THIS_VOLATILE (decl) = 1;
   if ((flags & function_in_unique_section) != 0)

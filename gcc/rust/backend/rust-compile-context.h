@@ -371,9 +371,14 @@ public:
 	parameters.push_back (compiled_param);
       }
 
-    translated = ctx->get_backend ()->function_type (
-      receiver, parameters, results, NULL,
-      ctx->get_mappings ()->lookup_location (type.get_ref ()));
+    if (!type.is_varadic ())
+      translated = ctx->get_backend ()->function_type (
+	receiver, parameters, results, NULL,
+	ctx->get_mappings ()->lookup_location (type.get_ref ()));
+    else
+      translated = ctx->get_backend ()->function_type_varadic (
+	receiver, parameters, results, NULL,
+	ctx->get_mappings ()->lookup_location (type.get_ref ()));
   }
 
   void visit (TyTy::FnPtr &type) override
@@ -412,9 +417,13 @@ public:
 	fields.push_back (std::move (f));
       }
 
-    Btype *struct_type_record = ctx->get_backend ()->struct_type (fields);
+    Btype *type_record;
+    if (type.is_union ())
+      type_record = ctx->get_backend ()->union_type (fields);
+    else
+      type_record = ctx->get_backend ()->struct_type (fields);
     Btype *named_struct
-      = ctx->get_backend ()->named_type (type.get_name (), struct_type_record,
+      = ctx->get_backend ()->named_type (type.get_name (), type_record,
 					 ctx->get_mappings ()->lookup_location (
 					   type.get_ty_ref ()));
 
@@ -536,7 +545,30 @@ public:
   {
     Btype *base_compiled_type
       = TyTyResolveCompile::compile (ctx, type.get_base ());
-    translated = ctx->get_backend ()->reference_type (base_compiled_type);
+    if (type.is_mutable ())
+      {
+	translated = ctx->get_backend ()->reference_type (base_compiled_type);
+      }
+    else
+      {
+	auto base = ctx->get_backend ()->immutable_type (base_compiled_type);
+	translated = ctx->get_backend ()->reference_type (base);
+      }
+  }
+
+  void visit (TyTy::PointerType &type) override
+  {
+    Btype *base_compiled_type
+      = TyTyResolveCompile::compile (ctx, type.get_base ());
+    if (type.is_mutable ())
+      {
+	translated = ctx->get_backend ()->pointer_type (base_compiled_type);
+      }
+    else
+      {
+	auto base = ctx->get_backend ()->immutable_type (base_compiled_type);
+	translated = ctx->get_backend ()->pointer_type (base);
+      }
   }
 
   void visit (TyTy::StrType &type) override

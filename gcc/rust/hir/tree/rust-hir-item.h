@@ -124,6 +124,11 @@ public:
     return type->get_mappings ();
   }
 
+  std::vector<std::unique_ptr<TypeParamBound> > &get_type_param_bounds ()
+  {
+    return type_param_bounds;
+  }
+
 protected:
   // Clone function implementation as (not pure) virtual method
   TypeParam *clone_generic_param_impl () const override
@@ -333,7 +338,8 @@ public:
   SelfParam (Analysis::NodeMapping mappings, std::unique_ptr<Type> type,
 	     bool is_mut, Location locus)
     : self_kind (is_mut ? ImplicitSelfKind::MUT : ImplicitSelfKind::IMM),
-      lifetime (Lifetime (mappings, Lifetime::LifetimeType::NAMED, "", locus)),
+      lifetime (
+	Lifetime (mappings, AST::Lifetime::LifetimeType::NAMED, "", locus)),
       type (std::move (type)), locus (locus), mappings (mappings)
   {}
 
@@ -1989,9 +1995,25 @@ public:
   Union (Union &&other) = default;
   Union &operator= (Union &&other) = default;
 
+  std::vector<std::unique_ptr<GenericParam> > &get_generic_params ()
+  {
+    return generic_params;
+  }
+
+  Identifier get_identifier () const { return union_name; }
+
   Location get_locus () const { return locus; }
 
   void accept_vis (HIRVisitor &vis) override;
+
+  void iterate (std::function<bool (StructField &)> cb)
+  {
+    for (auto &variant : variants)
+      {
+	if (!cb (variant))
+	  return;
+      }
+  }
 
 protected:
   /* Use covariance to implement clone function as returning this object
@@ -2684,6 +2706,7 @@ protected:
 // Abstract base class for an item used inside an extern block
 class ExternalItem
 {
+  Analysis::NodeMapping mappings;
   AST::AttrVec outer_attrs;
   Visibility visibility;
   Identifier item_name;
@@ -2710,22 +2733,29 @@ public:
 
   virtual void accept_vis (HIRVisitor &vis) = 0;
 
+  Analysis::NodeMapping get_mappings () const { return mappings; }
+
+  Identifier get_item_name () const { return item_name; }
+
 protected:
-  ExternalItem (Identifier item_name, Visibility vis, AST::AttrVec outer_attrs,
-		Location locus)
-    : outer_attrs (std::move (outer_attrs)), visibility (std::move (vis)),
-      item_name (std::move (item_name)), locus (locus)
+  ExternalItem (Analysis::NodeMapping mappings, Identifier item_name,
+		Visibility vis, AST::AttrVec outer_attrs, Location locus)
+    : mappings (mappings), outer_attrs (std::move (outer_attrs)),
+      visibility (std::move (vis)), item_name (std::move (item_name)),
+      locus (locus)
   {}
 
   // Copy constructor
   ExternalItem (ExternalItem const &other)
-    : outer_attrs (other.outer_attrs), visibility (other.visibility),
-      item_name (other.item_name), locus (other.locus)
+    : mappings (other.mappings), outer_attrs (other.outer_attrs),
+      visibility (other.visibility), item_name (other.item_name),
+      locus (other.locus)
   {}
 
   // Overloaded assignment operator to clone
   ExternalItem &operator= (ExternalItem const &other)
   {
+    mappings = other.mappings;
     item_name = other.item_name;
     visibility = other.visibility;
     outer_attrs = other.outer_attrs;
@@ -2740,9 +2770,6 @@ protected:
 
   // Clone function implementation as pure virtual method
   virtual ExternalItem *clone_external_item_impl () const = 0;
-
-  // possibly make this public if required
-  std::string get_item_name () const { return item_name; }
 };
 
 // A static item used in an extern block
@@ -2752,11 +2779,11 @@ class ExternalStaticItem : public ExternalItem
   std::unique_ptr<Type> item_type;
 
 public:
-  ExternalStaticItem (Identifier item_name, std::unique_ptr<Type> item_type,
-		      bool is_mut, Visibility vis, AST::AttrVec outer_attrs,
-		      Location locus)
-    : ExternalItem (std::move (item_name), std::move (vis),
-		    std::move (outer_attrs), locus),
+  ExternalStaticItem (Analysis::NodeMapping mappings, Identifier item_name,
+		      std::unique_ptr<Type> item_type, bool is_mut,
+		      Visibility vis, AST::AttrVec outer_attrs, Location locus)
+    : ExternalItem (std::move (mappings), std::move (item_name),
+		    std::move (vis), std::move (outer_attrs), locus),
       has_mut (is_mut), item_type (std::move (item_type))
   {}
 
@@ -2784,6 +2811,8 @@ public:
 
   void accept_vis (HIRVisitor &vis) override;
 
+  std::unique_ptr<Type> &get_item_type () { return item_type; }
+
 protected:
   /* Use covariance to implement clone function as returning this object
    * rather than base */
@@ -2797,38 +2826,23 @@ protected:
 struct NamedFunctionParam
 {
 private:
-  // bool has_name;   // otherwise is _
-  Identifier name; // TODO: handle wildcard in identifier?
-
+  Identifier name;
   std::unique_ptr<Type> param_type;
-
-  // TODO: should this store location data?
+  Analysis::NodeMapping mappings;
 
 public:
-  // Returns whether the named function parameter has a name (i.e. name is not
-  // '_').
   bool has_name () const { return name != "_"; }
 
-  // Returns whether the named function parameter is in an error state.
-  bool is_error () const
-  {
-    // also if identifier is "" but that is probably more costly to compute
-    return param_type == nullptr;
-  }
-
-  // Creates an error state named function parameter.
-  static NamedFunctionParam create_error ()
-  {
-    return NamedFunctionParam ("", nullptr);
-  }
-
-  NamedFunctionParam (Identifier name, std::unique_ptr<Type> param_type)
-    : name (std::move (name)), param_type (std::move (param_type))
+  NamedFunctionParam (Analysis::NodeMapping mappings, Identifier name,
+		      std::unique_ptr<Type> param_type)
+    : name (std::move (name)), param_type (std::move (param_type)),
+      mappings (std::move (mappings))
   {}
 
   // Copy constructor
   NamedFunctionParam (NamedFunctionParam const &other)
-    : name (other.name), param_type (other.param_type->clone_type ())
+    : name (other.name), param_type (other.param_type->clone_type ()),
+      mappings (other.mappings)
   {}
 
   ~NamedFunctionParam () = default;
@@ -2836,6 +2850,7 @@ public:
   // Overloaded assignment operator to clone
   NamedFunctionParam &operator= (NamedFunctionParam const &other)
   {
+    mappings = other.mappings;
     name = other.name;
     param_type = other.param_type->clone_type ();
     // has_name = other.has_name;
@@ -2848,6 +2863,12 @@ public:
   NamedFunctionParam &operator= (NamedFunctionParam &&other) = default;
 
   std::string as_string () const;
+
+  Identifier get_param_name () const { return name; }
+
+  std::unique_ptr<Type> &get_type () { return param_type; }
+
+  Analysis::NodeMapping get_mappings () const { return mappings; }
 };
 
 // A function item used in an extern block
@@ -2878,13 +2899,13 @@ public:
   bool has_where_clause () const { return !where_clause.is_empty (); }
 
   ExternalFunctionItem (
-    Identifier item_name,
+    Analysis::NodeMapping mappings, Identifier item_name,
     std::vector<std::unique_ptr<GenericParam> > generic_params,
     std::unique_ptr<Type> return_type, WhereClause where_clause,
     std::vector<NamedFunctionParam> function_params, bool has_variadics,
     Visibility vis, AST::AttrVec outer_attrs, Location locus)
-    : ExternalItem (std::move (item_name), std::move (vis),
-		    std::move (outer_attrs), locus),
+    : ExternalItem (std::move (mappings), std::move (item_name),
+		    std::move (vis), std::move (outer_attrs), locus),
       generic_params (std::move (generic_params)),
       return_type (std::move (return_type)),
       where_clause (std::move (where_clause)),
@@ -2928,6 +2949,20 @@ public:
 
   void accept_vis (HIRVisitor &vis) override;
 
+  std::vector<std::unique_ptr<GenericParam> > &get_generic_params ()
+  {
+    return generic_params;
+  }
+
+  std::unique_ptr<Type> &get_return_type () { return return_type; }
+
+  std::vector<NamedFunctionParam> &get_function_params ()
+  {
+    return function_params;
+  }
+
+  bool is_variadic () const { return has_variadics; }
+
 protected:
   /* Use covariance to implement clone function as returning this object
    * rather than base */
@@ -2962,6 +2997,8 @@ public:
 
   // Returns whether extern block has ABI name.
   bool has_abi () const { return !abi.empty (); }
+
+  std::string get_abi () const { return abi; }
 
   ExternBlock (Analysis::NodeMapping mappings, std::string abi,
 	       std::vector<std::unique_ptr<ExternalItem> > extern_items,
@@ -3004,6 +3041,11 @@ public:
   Location get_locus () const { return locus; }
 
   void accept_vis (HIRVisitor &vis) override;
+
+  std::vector<std::unique_ptr<ExternalItem> > &get_extern_items ()
+  {
+    return extern_items;
+  }
 
 protected:
   /* Use covariance to implement clone function as returning this object
