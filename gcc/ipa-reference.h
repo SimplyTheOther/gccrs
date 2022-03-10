@@ -1,5 +1,5 @@
 /* IPA handling of references.
-   Copyright (C) 2004-2021 Free Software Foundation, Inc.
+   Copyright (C) 2004-2022 Free Software Foundation, Inc.
    Contributed by Kenneth Zadeck <zadeck@naturalbridge.com>
 
 This file is part of GCC.
@@ -21,7 +21,7 @@ along with GCC; see the file COPYING3.  If not see
 #ifndef GCC_IPA_REFERENCE_H
 #define GCC_IPA_REFERENCE_H
 
-/* In ipa-reference.c  */
+/* In ipa-reference.cc  */
 bitmap ipa_reference_get_read_global (struct cgraph_node *fn);
 bitmap ipa_reference_get_written_global (struct cgraph_node *fn);
 void ipa_reference_c_finalize (void);

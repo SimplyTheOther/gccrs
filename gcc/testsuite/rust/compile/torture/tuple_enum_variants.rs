@@ -1,4 +1,8 @@
-enum E { T0(), T1(i32), T2(i32,u32) }
+enum E {
+    T0(),
+    T1(i32),
+    T2(i32, u32),
+}
 
 /* The following doesn't parse yet...
 fn f(e0: E, e1: E, e2: E) -> (E,E,E,())

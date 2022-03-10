@@ -1,5 +1,5 @@
-/* Prototypes for exported functions defined in c6x.c.
-   Copyright (C) 2010-2021 Free Software Foundation, Inc.
+/* Prototypes for exported functions defined in c6x.cc.
+   Copyright (C) 2010-2022 Free Software Foundation, Inc.
    Contributed by CodeSourcery.
 
    This file is part of GCC.
@@ -21,10 +21,10 @@
 #ifndef GCC_C6X_PROTOS_H
 #define GCC_C6X_PROTOS_H
 
-/* Defined in c6x-rust.c  */
+/* Defined in c6x-rust.cc  */
 extern void c6x_rust_target_cpu_info (void);
 
-/* Functions defined in c6x.c.  */
+/* Functions defined in c6x.cc.  */
 
 #ifdef RTX_CODE
 extern void c6x_init_cumulative_args (CUMULATIVE_ARGS *, const_tree, rtx, int);

@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -30,11 +30,88 @@
 #include "rust-hir-trait-ref.h"
 #include "rust-hir-type-bounds.h"
 
-extern ::Backend *
-rust_get_backend ();
-
 namespace Rust {
 namespace TyTy {
+
+std::string
+TypeKindFormat::to_string (TypeKind kind)
+{
+  switch (kind)
+    {
+    case TypeKind::INFER:
+      return "Infer";
+
+    case TypeKind::ADT:
+      return "ADT";
+
+    case TypeKind::STR:
+      return "STR";
+
+    case TypeKind::REF:
+      return "REF";
+
+    case TypeKind::POINTER:
+      return "POINTER";
+
+    case TypeKind::PARAM:
+      return "PARAM";
+
+    case TypeKind::ARRAY:
+      return "ARRAY";
+
+    case TypeKind::SLICE:
+      return "SLICE";
+
+    case TypeKind::FNDEF:
+      return "FnDef";
+
+    case TypeKind::FNPTR:
+      return "FnPtr";
+
+    case TypeKind::TUPLE:
+      return "Tuple";
+
+    case TypeKind::BOOL:
+      return "Bool";
+
+    case TypeKind::CHAR:
+      return "Char";
+
+    case TypeKind::INT:
+      return "Int";
+
+    case TypeKind::UINT:
+      return "Uint";
+
+    case TypeKind::FLOAT:
+      return "Float";
+
+    case TypeKind::USIZE:
+      return "Usize";
+
+    case TypeKind::ISIZE:
+      return "Isize";
+
+    case TypeKind::NEVER:
+      return "Never";
+
+    case TypeKind::PLACEHOLDER:
+      return "Placeholder";
+
+    case TypeKind::PROJECTION:
+      return "Projection";
+
+    case TypeKind::DYNAMIC:
+      return "Dynamic";
+
+    case TypeKind::CLOSURE:
+      return "Closure";
+
+    case TypeKind::ERROR:
+      return "ERROR";
+    }
+  gcc_unreachable ();
+}
 
 bool
 BaseType::satisfies_bound (const TypeBoundPredicate &predicate) const
@@ -49,10 +126,10 @@ BaseType::satisfies_bound (const TypeBoundPredicate &predicate) const
 	return true;
     }
 
-  std::vector<Resolver::TraitReference *> probed
-    = Resolver::TypeBoundsProbe::Probe (this);
-  for (const Resolver::TraitReference *bound : probed)
+  auto probed = Resolver::TypeBoundsProbe::Probe (this);
+  for (auto &b : probed)
     {
+      const Resolver::TraitReference *bound = b.first;
       bool found = bound->get_mappings ().get_defid ()
 		   == query->get_mappings ().get_defid ();
       if (found)
@@ -63,7 +140,8 @@ BaseType::satisfies_bound (const TypeBoundPredicate &predicate) const
 }
 
 bool
-BaseType::bounds_compatible (const BaseType &other, Location locus) const
+BaseType::bounds_compatible (const BaseType &other, Location locus,
+			     bool emit_error) const
 {
   std::vector<std::reference_wrapper<const TypeBoundPredicate>>
     unsatisfied_bounds;
@@ -89,8 +167,13 @@ BaseType::bounds_compatible (const BaseType &other, Location locus) const
 	    missing_preds += ", ";
 	}
 
-      rust_error_at (r, "bounds not satisfied for %s %<%s%> is not satisfied",
-		     other.get_name ().c_str (), missing_preds.c_str ());
+      if (emit_error)
+	{
+	  rust_error_at (r,
+			 "bounds not satisfied for %s %<%s%> is not satisfied",
+			 other.get_name ().c_str (), missing_preds.c_str ());
+	  // rust_assert (!emit_error);
+	}
     }
 
   return unsatisfied_bounds.size () == 0;
@@ -99,10 +182,32 @@ BaseType::bounds_compatible (const BaseType &other, Location locus) const
 void
 BaseType::inherit_bounds (const BaseType &other)
 {
-  for (auto &bound : other.get_specified_bounds ())
+  inherit_bounds (other.get_specified_bounds ());
+}
+
+void
+BaseType::inherit_bounds (
+  const std::vector<TyTy::TypeBoundPredicate> &specified_bounds)
+{
+  // FIXME
+  // 1. This needs to union the bounds
+  // 2. Do some checking for trait polarity to ensure compatibility
+  for (auto &bound : specified_bounds)
     {
       add_bound (bound);
     }
+}
+
+const BaseType *
+BaseType::get_root () const
+{
+  const BaseType *root = this;
+  while (root->get_kind () == TyTy::REF)
+    {
+      const ReferenceType *r = static_cast<const ReferenceType *> (root);
+      root = r->get_base ();
+    }
+  return root;
 }
 
 TyVar::TyVar (HirId ref) : ref (ref)
@@ -131,7 +236,7 @@ TyVar::get_implicit_infer_var (Location locus)
   auto context = Resolver::TypeCheckContext::get ();
 
   InferType *infer = new InferType (mappings->get_next_hir_id (),
-				    InferType::InferTypeKind::GENERAL);
+				    InferType::InferTypeKind::GENERAL, locus);
   context->insert_type (Analysis::NodeMapping (mappings->get_current_crate (),
 					       UNKNOWN_NODEID,
 					       infer->get_ref (),
@@ -201,7 +306,7 @@ BaseType *
 InferType::clone () const
 {
   return new InferType (get_ref (), get_ty_ref (), get_infer_kind (),
-			get_combined_refs ());
+			get_ident ().locus, get_combined_refs ());
 }
 
 bool
@@ -288,14 +393,14 @@ StructFieldType::is_equal (const StructFieldType &other) const
 {
   bool names_eq = get_name ().compare (other.get_name ()) == 0;
 
-  TyTy::BaseType &o = *other.get_field_type ();
-  if (o.get_kind () == TypeKind::PARAM)
+  TyTy::BaseType *o = other.get_field_type ();
+  if (o->get_kind () == TypeKind::PARAM)
     {
-      ParamType &op = static_cast<ParamType &> (o);
-      o = *op.resolve ();
+      ParamType *op = static_cast<ParamType *> (o);
+      o = op->resolve ();
     }
 
-  bool types_eq = get_field_type ()->is_equal (o);
+  bool types_eq = get_field_type ()->is_equal (*o);
 
   return names_eq && types_eq;
 }
@@ -307,10 +412,91 @@ StructFieldType::clone () const
 			      get_field_type ()->clone ());
 }
 
+bool
+SubstitutionParamMapping::need_substitution () const
+{
+  if (!param->can_resolve ())
+    return true;
+
+  auto resolved = param->resolve ();
+  return !resolved->is_concrete ();
+}
+
+bool
+SubstitutionParamMapping::fill_param_ty (BaseType &type, Location locus)
+{
+  auto context = Resolver::TypeCheckContext::get ();
+
+  if (type.get_kind () == TyTy::TypeKind::INFER)
+    {
+      type.inherit_bounds (*param);
+    }
+  else
+    {
+      if (!param->bounds_compatible (type, locus, true))
+	return false;
+    }
+
+  if (type.get_kind () == TypeKind::PARAM)
+    {
+      delete param;
+      param = static_cast<ParamType *> (type.clone ());
+    }
+  else
+    {
+      // check the substitution is compatible with bounds
+      if (!param->bounds_compatible (type, locus, true))
+	return false;
+
+      // setup any associated type mappings for the specified bonds and this
+      // type
+      auto candidates = Resolver::TypeBoundsProbe::Probe (&type);
+      for (auto &specified_bound : param->get_specified_bounds ())
+	{
+	  const Resolver::TraitReference *specified_bound_ref
+	    = specified_bound.get ();
+
+	  // since the bounds_compatible check has occurred we should be able to
+	  // assert on finding the trait references
+	  HirId associated_impl_block_id = UNKNOWN_HIRID;
+	  bool found = false;
+	  for (auto &bound : candidates)
+	    {
+	      const Resolver::TraitReference *bound_trait_ref = bound.first;
+	      const HIR::ImplBlock *associated_impl = bound.second;
+
+	      found = specified_bound_ref->is_equal (*bound_trait_ref);
+	      if (found)
+		{
+		  rust_assert (associated_impl != nullptr);
+		  associated_impl_block_id
+		    = associated_impl->get_mappings ().get_hirid ();
+		  break;
+		}
+	    }
+
+	  if (found && associated_impl_block_id != UNKNOWN_HIRID)
+	    {
+	      Resolver::AssociatedImplTrait *lookup_associated = nullptr;
+	      bool found_impl_trait = context->lookup_associated_trait_impl (
+		associated_impl_block_id, &lookup_associated);
+
+	      if (found_impl_trait)
+		lookup_associated->setup_associated_types ();
+	    }
+	}
+
+      param->set_ty_ref (type.get_ref ());
+    }
+
+  return true;
+}
+
 void
 SubstitutionParamMapping::override_context ()
 {
-  rust_assert (param->can_resolve ());
+  if (!param->can_resolve ())
+    return;
 
   auto mappings = Analysis::Mappings::get ();
   auto context = Resolver::TypeCheckContext::get ();
@@ -335,7 +521,9 @@ SubstitutionRef::get_mappings_from_generic_args (HIR::GenericArgs &args)
       return SubstitutionArgumentMappings::error ();
     }
 
-  if (args.get_type_args ().size () > substitutions.size ())
+  // for inherited arguments
+  size_t offs = used_arguments.size ();
+  if (args.get_type_args ().size () + offs > substitutions.size ())
     {
       RichLocation r (args.get_locus ());
       r.add_range (substitutions.front ().get_param_locus ());
@@ -347,7 +535,7 @@ SubstitutionRef::get_mappings_from_generic_args (HIR::GenericArgs &args)
       return SubstitutionArgumentMappings::error ();
     }
 
-  if (args.get_type_args ().size () < min_required_substitutions ())
+  if (args.get_type_args ().size () + offs < min_required_substitutions ())
     {
       RichLocation r (args.get_locus ());
       r.add_range (substitutions.front ().get_param_locus ());
@@ -358,9 +546,6 @@ SubstitutionRef::get_mappings_from_generic_args (HIR::GenericArgs &args)
 	substitutions.size (), args.get_type_args ().size ());
       return SubstitutionArgumentMappings::error ();
     }
-
-  // for inherited arguments
-  size_t offs = used_arguments.size ();
 
   std::vector<SubstitutionArg> mappings;
   for (auto &arg : args.get_type_args ())
@@ -414,8 +599,6 @@ SubstitutionArgumentMappings
 SubstitutionRef::adjust_mappings_for_this (
   SubstitutionArgumentMappings &mappings)
 {
-  Analysis::Mappings *mappings_table = Analysis::Mappings::get ();
-
   std::vector<SubstitutionArg> resolved_mappings;
   for (size_t i = 0; i < substitutions.size (); i++)
     {
@@ -442,36 +625,71 @@ SubstitutionRef::adjust_mappings_for_this (
 	}
 
       bool ok = !arg.is_error ();
-      if (!ok)
+      if (ok)
 	{
-	  rust_error_at (mappings_table->lookup_location (
-			   subst.get_param_ty ()->get_ref ()),
-			 "failed to find parameter type: %s vs mappings [%s]",
-			 subst.get_param_ty ()->as_string ().c_str (),
-			 mappings.as_string ().c_str ());
-	  return SubstitutionArgumentMappings::error ();
+	  SubstitutionArg adjusted (&subst, arg.get_tyty ());
+	  resolved_mappings.push_back (std::move (adjusted));
 	}
-
-      SubstitutionArg adjusted (&subst, arg.get_tyty ());
-      resolved_mappings.push_back (std::move (adjusted));
     }
+
+  if (resolved_mappings.empty ())
+    return SubstitutionArgumentMappings::error ();
 
   return SubstitutionArgumentMappings (resolved_mappings,
 				       mappings.get_locus ());
+}
+
+bool
+SubstitutionRef::are_mappings_bound (SubstitutionArgumentMappings &mappings)
+{
+  std::vector<SubstitutionArg> resolved_mappings;
+  for (size_t i = 0; i < substitutions.size (); i++)
+    {
+      auto &subst = substitutions.at (i);
+
+      SubstitutionArg arg = SubstitutionArg::error ();
+      if (mappings.size () == substitutions.size ())
+	{
+	  mappings.get_argument_at (i, &arg);
+	}
+      else
+	{
+	  if (subst.needs_substitution ())
+	    {
+	      // get from passed in mappings
+	      mappings.get_argument_for_symbol (subst.get_param_ty (), &arg);
+	    }
+	  else
+	    {
+	      // we should already have this somewhere
+	      used_arguments.get_argument_for_symbol (subst.get_param_ty (),
+						      &arg);
+	    }
+	}
+
+      bool ok = !arg.is_error ();
+      if (ok)
+	{
+	  SubstitutionArg adjusted (&subst, arg.get_tyty ());
+	  resolved_mappings.push_back (std::move (adjusted));
+	}
+    }
+
+  return !resolved_mappings.empty ();
 }
 
 // this function assumes that the mappings being passed are for the same type as
 // this new substitution reference so ordering matters here
 SubstitutionArgumentMappings
 SubstitutionRef::solve_mappings_from_receiver_for_self (
-  SubstitutionArgumentMappings &mappings)
+  SubstitutionArgumentMappings &mappings) const
 {
   std::vector<SubstitutionArg> resolved_mappings;
 
   rust_assert (mappings.size () == get_num_substitutions ());
   for (size_t i = 0; i < get_num_substitutions (); i++)
     {
-      SubstitutionParamMapping &param_mapping = substitutions.at (i);
+      const SubstitutionParamMapping &param_mapping = substitutions.at (i);
       SubstitutionArg &arg = mappings.get_mappings ().at (i);
 
       if (param_mapping.needs_substitution ())
@@ -483,6 +701,57 @@ SubstitutionRef::solve_mappings_from_receiver_for_self (
 
   return SubstitutionArgumentMappings (resolved_mappings,
 				       mappings.get_locus ());
+}
+
+SubstitutionArgumentMappings
+SubstitutionRef::solve_missing_mappings_from_this (SubstitutionRef &ref,
+						   SubstitutionRef &to)
+{
+  rust_assert (!ref.needs_substitution ());
+  rust_assert (needs_substitution ());
+  rust_assert (get_num_substitutions () == ref.get_num_substitutions ());
+
+  Location locus = used_arguments.get_locus ();
+  std::vector<SubstitutionArg> resolved_mappings;
+
+  std::map<HirId, std::pair<ParamType *, BaseType *>> substs;
+  for (size_t i = 0; i < get_num_substitutions (); i++)
+    {
+      SubstitutionParamMapping &a = substitutions.at (i);
+      SubstitutionParamMapping &b = ref.substitutions.at (i);
+
+      if (a.need_substitution ())
+	{
+	  const BaseType *root = a.get_param_ty ()->resolve ()->get_root ();
+	  rust_assert (root->get_kind () == TyTy::TypeKind::PARAM);
+	  const ParamType *p = static_cast<const TyTy::ParamType *> (root);
+
+	  substs[p->get_ty_ref ()] = {static_cast<ParamType *> (p->clone ()),
+				      b.get_param_ty ()->resolve ()};
+	}
+    }
+
+  for (auto it = substs.begin (); it != substs.end (); it++)
+    {
+      HirId param_id = it->first;
+      BaseType *arg = it->second.second;
+
+      const SubstitutionParamMapping *associate_param = nullptr;
+      for (SubstitutionParamMapping &p : to.substitutions)
+	{
+	  if (p.get_param_ty ()->get_ty_ref () == param_id)
+	    {
+	      associate_param = &p;
+	      break;
+	    }
+	}
+
+      rust_assert (associate_param != nullptr);
+      SubstitutionArg argument (associate_param, arg);
+      resolved_mappings.push_back (std::move (argument));
+    }
+
+  return SubstitutionArgumentMappings (resolved_mappings, locus);
 }
 
 void
@@ -500,35 +769,16 @@ ADTType::accept_vis (TyConstVisitor &vis) const
 std::string
 ADTType::as_string () const
 {
-  if (num_fields () == 0)
-    return identifier;
-
-  std::string fields_buffer;
-  for (size_t i = 0; i < num_fields (); ++i)
+  std::string variants_buffer;
+  for (size_t i = 0; i < number_of_variants (); ++i)
     {
-      fields_buffer += get_field (i)->as_string ();
-      if ((i + 1) < num_fields ())
-	fields_buffer += ", ";
+      TyTy::VariantDef *variant = variants.at (i);
+      variants_buffer += variant->as_string ();
+      if ((i + 1) < number_of_variants ())
+	variants_buffer += ", ";
     }
 
-  return identifier + subst_as_string () + "{" + fields_buffer + "}";
-}
-
-const StructFieldType *
-ADTType::get_field (size_t index) const
-{
-  return fields.at (index);
-}
-
-const BaseType *
-ADTType::get_field_type (size_t index) const
-{
-  const StructFieldType *ref = get_field (index);
-  auto context = Resolver::TypeCheckContext::get ();
-  BaseType *lookup = nullptr;
-  bool ok = context->lookup_type (ref->get_field_type ()->get_ref (), &lookup);
-  rust_assert (ok);
-  return lookup;
+  return identifier + subst_as_string () + "{" + variants_buffer + "}";
 }
 
 BaseType *
@@ -566,7 +816,10 @@ ADTType::is_equal (const BaseType &other) const
     return false;
 
   auto other2 = static_cast<const ADTType &> (other);
-  if (num_fields () != other2.num_fields ())
+  if (get_adt_kind () != other2.get_adt_kind ())
+    return false;
+
+  if (number_of_variants () != other2.number_of_variants ())
     return false;
 
   if (has_subsititions_defined () != other2.has_subsititions_defined ())
@@ -590,13 +843,14 @@ ADTType::is_equal (const BaseType &other) const
 	    return false;
 	}
     }
-  else
+
+  for (size_t i = 0; i < number_of_variants (); i++)
     {
-      for (size_t i = 0; i < num_fields (); i++)
-	{
-	  if (!get_field (i)->is_equal (*other2.get_field (i)))
-	    return false;
-	}
+      const TyTy::VariantDef *a = get_variants ().at (i);
+      const TyTy::VariantDef *b = other2.get_variants ().at (i);
+
+      if (!a->is_equal (*b))
+	return false;
     }
 
   return true;
@@ -605,13 +859,64 @@ ADTType::is_equal (const BaseType &other) const
 BaseType *
 ADTType::clone () const
 {
-  std::vector<StructFieldType *> cloned_fields;
-  for (auto &f : fields)
-    cloned_fields.push_back ((StructFieldType *) f->clone ());
+  std::vector<VariantDef *> cloned_variants;
+  for (auto &variant : variants)
+    cloned_variants.push_back (variant->clone ());
 
-  return new ADTType (get_ref (), get_ty_ref (), identifier, get_adt_kind (),
-		      cloned_fields, clone_substs (), used_arguments,
-		      get_combined_refs ());
+  return new ADTType (get_ref (), get_ty_ref (), identifier, ident,
+		      get_adt_kind (), cloned_variants, clone_substs (),
+		      used_arguments, get_combined_refs ());
+}
+
+static bool
+handle_substitions (SubstitutionArgumentMappings &subst_mappings,
+		    StructFieldType *field)
+{
+  auto fty = field->get_field_type ();
+  bool is_param_ty = fty->get_kind () == TypeKind::PARAM;
+  if (is_param_ty)
+    {
+      ParamType *p = static_cast<ParamType *> (fty);
+
+      SubstitutionArg arg = SubstitutionArg::error ();
+      bool ok = subst_mappings.get_argument_for_symbol (p, &arg);
+      if (ok)
+	{
+	  auto argt = arg.get_tyty ();
+	  bool arg_is_param = argt->get_kind () == TyTy::TypeKind::PARAM;
+	  bool arg_is_concrete = argt->get_kind () != TyTy::TypeKind::INFER;
+
+	  if (arg_is_param || arg_is_concrete)
+	    {
+	      auto new_field = argt->clone ();
+	      new_field->set_ref (fty->get_ref ());
+	      field->set_field_type (new_field);
+	    }
+	  else
+	    {
+	      field->get_field_type ()->set_ty_ref (argt->get_ref ());
+	    }
+	}
+    }
+  else if (fty->has_subsititions_defined () || fty->contains_type_parameters ())
+    {
+      BaseType *concrete
+	= Resolver::SubstMapperInternal::Resolve (fty, subst_mappings);
+
+      if (concrete->get_kind () == TyTy::TypeKind::ERROR)
+	{
+	  rust_error_at (subst_mappings.get_locus (),
+			 "Failed to resolve field substitution type: %s",
+			 fty->as_string ().c_str ());
+	  return false;
+	}
+
+      auto new_field = concrete->clone ();
+      new_field->set_ref (fty->get_ref ());
+      field->set_field_type (new_field);
+    }
+
+  return true;
 }
 
 ADTType *
@@ -627,57 +932,21 @@ ADTType::handle_substitions (SubstitutionArgumentMappings subst_mappings)
       bool ok
 	= subst_mappings.get_argument_for_symbol (sub.get_param_ty (), &arg);
       if (ok)
-	sub.fill_param_ty (arg.get_tyty (), subst_mappings.get_locus ());
+	sub.fill_param_ty (*arg.get_tyty (), subst_mappings.get_locus ());
     }
 
-  adt->iterate_fields ([&] (StructFieldType *field) mutable -> bool {
-    auto fty = field->get_field_type ();
-    bool is_param_ty = fty->get_kind () == TypeKind::PARAM;
-    if (is_param_ty)
-      {
-	ParamType *p = static_cast<ParamType *> (fty);
+  for (auto &variant : adt->get_variants ())
+    {
+      if (variant->is_dataless_variant ())
+	continue;
 
-	SubstitutionArg arg = SubstitutionArg::error ();
-	bool ok = subst_mappings.get_argument_for_symbol (p, &arg);
-	if (ok)
-	  {
-	    auto argt = arg.get_tyty ();
-	    bool arg_is_param = argt->get_kind () == TyTy::TypeKind::PARAM;
-	    bool arg_is_concrete = argt->get_kind () != TyTy::TypeKind::INFER;
-
-	    if (arg_is_param || arg_is_concrete)
-	      {
-		auto new_field = argt->clone ();
-		new_field->set_ref (fty->get_ref ());
-		field->set_field_type (new_field);
-	      }
-	    else
-	      {
-		field->get_field_type ()->set_ty_ref (argt->get_ref ());
-	      }
-	  }
-      }
-    else if (fty->has_subsititions_defined ()
-	     || fty->contains_type_parameters ())
-      {
-	BaseType *concrete
-	  = Resolver::SubstMapperInternal::Resolve (fty, subst_mappings);
-
-	if (concrete->get_kind () == TyTy::TypeKind::ERROR)
-	  {
-	    rust_error_at (subst_mappings.get_locus (),
-			   "Failed to resolve field substitution type: %s",
-			   fty->as_string ().c_str ());
-	    return false;
-	  }
-
-	auto new_field = concrete->clone ();
-	new_field->set_ref (fty->get_ref ());
-	field->set_field_type (new_field);
-      }
-
-    return true;
-  });
+      for (auto &field : variant->get_fields ())
+	{
+	  bool ok = ::Rust::TyTy::handle_substitions (subst_mappings, field);
+	  if (!ok)
+	    return adt;
+	}
+    }
 
   return adt;
 }
@@ -698,11 +967,11 @@ std::string
 TupleType::as_string () const
 {
   std::string fields_buffer;
-  iterate_fields ([&] (BaseType *field) mutable -> bool {
-    fields_buffer += field->as_string ();
-    fields_buffer += ", ";
-    return true;
-  });
+  for (const TyVar &field : get_fields ())
+    {
+      fields_buffer += field.get_tyty ()->as_string ();
+      fields_buffer += ", ";
+    }
   return "(" + fields_buffer + ")";
 }
 
@@ -761,7 +1030,7 @@ TupleType::is_equal (const BaseType &other) const
 BaseType *
 TupleType::clone () const
 {
-  return new TupleType (get_ref (), get_ty_ref (), fields,
+  return new TupleType (get_ref (), get_ty_ref (), get_ident ().locus, fields,
 			get_combined_refs ());
 }
 
@@ -888,7 +1157,7 @@ FnType::clone () const
       std::pair<HIR::Pattern *, BaseType *> (p.first, p.second->clone ()));
 
   return new FnType (get_ref (), get_ty_ref (), get_id (), get_identifier (),
-		     flags, std::move (cloned_params),
+		     ident, flags, abi, std::move (cloned_params),
 		     get_return_type ()->clone (), clone_substs (),
 		     get_combined_refs ());
 }
@@ -907,7 +1176,9 @@ FnType::handle_substitions (SubstitutionArgumentMappings subst_mappings)
       bool ok
 	= subst_mappings.get_argument_for_symbol (sub.get_param_ty (), &arg);
       if (ok)
-	sub.fill_param_ty (arg.get_tyty (), subst_mappings.get_locus ());
+	{
+	  sub.fill_param_ty (*arg.get_tyty (), subst_mappings.get_locus ());
+	}
     }
 
   auto fty = fn->get_return_type ();
@@ -1024,10 +1295,13 @@ std::string
 FnPtr::as_string () const
 {
   std::string params_str;
-  iterate_params ([&] (BaseType *p) mutable -> bool {
-    params_str += p->as_string () + " ,";
-    return true;
-  });
+
+  auto &params = get_params ();
+  for (auto &p : params)
+    {
+      params_str += p.get_tyty ()->as_string () + " ,";
+    }
+
   return "fnptr (" + params_str + ") -> " + get_return_type ()->as_string ();
 }
 
@@ -1089,8 +1363,76 @@ FnPtr::clone () const
   for (auto &p : params)
     cloned_params.push_back (TyVar (p.get_ref ()));
 
-  return new FnPtr (get_ref (), get_ty_ref (), std::move (cloned_params),
-		    result_type, get_combined_refs ());
+  return new FnPtr (get_ref (), get_ty_ref (), ident.locus,
+		    std::move (cloned_params), result_type,
+		    get_combined_refs ());
+}
+
+void
+ClosureType::accept_vis (TyVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ClosureType::accept_vis (TyConstVisitor &vis) const
+{
+  vis.visit (*this);
+}
+
+std::string
+ClosureType::as_string () const
+{
+  return "TODO";
+}
+
+BaseType *
+ClosureType::unify (BaseType *other)
+{
+  ClosureRules r (this);
+  return r.unify (other);
+}
+
+bool
+ClosureType::can_eq (const BaseType *other, bool emit_errors) const
+{
+  ClosureCmp r (this, emit_errors);
+  return r.can_eq (other);
+}
+
+BaseType *
+ClosureType::coerce (BaseType *other)
+{
+  ClosureCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+ClosureType::cast (BaseType *other)
+{
+  ClosureCoercionRules r (this);
+  return r.coerce (other);
+}
+
+bool
+ClosureType::is_equal (const BaseType &other) const
+{
+  gcc_unreachable ();
+  return false;
+}
+
+BaseType *
+ClosureType::clone () const
+{
+  return new ClosureType (get_ref (), get_ty_ref (), ident, id, parameter_types,
+			  result_type, clone_substs (), get_combined_refs ());
+}
+
+ClosureType *
+ClosureType::handle_substitions (SubstitutionArgumentMappings mappings)
+{
+  gcc_unreachable ();
+  return nullptr;
 }
 
 void
@@ -1108,14 +1450,7 @@ ArrayType::accept_vis (TyConstVisitor &vis) const
 std::string
 ArrayType::as_string () const
 {
-  return "[" + get_element_type ()->as_string () + ":" + capacity_string ()
-	 + "]";
-}
-
-std::string
-ArrayType::capacity_string () const
-{
-  return rust_get_backend ()->const_size_val_to_string (get_capacity ());
+  return "[" + get_element_type ()->as_string () + ":" + "CAPACITY" + "]";
 }
 
 BaseType *
@@ -1153,8 +1488,6 @@ ArrayType::is_equal (const BaseType &other) const
     return false;
 
   auto other2 = static_cast<const ArrayType &> (other);
-  if (get_capacity () != other2.get_capacity ())
-    return false;
 
   auto this_element_type = get_element_type ();
   auto other_element_type = other2.get_element_type ();
@@ -1171,8 +1504,81 @@ ArrayType::get_element_type () const
 BaseType *
 ArrayType::clone () const
 {
-  return new ArrayType (get_ref (), get_ty_ref (), get_capacity (),
+  return new ArrayType (get_ref (), get_ty_ref (), ident.locus, capacity_expr,
 			element_type, get_combined_refs ());
+}
+
+void
+SliceType::accept_vis (TyVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+SliceType::accept_vis (TyConstVisitor &vis) const
+{
+  vis.visit (*this);
+}
+
+std::string
+SliceType::as_string () const
+{
+  return "[" + get_element_type ()->as_string () + "]";
+}
+
+BaseType *
+SliceType::unify (BaseType *other)
+{
+  SliceRules r (this);
+  return r.unify (other);
+}
+
+BaseType *
+SliceType::coerce (BaseType *other)
+{
+  SliceCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+SliceType::cast (BaseType *other)
+{
+  SliceCastRules r (this);
+  return r.cast (other);
+}
+
+bool
+SliceType::can_eq (const BaseType *other, bool emit_errors) const
+{
+  SliceCmp r (this, emit_errors);
+  return r.can_eq (other);
+}
+
+bool
+SliceType::is_equal (const BaseType &other) const
+{
+  if (get_kind () != other.get_kind ())
+    return false;
+
+  auto other2 = static_cast<const SliceType &> (other);
+
+  auto this_element_type = get_element_type ();
+  auto other_element_type = other2.get_element_type ();
+
+  return this_element_type->is_equal (*other_element_type);
+}
+
+BaseType *
+SliceType::get_element_type () const
+{
+  return element_type.get_tyty ();
+}
+
+BaseType *
+SliceType::clone () const
+{
+  return new SliceType (get_ref (), get_ty_ref (), ident.locus, element_type,
+			get_combined_refs ());
 }
 
 void
@@ -1674,7 +2080,7 @@ ReferenceType::get_base () const
 BaseType *
 ReferenceType::clone () const
 {
-  return new ReferenceType (get_ref (), get_ty_ref (), base, is_mutable (),
+  return new ReferenceType (get_ref (), get_ty_ref (), base, mutability (),
 			    get_combined_refs ());
 }
 
@@ -1760,7 +2166,7 @@ PointerType::get_base () const
 BaseType *
 PointerType::clone () const
 {
-  return new PointerType (get_ref (), get_ty_ref (), base, is_mutable (),
+  return new PointerType (get_ref (), get_ty_ref (), base, mutability (),
 			  get_combined_refs ());
 }
 
@@ -1805,7 +2211,21 @@ ParamType::as_string () const
   bool ok = context->lookup_type (get_ty_ref (), &lookup);
   rust_assert (ok);
 
-  return lookup->as_string ();
+  return get_symbol () + "=" + lookup->as_string ();
+}
+
+std::string
+ParamType::get_name () const
+{
+  if (get_ref () == get_ty_ref ())
+    return get_symbol ();
+
+  auto context = Resolver::TypeCheckContext::get ();
+  BaseType *lookup = nullptr;
+  bool ok = context->lookup_type (get_ty_ref (), &lookup);
+  rust_assert (ok);
+
+  return lookup->get_name ();
 }
 
 BaseType *
@@ -1839,8 +2259,8 @@ ParamType::can_eq (const BaseType *other, bool emit_errors) const
 BaseType *
 ParamType::clone () const
 {
-  return new ParamType (get_symbol (), get_ref (), get_ty_ref (), param,
-			get_specified_bounds (), get_combined_refs ());
+  return new ParamType (get_symbol (), ident.locus, get_ref (), get_ty_ref (),
+			param, get_specified_bounds (), get_combined_refs ());
 }
 
 std::string
@@ -2015,6 +2435,8 @@ NeverType::clone () const
   return new NeverType (get_ref (), get_ty_ref (), get_combined_refs ());
 }
 
+// placeholder type
+
 void
 PlaceholderType::accept_vis (TyVisitor &vis)
 {
@@ -2030,7 +2452,8 @@ PlaceholderType::accept_vis (TyConstVisitor &vis) const
 std::string
 PlaceholderType::as_string () const
 {
-  return "<placeholder>";
+  return "<placeholder:" + (can_resolve () ? resolve ()->as_string () : "")
+	 + ">";
 }
 
 BaseType *
@@ -2064,7 +2487,279 @@ PlaceholderType::can_eq (const BaseType *other, bool emit_errors) const
 BaseType *
 PlaceholderType::clone () const
 {
-  return new PlaceholderType (get_ref (), get_ty_ref (), get_combined_refs ());
+  return new PlaceholderType (get_symbol (), get_ref (), get_ty_ref (),
+			      get_combined_refs ());
+}
+
+void
+PlaceholderType::set_associated_type (HirId ref)
+{
+  auto context = Resolver::TypeCheckContext::get ();
+  context->insert_associated_type_mapping (get_ty_ref (), ref);
+}
+
+void
+PlaceholderType::clear_associated_type ()
+{
+  auto context = Resolver::TypeCheckContext::get ();
+  context->clear_associated_type_mapping (get_ty_ref ());
+}
+
+bool
+PlaceholderType::can_resolve () const
+{
+  auto context = Resolver::TypeCheckContext::get ();
+  return context->lookup_associated_type_mapping (get_ty_ref (), nullptr);
+}
+
+BaseType *
+PlaceholderType::resolve () const
+{
+  auto context = Resolver::TypeCheckContext::get ();
+
+  HirId mapping;
+  bool ok = context->lookup_associated_type_mapping (get_ty_ref (), &mapping);
+  rust_assert (ok);
+
+  return TyVar (mapping).get_tyty ();
+}
+
+bool
+PlaceholderType::is_equal (const BaseType &other) const
+{
+  if (get_kind () != other.get_kind ())
+    {
+      if (!can_resolve ())
+	return false;
+
+      return resolve ()->is_equal (other);
+    }
+
+  auto other2 = static_cast<const PlaceholderType &> (other);
+  return get_symbol ().compare (other2.get_symbol ()) == 0;
+}
+
+// Projection type
+
+void
+ProjectionType::accept_vis (TyVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ProjectionType::accept_vis (TyConstVisitor &vis) const
+{
+  vis.visit (*this);
+}
+
+std::string
+ProjectionType::as_string () const
+{
+  return "<Projection=" + subst_as_string () + "::" + base->as_string () + ">";
+}
+
+BaseType *
+ProjectionType::unify (BaseType *other)
+{
+  return base->unify (other);
+}
+
+BaseType *
+ProjectionType::coerce (BaseType *other)
+{
+  return base->coerce (other);
+}
+
+BaseType *
+ProjectionType::cast (BaseType *other)
+{
+  return base->cast (other);
+}
+
+bool
+ProjectionType::can_eq (const BaseType *other, bool emit_errors) const
+{
+  return base->can_eq (other, emit_errors);
+}
+
+BaseType *
+ProjectionType::clone () const
+{
+  return new ProjectionType (get_ref (), get_ty_ref (), base, trait, item,
+			     clone_substs (), used_arguments,
+			     get_combined_refs ());
+}
+
+ProjectionType *
+ProjectionType::handle_substitions (SubstitutionArgumentMappings subst_mappings)
+{
+  ProjectionType *projection = static_cast<ProjectionType *> (clone ());
+  projection->set_ty_ref (mappings->get_next_hir_id ());
+  projection->used_arguments = subst_mappings;
+
+  auto context = Resolver::TypeCheckContext::get ();
+  context->insert_implicit_type (projection->get_ty_ref (), projection);
+
+  for (auto &sub : projection->get_substs ())
+    {
+      SubstitutionArg arg = SubstitutionArg::error ();
+      bool ok
+	= subst_mappings.get_argument_for_symbol (sub.get_param_ty (), &arg);
+      if (ok)
+	sub.fill_param_ty (*arg.get_tyty (), subst_mappings.get_locus ());
+    }
+
+  auto fty = projection->base;
+  bool is_param_ty = fty->get_kind () == TypeKind::PARAM;
+  if (is_param_ty)
+    {
+      ParamType *p = static_cast<ParamType *> (fty);
+
+      SubstitutionArg arg = SubstitutionArg::error ();
+      bool ok = subst_mappings.get_argument_for_symbol (p, &arg);
+      if (ok)
+	{
+	  auto argt = arg.get_tyty ();
+	  bool arg_is_param = argt->get_kind () == TyTy::TypeKind::PARAM;
+	  bool arg_is_concrete = argt->get_kind () != TyTy::TypeKind::INFER;
+
+	  if (arg_is_param || arg_is_concrete)
+	    {
+	      auto new_field = argt->clone ();
+	      new_field->set_ref (fty->get_ref ());
+	      projection->base = new_field;
+	    }
+	  else
+	    {
+	      fty->set_ty_ref (argt->get_ref ());
+	    }
+	}
+    }
+  else if (fty->needs_generic_substitutions ()
+	   || fty->contains_type_parameters ())
+    {
+      BaseType *concrete
+	= Resolver::SubstMapperInternal::Resolve (fty, subst_mappings);
+
+      if (concrete == nullptr || concrete->get_kind () == TyTy::TypeKind::ERROR)
+	{
+	  rust_error_at (subst_mappings.get_locus (),
+			 "Failed to resolve field substitution type: %s",
+			 fty->as_string ().c_str ());
+	  return nullptr;
+	}
+
+      auto new_field = concrete->clone ();
+      new_field->set_ref (fty->get_ref ());
+      projection->base = new_field;
+    }
+
+  return projection;
+}
+
+void
+DynamicObjectType::accept_vis (TyVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+DynamicObjectType::accept_vis (TyConstVisitor &vis) const
+{
+  vis.visit (*this);
+}
+
+std::string
+DynamicObjectType::as_string () const
+{
+  return "dyn [" + raw_bounds_as_string () + "]";
+}
+
+BaseType *
+DynamicObjectType::unify (BaseType *other)
+{
+  DynamicRules r (this);
+  return r.unify (other);
+}
+
+bool
+DynamicObjectType::can_eq (const BaseType *other, bool emit_errors) const
+{
+  DynamicCmp r (this, emit_errors);
+  return r.can_eq (other);
+}
+
+BaseType *
+DynamicObjectType::coerce (BaseType *other)
+{
+  DynamicCoercionRules r (this);
+  return r.coerce (other);
+}
+
+BaseType *
+DynamicObjectType::cast (BaseType *other)
+{
+  DynamicCastRules r (this);
+  return r.cast (other);
+}
+
+BaseType *
+DynamicObjectType::clone () const
+{
+  return new DynamicObjectType (get_ref (), get_ty_ref (), ident,
+				specified_bounds, get_combined_refs ());
+}
+
+std::string
+DynamicObjectType::get_name () const
+{
+  std::string bounds = "[" + raw_bounds_as_string () + "]";
+  return "dyn " + bounds;
+}
+
+bool
+DynamicObjectType::is_equal (const BaseType &other) const
+{
+  if (get_kind () != other.get_kind ())
+    return false;
+
+  if (num_specified_bounds () != other.num_specified_bounds ())
+    return false;
+
+  return bounds_compatible (other, Location (), false);
+}
+
+const std::vector<
+  std::pair<const Resolver::TraitItemReference *, const TypeBoundPredicate *>>
+DynamicObjectType::get_object_items () const
+{
+  std::vector<
+    std::pair<const Resolver::TraitItemReference *, const TypeBoundPredicate *>>
+    items;
+  for (auto &bound : get_specified_bounds ())
+    {
+      const Resolver::TraitReference *trait = bound.get ();
+      for (auto &item : trait->get_trait_items ())
+	{
+	  if (item.get_trait_item_type ()
+		== Resolver::TraitItemReference::TraitItemType::FN
+	      && item.is_object_safe ())
+	    items.push_back ({&item, &bound});
+	}
+
+      for (auto &super_trait : trait->get_super_traits ())
+	{
+	  for (auto &item : super_trait->get_trait_items ())
+	    {
+	      if (item.get_trait_item_type ()
+		    == Resolver::TraitItemReference::TraitItemType::FN
+		  && item.is_object_safe ())
+		items.push_back ({&item, &bound});
+	    }
+	}
+    }
+  return items;
 }
 
 // rust-tyty-call.h
@@ -2072,7 +2767,8 @@ PlaceholderType::clone () const
 void
 TypeCheckCallExpr::visit (ADTType &type)
 {
-  if (!type.is_tuple_struct ())
+  rust_assert (!variant.is_error ());
+  if (variant.get_variant_type () != TyTy::VariantDef::VariantType::TUPLE)
     {
       rust_error_at (
 	call.get_locus (),
@@ -2081,36 +2777,37 @@ TypeCheckCallExpr::visit (ADTType &type)
       return;
     }
 
-  if (call.num_params () != type.num_fields ())
+  if (call.num_params () != variant.num_fields ())
     {
       rust_error_at (call.get_locus (),
 		     "unexpected number of arguments %lu expected %lu",
-		     call.num_params (), type.num_fields ());
+		     call.num_params (), variant.num_fields ());
       return;
     }
 
   size_t i = 0;
-  call.iterate_params ([&] (HIR::Expr *p) mutable -> bool {
-    StructFieldType *field = type.get_field (i);
-    BaseType *field_tyty = field->get_field_type ();
+  for (auto &argument : call.get_arguments ())
+    {
+      StructFieldType *field = variant.get_field_at_index (i);
+      BaseType *field_tyty = field->get_field_type ();
 
-    BaseType *arg = Resolver::TypeCheckExpr::Resolve (p, false);
-    if (arg == nullptr)
-      {
-	rust_error_at (p->get_locus_slow (), "failed to resolve argument type");
-	return false;
-      }
+      BaseType *arg = Resolver::TypeCheckExpr::Resolve (argument.get (), false);
+      if (arg->get_kind () == TyTy::TypeKind::ERROR)
+	{
+	  rust_error_at (argument->get_locus (),
+			 "failed to resolve argument type");
+	  return;
+	}
 
-    auto res = field_tyty->unify (arg);
-    if (res == nullptr)
-      {
-	return false;
-      }
+      auto res = field_tyty->coerce (arg);
+      if (res->get_kind () == TyTy::TypeKind::ERROR)
+	{
+	  return;
+	}
 
-    delete res;
-    i++;
-    return true;
-  });
+      delete res;
+      i++;
+    }
 
   if (i != call.num_params ())
     {
@@ -2148,35 +2845,36 @@ TypeCheckCallExpr::visit (FnType &type)
     }
 
   size_t i = 0;
-  call.iterate_params ([&] (HIR::Expr *param) mutable -> bool {
-    auto argument_expr_tyty = Resolver::TypeCheckExpr::Resolve (param, false);
-    if (argument_expr_tyty == nullptr)
-      {
-	rust_error_at (param->get_locus_slow (),
-		       "failed to resolve type for argument expr in CallExpr");
-	return false;
-      }
+  for (auto &argument : call.get_arguments ())
+    {
+      auto argument_expr_tyty
+	= Resolver::TypeCheckExpr::Resolve (argument.get (), false);
+      if (argument_expr_tyty->get_kind () == TyTy::TypeKind::ERROR)
+	{
+	  rust_error_at (
+	    argument->get_locus (),
+	    "failed to resolve type for argument expr in CallExpr");
+	  return;
+	}
 
-    auto resolved_argument_type = argument_expr_tyty;
+      // it might be a varadic function
+      if (i < type.num_params ())
+	{
+	  auto fnparam = type.param_at (i);
+	  auto resolved_argument_type
+	    = fnparam.second->coerce (argument_expr_tyty);
+	  if (resolved_argument_type->get_kind () == TyTy::TypeKind::ERROR)
+	    {
+	      rust_error_at (argument->get_locus (),
+			     "Type Resolution failure on parameter");
+	      return;
+	    }
+	}
 
-    // it might be a varadic function
-    if (i < type.num_params ())
-      {
-	auto fnparam = type.param_at (i);
-	resolved_argument_type = fnparam.second->unify (argument_expr_tyty);
-	if (resolved_argument_type == nullptr)
-	  {
-	    rust_error_at (param->get_locus_slow (),
-			   "Type Resolution failure on parameter");
-	    return false;
-	  }
-      }
+      context->insert_type (argument->get_mappings (), argument_expr_tyty);
 
-    context->insert_type (param->get_mappings (), resolved_argument_type);
-
-    i++;
-    return true;
-  });
+      i++;
+    }
 
   if (i < call.num_params ())
     {
@@ -2184,6 +2882,17 @@ TypeCheckCallExpr::visit (FnType &type)
 		     "unexpected number of arguments %lu expected %lu", i,
 		     call.num_params ());
       return;
+    }
+
+  if (type.get_return_type ()->get_kind () == TyTy::TypeKind::PLACEHOLDER)
+    {
+      const TyTy::PlaceholderType *p
+	= static_cast<const TyTy::PlaceholderType *> (type.get_return_type ());
+      if (p->can_resolve ())
+	{
+	  resolved = p->resolve ()->clone ();
+	  return;
+	}
     }
 
   resolved = type.get_return_type ()->clone ();
@@ -2201,29 +2910,31 @@ TypeCheckCallExpr::visit (FnPtr &type)
     }
 
   size_t i = 0;
-  call.iterate_params ([&] (HIR::Expr *param) mutable -> bool {
-    auto fnparam = type.param_at (i);
-    auto argument_expr_tyty = Resolver::TypeCheckExpr::Resolve (param, false);
-    if (argument_expr_tyty == nullptr)
-      {
-	rust_error_at (param->get_locus_slow (),
-		       "failed to resolve type for argument expr in CallExpr");
-	return false;
-      }
+  for (auto &argument : call.get_arguments ())
+    {
+      auto fnparam = type.param_at (i);
+      auto argument_expr_tyty
+	= Resolver::TypeCheckExpr::Resolve (argument.get (), false);
+      if (argument_expr_tyty->get_kind () == TyTy::TypeKind::ERROR)
+	{
+	  rust_error_at (
+	    argument->get_locus (),
+	    "failed to resolve type for argument expr in CallExpr");
+	  return;
+	}
 
-    auto resolved_argument_type = fnparam->unify (argument_expr_tyty);
-    if (resolved_argument_type == nullptr)
-      {
-	rust_error_at (param->get_locus_slow (),
-		       "Type Resolution failure on parameter");
-	return false;
-      }
+      auto resolved_argument_type = fnparam->coerce (argument_expr_tyty);
+      if (resolved_argument_type->get_kind () == TyTy::TypeKind::ERROR)
+	{
+	  rust_error_at (argument->get_locus (),
+			 "Type Resolution failure on parameter");
+	  return;
+	}
 
-    context->insert_type (param->get_mappings (), resolved_argument_type);
+      context->insert_type (argument->get_mappings (), argument_expr_tyty);
 
-    i++;
-    return true;
-  });
+      i++;
+    }
 
   if (i != call.num_params ())
     {
@@ -2241,6 +2952,8 @@ TypeCheckCallExpr::visit (FnPtr &type)
 void
 TypeCheckMethodCallExpr::visit (FnType &type)
 {
+  type.get_self_type ()->unify (adjusted_self);
+
   // +1 for the receiver self
   size_t num_args_to_call = call.num_params () + 1;
   if (num_args_to_call != type.num_params ())
@@ -2252,29 +2965,31 @@ TypeCheckMethodCallExpr::visit (FnType &type)
     }
 
   size_t i = 1;
-  call.iterate_params ([&] (HIR::Expr *param) mutable -> bool {
-    auto fnparam = type.param_at (i);
-    auto argument_expr_tyty = Resolver::TypeCheckExpr::Resolve (param, false);
-    if (argument_expr_tyty == nullptr)
-      {
-	rust_error_at (param->get_locus_slow (),
-		       "failed to resolve type for argument expr in CallExpr");
-	return false;
-      }
+  for (auto &argument : call.get_arguments ())
+    {
+      auto fnparam = type.param_at (i);
+      auto argument_expr_tyty
+	= Resolver::TypeCheckExpr::Resolve (argument.get (), false);
+      if (argument_expr_tyty->get_kind () == TyTy::TypeKind::ERROR)
+	{
+	  rust_error_at (
+	    argument->get_locus (),
+	    "failed to resolve type for argument expr in CallExpr");
+	  return;
+	}
 
-    auto resolved_argument_type = fnparam.second->unify (argument_expr_tyty);
-    if (resolved_argument_type == nullptr)
-      {
-	rust_error_at (param->get_locus_slow (),
-		       "Type Resolution failure on parameter");
-	return false;
-      }
+      auto resolved_argument_type = fnparam.second->coerce (argument_expr_tyty);
+      if (resolved_argument_type->get_kind () == TyTy::TypeKind::ERROR)
+	{
+	  rust_error_at (argument->get_locus (),
+			 "Type Resolution failure on parameter");
+	  return;
+	}
 
-    context->insert_type (param->get_mappings (), resolved_argument_type);
+      context->insert_type (argument->get_mappings (), argument_expr_tyty);
 
-    i++;
-    return true;
-  });
+      i++;
+    }
 
   if (i != num_args_to_call)
     {

@@ -1,5 +1,5 @@
 /* Structure for saving state for a nested function.
-   Copyright (C) 1989-2021 Free Software Foundation, Inc.
+   Copyright (C) 1989-2022 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -157,6 +157,7 @@ struct GTY(()) rtl_eh {
 struct gimple_df;
 struct call_site_record_d;
 struct dw_fde_node;
+class range_query;
 
 struct GTY(()) varasm_status {
   /* If we're using a per-function constant pool, this is it.  */
@@ -276,7 +277,7 @@ struct GTY(()) function {
      flags for the actions that they have taken.  */
   unsigned int pending_TODOs;
 
-  /* For function.c.  */
+  /* For function.cc.  */
 
   /* Points to the FUNCTION_DECL of this function.  */
   tree decl;
@@ -308,6 +309,12 @@ struct GTY(()) function {
      used for unwinding.  Only set when either dwarf2 unwinding or dwarf2
      debugging is enabled.  */
   struct dw_fde_node *fde;
+
+  /* Range query mechanism for functions.  The default is to pick up
+     global ranges.  If a pass wants on-demand ranges OTOH, it must
+     call enable/disable_ranger().  The pointer is never null.  It
+     should be queried by calling get_range_query().  */
+  range_query * GTY ((skip)) x_range_query;
 
   /* Last statement uid.  */
   int last_stmt_uid;

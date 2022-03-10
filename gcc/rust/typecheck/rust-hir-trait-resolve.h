@@ -1,4 +1,4 @@
-// Copyright (C) 2021 Free Software Foundation, Inc.
+// Copyright (C) 2021-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -24,6 +24,7 @@
 #include "rust-tyty-visitor.h"
 #include "rust-hir-type-check-type.h"
 #include "rust-hir-trait-ref.h"
+#include "rust-expr.h"
 
 namespace Rust {
 namespace Resolver {
@@ -37,57 +38,23 @@ public:
   Resolve (HIR::TraitItem &item, TyTy::BaseType *self,
 	   std::vector<TyTy::SubstitutionParamMapping> substitutions)
   {
-    ResolveTraitItemToRef resolver (self, substitutions);
+    ResolveTraitItemToRef resolver (self, std::move (substitutions));
     item.accept_vis (resolver);
-    return resolver.resolved;
+    return std::move (resolver.resolved);
   }
 
-  void visit (HIR::TraitItemType &type) override
-  {
-    TyTy::BaseType *ty
-      = new TyTy::PlaceholderType (type.get_mappings ().get_hirid ());
-    context->insert_type (type.get_mappings (), ty);
+  void visit (HIR::TraitItemType &type) override;
 
-    // create trait-item-ref
-    Location locus = type.get_locus ();
-    bool is_optional = false;
-    std::string identifier = type.get_name ();
+  void visit (HIR::TraitItemConst &cst) override;
 
-    resolved = TraitItemReference (identifier, is_optional,
-				   TraitItemReference::TraitItemType::TYPE,
-				   &type, self, substitutions, locus);
-  }
-
-  void visit (HIR::TraitItemConst &cst) override
-  {
-    // create trait-item-ref
-    Location locus = cst.get_locus ();
-    bool is_optional = cst.has_expr ();
-    std::string identifier = cst.get_name ();
-
-    resolved = TraitItemReference (identifier, is_optional,
-				   TraitItemReference::TraitItemType::CONST,
-				   &cst, self, substitutions, locus);
-  }
-
-  void visit (HIR::TraitItemFunc &fn) override
-  {
-    // create trait-item-ref
-    Location locus = fn.get_locus ();
-    bool is_optional = fn.has_block_defined ();
-    std::string identifier = fn.get_decl ().get_function_name ();
-
-    resolved = TraitItemReference (identifier, is_optional,
-				   TraitItemReference::TraitItemType::FN, &fn,
-				   self, substitutions, locus);
-  }
+  void visit (HIR::TraitItemFunc &fn) override;
 
 private:
   ResolveTraitItemToRef (
     TyTy::BaseType *self,
-    std::vector<TyTy::SubstitutionParamMapping> substitutions)
+    std::vector<TyTy::SubstitutionParamMapping> &&substitutions)
     : TypeCheckBase (), resolved (TraitItemReference::error ()), self (self),
-      substitutions (substitutions)
+      substitutions (std::move (substitutions))
   {}
 
   TraitItemReference resolved;
@@ -104,6 +71,12 @@ public:
   {
     TraitResolver resolver;
     return resolver.go (path);
+  }
+
+  static TraitReference *Lookup (HIR::TypePath &path)
+  {
+    TraitResolver resolver;
+    return resolver.lookup_path (path);
   }
 
 private:
@@ -171,15 +144,56 @@ private:
 
     rust_assert (self != nullptr);
 
+    // Check if there is a super-trait, and apply this bound to the Self
+    // TypeParam
+    std::vector<TyTy::TypeBoundPredicate> specified_bounds;
+
+    // They also inherit themselves as a bound this enables a trait item to
+    // reference other Self::trait_items
+    specified_bounds.push_back (
+      TyTy::TypeBoundPredicate (trait_reference->get_mappings ().get_defid (),
+				trait_reference->get_locus ()));
+
+    std::vector<const TraitReference *> super_traits;
+    if (trait_reference->has_type_param_bounds ())
+      {
+	for (auto &bound : trait_reference->get_type_param_bounds ())
+	  {
+	    if (bound->get_bound_type ()
+		== HIR::TypeParamBound::BoundType::TRAITBOUND)
+	      {
+		HIR::TraitBound *b
+		  = static_cast<HIR::TraitBound *> (bound.get ());
+
+		// FIXME this might be recursive we need a check for that
+
+		TraitReference *trait = resolve_trait_path (b->get_path ());
+		TyTy::TypeBoundPredicate predicate (
+		  trait->get_mappings ().get_defid (), bound->get_locus ());
+
+		specified_bounds.push_back (std::move (predicate));
+		super_traits.push_back (predicate.get ());
+	      }
+	  }
+      }
+    self->inherit_bounds (specified_bounds);
+
     std::vector<TraitItemReference> item_refs;
     for (auto &item : trait_reference->get_trait_items ())
       {
+	// make a copy of the substs
+	std::vector<TyTy::SubstitutionParamMapping> item_subst;
+	for (auto &sub : substitutions)
+	  item_subst.push_back (sub.clone ());
+
 	TraitItemReference trait_item_ref
-	  = ResolveTraitItemToRef::Resolve (*item.get (), self, substitutions);
+	  = ResolveTraitItemToRef::Resolve (*item.get (), self,
+					    std::move (item_subst));
 	item_refs.push_back (std::move (trait_item_ref));
       }
 
-    TraitReference trait_object (trait_reference, item_refs);
+    TraitReference trait_object (trait_reference, item_refs,
+				 std::move (super_traits));
     context->insert_trait_reference (
       trait_reference->get_mappings ().get_defid (), std::move (trait_object));
 
@@ -188,7 +202,46 @@ private:
       trait_reference->get_mappings ().get_defid (), &tref);
     rust_assert (ok);
 
+    // hook to allow the trait to resolve its optional item blocks, we cant
+    // resolve the blocks of functions etc because it can end up in a recursive
+    // loop of trying to resolve traits as required by the types
+    tref->on_resolved ();
+
     return tref;
+  }
+
+  TraitReference *lookup_path (HIR::TypePath &path)
+  {
+    NodeId ref;
+    if (!resolver->lookup_resolved_type (path.get_mappings ().get_nodeid (),
+					 &ref))
+      {
+	rust_error_at (path.get_locus (), "Failed to resolve path to node-id");
+	return &TraitReference::error_node ();
+      }
+
+    HirId hir_node = UNKNOWN_HIRID;
+    if (!mappings->lookup_node_to_hir (mappings->get_current_crate (), ref,
+				       &hir_node))
+      {
+	rust_error_at (path.get_locus (), "Failed to resolve path to hir-id");
+	return &TraitReference::error_node ();
+      }
+
+    HIR::Item *resolved_item
+      = mappings->lookup_hir_item (mappings->get_current_crate (), hir_node);
+
+    rust_assert (resolved_item != nullptr);
+    resolved_item->accept_vis (*this);
+    rust_assert (trait_reference != nullptr);
+
+    TraitReference *tref = &TraitReference::error_node ();
+    if (context->lookup_trait_reference (
+	  trait_reference->get_mappings ().get_defid (), &tref))
+      {
+	return tref;
+      }
+    return &TraitReference::error_node ();
   }
 
   HIR::Trait *trait_reference;

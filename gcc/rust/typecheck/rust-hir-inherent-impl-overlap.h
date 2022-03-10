@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -64,39 +64,6 @@ private:
   std::string &result;
 };
 
-class GetLocusFromImplItem : public TypeCheckBase
-{
-  using Rust::Resolver::TypeCheckBase::visit;
-
-public:
-  static bool Resolve (HIR::ImplItem *query, Location &locus)
-  {
-    GetLocusFromImplItem resolver (locus);
-    query->accept_vis (resolver);
-    return resolver.ok;
-  }
-
-  void visit (HIR::ConstantItem &constant) override
-  {
-    ok = true;
-    locus = constant.get_locus ();
-  }
-
-  void visit (HIR::Function &function) override
-  {
-    ok = true;
-    locus = function.get_locus ();
-  }
-
-private:
-  GetLocusFromImplItem (Location &locus)
-    : TypeCheckBase (), ok (false), locus (locus)
-  {}
-
-  bool ok;
-  Location &locus;
-};
-
 class OverlappingImplItemPass : public TypeCheckBase
 {
   using Rust::Resolver::TypeCheckBase::visit;
@@ -109,6 +76,10 @@ public:
     // generate mappings
     pass.mappings->iterate_impl_items (
       [&] (HirId id, HIR::ImplItem *impl_item, HIR::ImplBlock *impl) -> bool {
+	// ignoring trait-impls might need thought later on
+	if (impl->has_trait_ref ())
+	  return true;
+
 	pass.process_impl_item (id, impl_item, impl);
 	return true;
       });
@@ -181,16 +152,8 @@ public:
   void collision_detected (HIR::ImplItem *query, HIR::ImplItem *dup,
 			   const std::string &name)
   {
-    Location qlocus; // query
-    bool ok = GetLocusFromImplItem::Resolve (query, qlocus);
-    rust_assert (ok);
-
-    Location dlocus; // dup
-    ok = GetLocusFromImplItem::Resolve (dup, dlocus);
-    rust_assert (ok);
-
-    RichLocation r (qlocus);
-    r.add_range (dlocus);
+    RichLocation r (query->get_locus ());
+    r.add_range (dup->get_locus ());
     rust_error_at (r, "duplicate definitions with name %s", name.c_str ());
   }
 

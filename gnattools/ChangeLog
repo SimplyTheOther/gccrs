@@ -1,3 +1,13 @@
+2021-10-22  Eric Gallager  <egallager@gcc.gnu.org>
+
+	PR other/102663
+	* Makefile.in: Add dummy install-dvi target.
+
+2021-05-07  Bob Duff  <duff@adacore.com>
+
+	* Makefile.in (GENERATED_FILES_FOR_TOOLS): New variable.
+	($(GCC_DIR)/stamp-tools): Walk it for the first copy operation.
+
 2018-11-19  Alexandre Oliva <oliva@adacore.com>
 
 	PR ada/81878

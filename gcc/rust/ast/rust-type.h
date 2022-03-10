@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -68,9 +68,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-
-  Location get_locus_slow () const override final { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -144,8 +142,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -165,10 +162,7 @@ public:
 class TraitObjectType : public Type
 {
   bool has_dyn;
-  // TypeParamBounds type_param_bounds;
-  std::vector<std::unique_ptr<TypeParamBound> >
-    type_param_bounds; // inlined form
-
+  std::vector<std::unique_ptr<TypeParamBound> > type_param_bounds;
   Location locus;
 
 protected:
@@ -182,7 +176,7 @@ protected:
 public:
   TraitObjectType (
     std::vector<std::unique_ptr<TypeParamBound> > type_param_bounds,
-    Location locus, bool is_dyn_dispatch = false)
+    Location locus, bool is_dyn_dispatch)
     : has_dyn (is_dyn_dispatch),
       type_param_bounds (std::move (type_param_bounds)), locus (locus)
   {}
@@ -214,10 +208,11 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
+
+  bool is_dyn () const { return has_dyn; }
 
   // TODO: mutable getter seems kinda dodgy
   std::vector<std::unique_ptr<TypeParamBound> > &get_type_param_bounds ()
@@ -283,8 +278,7 @@ public:
     return type_in_parens->to_trait_bound (true);
   }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -317,8 +311,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -363,8 +356,7 @@ public:
     return new TraitBound (trait_bound);
   }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -374,6 +366,8 @@ public:
     // TODO: check to ensure invariants are met?
     return trait_bound;
   }
+
+  bool is_dyn () const { return has_dyn; }
 };
 
 class TypePath; // definition moved to "rust-path.h"
@@ -419,8 +413,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -460,8 +453,7 @@ public:
 
   std::string as_string () const override { return "! (never type)"; }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 };
@@ -513,8 +505,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -581,8 +572,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -643,8 +633,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -704,8 +693,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -745,8 +733,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 };
@@ -923,8 +910,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -941,6 +927,8 @@ public:
     rust_assert (has_return_type ());
     return return_type;
   }
+
+  FunctionQualifiers get_function_qualifiers () { return function_qualifiers; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather

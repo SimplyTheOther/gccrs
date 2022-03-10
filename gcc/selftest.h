@@ -1,5 +1,5 @@
 /* A self-testing framework, for use by -fself-test.
-   Copyright (C) 2015-2021 Free Software Foundation, Inc.
+   Copyright (C) 2015-2022 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -112,6 +112,8 @@ class temp_source_file : public named_temp_file
  public:
   temp_source_file (const location &loc, const char *suffix,
 		    const char *content);
+  temp_source_file (const location &loc, const char *suffix,
+		    const char *content, size_t sz);
 };
 
 /* RAII-style class for avoiding introducing locale-specific differences
@@ -141,8 +143,8 @@ class auto_fix_quotes
    of situations:
    - line_table->default_range_bits: some frontends use a non-zero value
    and others use zero
-   - the fallback modes within line-map.c: there are various threshold
-   values for location_t beyond line-map.c changes
+   - the fallback modes within line-map.cc: there are various threshold
+   values for location_t beyond line-map.cc changes
    behavior (disabling of the range-packing optimization, disabling
    of column-tracking).  We can exercise these by starting the line_table
    at interesting values at or near these thresholds.
@@ -190,11 +192,6 @@ for_each_line_table_case (void (*testcase) (const line_table_case &));
 
 extern char *read_file (const location &loc, const char *path);
 
-/* A helper function for writing tests that interact with the
-   garbage collector.  */
-
-extern void forcibly_ggc_collect ();
-
 /* Convert a path relative to SRCDIR/gcc/testsuite/selftests
    to a real path (either absolute, or relative to pwd).
    The result should be freed by the caller.  */
@@ -241,7 +238,6 @@ extern void hash_map_tests_c_tests ();
 extern void hash_set_tests_c_tests ();
 extern void input_c_tests ();
 extern void json_cc_tests ();
-extern void opt_problem_cc_tests ();
 extern void optinfo_emit_json_cc_tests ();
 extern void opts_c_tests ();
 extern void ordered_hash_map_tests_cc_tests ();
@@ -249,6 +245,7 @@ extern void predict_c_tests ();
 extern void pretty_print_c_tests ();
 extern void range_tests ();
 extern void range_op_tests ();
+extern void gimple_range_tests ();
 extern void read_rtl_function_c_tests ();
 extern void rtl_tests_c_tests ();
 extern void sbitmap_c_tests ();
@@ -264,7 +261,6 @@ extern void tree_cfg_c_tests ();
 extern void tree_diagnostic_path_cc_tests ();
 extern void tristate_cc_tests ();
 extern void typed_splay_tree_c_tests ();
-extern void unique_ptr_tests_cc_tests ();
 extern void vec_c_tests ();
 extern void vec_perm_indices_c_tests ();
 extern void wide_int_cc_tests ();

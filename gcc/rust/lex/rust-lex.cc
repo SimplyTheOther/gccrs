@@ -1,4 +1,4 @@
-// Copyright (C) 2020, 2021 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -128,7 +128,8 @@ Lexer::Lexer (const char *filename, RAIIFile file_input, Linemap *linemap)
     token_queue (TokenSource (this))
 {
   // inform line_table that file is being entered and is in line 1
-  line_map->start_file (filename, current_line);
+  if (linemap)
+    line_map->start_file (filename, current_line);
 }
 
 Lexer::~Lexer ()
@@ -152,7 +153,11 @@ Lexer::~Lexer ()
 Location
 Lexer::get_current_location ()
 {
-  return line_map->get_location (current_column);
+  if (line_map)
+    return line_map->get_location (current_column);
+  else
+    // If we have no linemap, we're lexing something without proper locations
+    return Location ();
 }
 
 int
@@ -1273,6 +1278,8 @@ Lexer::parse_escape (char opening_char)
       rust_error_at (get_current_location (),
 		     "cannot have a unicode escape \\u in a byte %s",
 		     opening_char == '\'' ? "character" : "string");
+      // Try to parse it anyway, just to skip it
+      parse_partial_unicode_escape ();
       return std::make_tuple (output_char, additional_length_offset, false);
     case '\r':
     case '\n':
@@ -1423,8 +1430,7 @@ Lexer::parse_partial_hex_escape ()
   char hexNum[3] = {0, 0, 0};
 
   // first hex char
-  skip_input ();
-  current_char = peek_input ();
+  current_char = peek_input (1);
   int additional_length_offset = 1;
 
   if (!is_x_digit (current_char))
@@ -1432,20 +1438,23 @@ Lexer::parse_partial_hex_escape ()
       rust_error_at (get_current_location (),
 		     "invalid character %<\\x%c%> in \\x sequence",
 		     current_char);
+      return std::make_pair (0, 0);
     }
   hexNum[0] = current_char;
 
   // second hex char
   skip_input ();
-  current_char = peek_input ();
+  current_char = peek_input (1);
   additional_length_offset++;
 
   if (!is_x_digit (current_char))
     {
       rust_error_at (get_current_location (),
-		     "invalid character %<\\x%c%> in \\x sequence",
+		     "invalid character %<\\x%c%c%> in \\x sequence", hexNum[0],
 		     current_char);
+      return std::make_pair (0, 1);
     }
+  skip_input ();
   hexNum[1] = current_char;
 
   long hexLong = std::strtol (hexNum, nullptr, 16);
@@ -1459,16 +1468,34 @@ Lexer::parse_partial_unicode_escape ()
 {
   skip_input ();
   current_char = peek_input ();
-  int additional_length_offset = 1;
+  int additional_length_offset = 0;
 
-  bool need_close_brace = false;
-  if (current_char == '{')
+  if (current_char != '{')
     {
-      need_close_brace = true;
+      rust_error_at (get_current_location (),
+		     "unicode escape should start with %<{%>");
+      /* Skip what should probaby have been between brackets.  */
+      while (is_x_digit (current_char) || current_char == '_')
+	{
+	  skip_input ();
+	  current_char = peek_input ();
+	  additional_length_offset++;
+	}
+      return std::make_pair (Codepoint (0), additional_length_offset);
+    }
 
+  skip_input ();
+  current_char = peek_input ();
+  additional_length_offset++;
+
+  if (current_char == '_')
+    {
+      rust_error_at (get_current_location (),
+		     "unicode escape cannot start with %<_%>");
       skip_input ();
       current_char = peek_input ();
       additional_length_offset++;
+      // fallthrough and try to parse the rest anyway
     }
 
   // parse unicode escape - 1-6 hex digits
@@ -1498,21 +1525,45 @@ Lexer::parse_partial_unicode_escape ()
       current_char = peek_input ();
     }
 
-  // ensure closing brace if required
-  if (need_close_brace)
+  if (current_char == '}')
     {
-      if (current_char == '}')
+      skip_input ();
+      current_char = peek_input ();
+      additional_length_offset++;
+    }
+  else
+    {
+      // actually an error, but allow propagation anyway Assume that
+      // wrong bracketm whitespace or single/double quotes are wrong
+      // termination, otherwise it is a wrong character, then skip to the actual
+      // terminator.
+      if (current_char == '{' || is_whitespace (current_char)
+	  || current_char == '\'' || current_char == '"')
 	{
-	  skip_input ();
-	  current_char = peek_input ();
-	  additional_length_offset++;
+	  rust_error_at (get_current_location (),
+			 "expected terminating %<}%> in unicode escape");
+	  return std::make_pair (Codepoint (0), additional_length_offset);
 	}
       else
 	{
-	  // actually an error, but allow propagation anyway
 	  rust_error_at (get_current_location (),
-			 "expected terminating %<}%> in unicode escape");
-	  // return false;
+			 "invalid character %<%c%> in unicode escape",
+			 current_char);
+	  while (current_char != '}' && current_char != '{'
+		 && !is_whitespace (current_char) && current_char != '\''
+		 && current_char != '"')
+	    {
+	      skip_input ();
+	      current_char = peek_input ();
+	      additional_length_offset++;
+	    }
+	  // Consume the actual closing bracket if found
+	  if (current_char == '}')
+	    {
+	      skip_input ();
+	      current_char = peek_input ();
+	      additional_length_offset++;
+	    }
 	  return std::make_pair (Codepoint (0), additional_length_offset);
 	}
     }
@@ -1528,10 +1579,22 @@ Lexer::parse_partial_unicode_escape ()
       return std::make_pair (Codepoint (0), additional_length_offset);
     }
 
-  long hex_num = std::strtol (num_str.c_str (), nullptr, 16);
+  unsigned long hex_num = std::strtoul (num_str.c_str (), nullptr, 16);
 
-  // assert fits a uint32_t
-  gcc_assert (hex_num < 4294967296);
+  if (hex_num > 0xd7ff && hex_num < 0xe000)
+    {
+      rust_error_at (
+	get_current_location (),
+	"unicode escape cannot be a surrogate value (D800 to DFFF)");
+      return std::make_pair (Codepoint (0), additional_length_offset);
+    }
+
+  if (hex_num > 0x10ffff)
+    {
+      rust_error_at (get_current_location (),
+		     "unicode escape cannot be larger than 10FFFF");
+      return std::make_pair (Codepoint (0), additional_length_offset);
+    }
 
   // return true;
   return std::make_pair (Codepoint (static_cast<uint32_t> (hex_num)),
@@ -1558,13 +1621,6 @@ Lexer::parse_byte_char (Location loc)
       auto escape_length_pair = parse_escape ('\'');
       byte_char = std::get<0> (escape_length_pair);
       length += std::get<1> (escape_length_pair);
-
-      if (byte_char > 127)
-	{
-	  rust_error_at (get_current_location (),
-			 "%<byte char%> %<%c%> out of range", byte_char);
-	  byte_char = 0;
-	}
 
       current_char = peek_input ();
 
@@ -1634,15 +1690,7 @@ Lexer::parse_byte_string (Location loc)
 	  else
 	    length += std::get<1> (escape_length_pair);
 
-	  if (output_char > 127)
-	    {
-	      rust_error_at (get_current_location (),
-			     "character %<%c%> in byte string out of range",
-			     output_char);
-	      output_char = 0;
-	    }
-
-	  if (output_char != 0)
+	  if (output_char != 0 || !std::get<2> (escape_length_pair))
 	    str += output_char;
 
 	  continue;
@@ -1735,6 +1783,14 @@ Lexer::parse_raw_byte_string (Location loc)
 	      length += hash_count + 1;
 	      break;
 	    }
+	}
+
+      if ((unsigned char) current_char > 127)
+	{
+	  rust_error_at (get_current_location (),
+			 "character %<%c%> in raw byte string out of range",
+			 current_char);
+	  current_char = 0;
 	}
 
       length++;

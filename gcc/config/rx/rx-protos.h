@@ -1,5 +1,5 @@
 /* Exported function prototypes from the Renesas RX backend.
-   Copyright (C) 2008-2021 Free Software Foundation, Inc.
+   Copyright (C) 2008-2022 Free Software Foundation, Inc.
    Contributed by Red Hat.
 
    This file is part of GCC.
@@ -171,7 +171,7 @@ rx_find_use_of_reg (rtx reg, rtx_insn* insn, F stepfunc)
 
 #endif
 
-/* Routines implemented in rx-rust.c  */
+/* Routines implemented in rx-rust.cc  */
 extern void rx_rust_target_cpu_info (void);
 
 #endif /* GCC_RX_PROTOS_H */

@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -50,6 +50,19 @@ public:
     item->accept_vis (resolver);
     rust_assert (resolver.translated != nullptr);
     return resolver.translated;
+  }
+
+  void visit (AST::MacroInvocation &invoc) override
+  {
+    if (!invoc.has_semicolon ())
+      return;
+
+    AST::ASTFragment &fragment = invoc.get_fragment ();
+
+    // FIXME
+    // this assertion might go away, maybe on failure's to expand a macro?
+    rust_assert (!fragment.get_nodes ().empty ());
+    fragment.get_nodes ().at (0).accept_vis (*this);
   }
 
   void visit (AST::TypeAlias &alias) override
@@ -118,8 +131,8 @@ public:
     // ignore for now and leave empty
     std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
     HIR::WhereClause where_clause (std::move (where_clause_items));
-    HIR::FunctionQualifiers qualifiers (
-      HIR::FunctionQualifiers::AsyncConstStatus::NONE, false);
+    HIR::FunctionQualifiers qualifiers
+      = lower_qualifiers (function.get_qualifiers ());
     HIR::Visibility vis = HIR::Visibility::create_public ();
 
     // need
@@ -153,7 +166,7 @@ public:
 	  = HIR::FunctionParam (mapping, std::move (translated_pattern),
 				std::move (translated_type),
 				param.get_locus ());
-	function_params.push_back (hir_param);
+	function_params.push_back (std::move (hir_param));
       }
 
     bool terminated = false;
@@ -202,8 +215,8 @@ public:
     // ignore for now and leave empty
     std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
     HIR::WhereClause where_clause (std::move (where_clause_items));
-    HIR::FunctionQualifiers qualifiers (
-      HIR::FunctionQualifiers::AsyncConstStatus::NONE, false);
+    HIR::FunctionQualifiers qualifiers
+      = lower_qualifiers (method.get_qualifiers ());
     HIR::Visibility vis = HIR::Visibility::create_public ();
 
     // need
@@ -239,7 +252,7 @@ public:
 	  = HIR::FunctionParam (mapping, std::move (translated_pattern),
 				std::move (translated_type),
 				param.get_locus ());
-	function_params.push_back (hir_param);
+	function_params.push_back (std::move (hir_param));
       }
 
     bool terminated = false;
@@ -308,14 +321,27 @@ public:
     return resolver.translated;
   }
 
+  void visit (AST::MacroInvocation &invoc) override
+  {
+    if (!invoc.has_semicolon ())
+      return;
+
+    AST::ASTFragment &fragment = invoc.get_fragment ();
+
+    // FIXME
+    // this assertion might go away, maybe on failure's to expand a macro?
+    rust_assert (!fragment.get_nodes ().empty ());
+    fragment.get_nodes ().at (0).accept_vis (*this);
+  }
+
   void visit (AST::TraitItemFunc &func) override
   {
     AST::TraitFunctionDecl &ref = func.get_trait_function_decl ();
 
     std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
     HIR::WhereClause where_clause (std::move (where_clause_items));
-    HIR::FunctionQualifiers qualifiers (
-      HIR::FunctionQualifiers::AsyncConstStatus::NONE, false);
+    HIR::FunctionQualifiers qualifiers
+      = lower_qualifiers (func.get_trait_function_decl ().get_qualifiers ());
 
     std::vector<std::unique_ptr<HIR::GenericParam> > generic_params;
     if (ref.has_generics ())
@@ -345,7 +371,7 @@ public:
 	  = HIR::FunctionParam (mapping, std::move (translated_pattern),
 				std::move (translated_type),
 				param.get_locus ());
-	function_params.push_back (hir_param);
+	function_params.push_back (std::move (hir_param));
       }
 
     HIR::TraitFunctionDecl decl (ref.get_identifier (), std::move (qualifiers),
@@ -354,10 +380,12 @@ public:
 				 std::move (function_params),
 				 std::move (return_type),
 				 std::move (where_clause));
-    HIR::Expr *block_expr
-      = func.has_definition ()
-	  ? ASTLoweringExpr::translate (func.get_definition ().get ())
-	  : nullptr;
+    bool terminated = false;
+    std::unique_ptr<HIR::BlockExpr> block_expr
+      = func.has_definition () ? std::unique_ptr<HIR::BlockExpr> (
+	  ASTLoweringBlock::translate (func.get_definition ().get (),
+				       &terminated))
+			       : nullptr;
 
     auto crate_num = mappings->get_current_crate ();
     Analysis::NodeMapping mapping (crate_num, func.get_node_id (),
@@ -366,13 +394,22 @@ public:
 
     HIR::TraitItemFunc *trait_item
       = new HIR::TraitItemFunc (mapping, std::move (decl),
-				std::unique_ptr<HIR::Expr> (block_expr),
-				func.get_outer_attrs (), func.get_locus ());
+				std::move (block_expr), func.get_outer_attrs (),
+				func.get_locus ());
     translated = trait_item;
     mappings->insert_hir_trait_item (mapping.get_crate_num (),
 				     mapping.get_hirid (), translated);
     mappings->insert_location (crate_num, mapping.get_hirid (),
 			       trait_item->get_locus ());
+
+    // add the mappings for the function params at the end
+    for (auto &param : trait_item->get_decl ().get_function_params ())
+      {
+	mappings->insert_hir_param (mapping.get_crate_num (),
+				    param.get_mappings ().get_hirid (), &param);
+	mappings->insert_location (crate_num, mapping.get_hirid (),
+				   param.get_locus ());
+      }
   }
 
   void visit (AST::TraitItemMethod &method) override
@@ -381,8 +418,8 @@ public:
 
     std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
     HIR::WhereClause where_clause (std::move (where_clause_items));
-    HIR::FunctionQualifiers qualifiers (
-      HIR::FunctionQualifiers::AsyncConstStatus::NONE, false);
+    HIR::FunctionQualifiers qualifiers
+      = lower_qualifiers (method.get_trait_method_decl ().get_qualifiers ());
 
     std::vector<std::unique_ptr<HIR::GenericParam> > generic_params;
     if (ref.has_generics ())
@@ -423,10 +460,12 @@ public:
 				 std::move (function_params),
 				 std::move (return_type),
 				 std::move (where_clause));
-    HIR::Expr *block_expr
-      = method.has_definition ()
-	  ? ASTLoweringExpr::translate (method.get_definition ().get ())
-	  : nullptr;
+    bool terminated = false;
+    std::unique_ptr<HIR::BlockExpr> block_expr
+      = method.has_definition () ? std::unique_ptr<HIR::BlockExpr> (
+	  ASTLoweringBlock::translate (method.get_definition ().get (),
+				       &terminated))
+				 : nullptr;
 
     auto crate_num = mappings->get_current_crate ();
     Analysis::NodeMapping mapping (crate_num, method.get_node_id (),
@@ -435,13 +474,30 @@ public:
 
     HIR::TraitItemFunc *trait_item
       = new HIR::TraitItemFunc (mapping, std::move (decl),
-				std::unique_ptr<HIR::Expr> (block_expr),
+				std::move (block_expr),
 				method.get_outer_attrs (), method.get_locus ());
     translated = trait_item;
     mappings->insert_hir_trait_item (mapping.get_crate_num (),
 				     mapping.get_hirid (), translated);
     mappings->insert_location (crate_num, mapping.get_hirid (),
 			       trait_item->get_locus ());
+
+    // insert mappings for self
+    mappings->insert_hir_self_param (crate_num,
+				     self_param.get_mappings ().get_hirid (),
+				     &self_param);
+    mappings->insert_location (crate_num,
+			       self_param.get_mappings ().get_hirid (),
+			       self_param.get_locus ());
+
+    // add the mappings for the function params at the end
+    for (auto &param : trait_item->get_decl ().get_function_params ())
+      {
+	mappings->insert_hir_param (mapping.get_crate_num (),
+				    param.get_mappings ().get_hirid (), &param);
+	mappings->insert_location (crate_num, mapping.get_hirid (),
+				   param.get_locus ());
+      }
   }
 
   void visit (AST::TraitItemConst &constant) override

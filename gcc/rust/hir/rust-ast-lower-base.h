@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -24,6 +24,7 @@
 #include "rust-ast-visitor.h"
 #include "rust-hir-map.h"
 #include "rust-hir-full.h"
+#include "rust-attributes.h"
 
 namespace Rust {
 namespace HIR {
@@ -55,7 +56,6 @@ public:
   //  virtual void visit(TraitItem& trait_item) {}
   //  virtual void visit(InherentImplItem& inherent_impl_item) {}
   //  virtual void visit(TraitImplItem& trait_impl_item) {}
-  virtual void visit (AST::MacroInvocationSemi &macro) {}
 
   // rust-path.h
   virtual void visit (AST::PathInExpression &path) {}
@@ -96,15 +96,6 @@ public:
   virtual void visit (AST::StructExprFieldIndexValue &field) {}
   virtual void visit (AST::StructExprStructFields &expr) {}
   virtual void visit (AST::StructExprStructBase &expr) {}
-  virtual void visit (AST::StructExprTuple &expr) {}
-  virtual void visit (AST::StructExprUnit &expr) {}
-  //  virtual void visit(EnumExprField& field) {}
-  virtual void visit (AST::EnumExprFieldIdentifier &field) {}
-  virtual void visit (AST::EnumExprFieldIdentifierValue &field) {}
-  virtual void visit (AST::EnumExprFieldIndexValue &field) {}
-  virtual void visit (AST::EnumExprStruct &expr) {}
-  virtual void visit (AST::EnumExprTuple &expr) {}
-  virtual void visit (AST::EnumExprFieldless &expr) {}
   virtual void visit (AST::CallExpr &expr) {}
   virtual void visit (AST::MethodCallExpr &expr) {}
   virtual void visit (AST::FieldAccessExpr &expr) {}
@@ -239,9 +230,13 @@ public:
   virtual void visit (AST::BareFunctionType &type) {}
 
 protected:
-  ASTLoweringBase () : mappings (Analysis::Mappings::get ()) {}
+  ASTLoweringBase ()
+    : mappings (Analysis::Mappings::get ()),
+      attr_mappings (Analysis::BuiltinAttributeMappings::get ())
+  {}
 
   Analysis::Mappings *mappings;
+  Analysis::BuiltinAttributeMappings *attr_mappings;
 
   HIR::Lifetime lower_lifetime (AST::Lifetime &lifetime)
   {
@@ -284,6 +279,22 @@ protected:
   HIR::Type *lower_type_no_bounds (AST::TypeNoBounds *type);
 
   HIR::TypeParamBound *lower_bound (AST::TypeParamBound *bound);
+
+  HIR::QualifiedPathType
+  lower_qual_path_type (AST::QualifiedPathType &qual_path_type);
+
+  HIR::FunctionQualifiers
+  lower_qualifiers (const AST::FunctionQualifiers &qualifiers);
+
+  void handle_outer_attributes (const HIR::Item &item);
+
+  void handle_lang_item_attribute (const HIR::Item &item,
+				   const AST::Attribute &attr);
+
+  bool is_known_attribute (const std::string &attribute_path) const;
+
+  bool
+  attribute_handled_in_another_pass (const std::string &attribute_path) const;
 };
 
 } // namespace HIR

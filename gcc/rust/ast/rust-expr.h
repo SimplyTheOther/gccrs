@@ -65,8 +65,7 @@ public:
     return std::unique_ptr<LiteralExpr> (clone_literal_expr_impl ());
   }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   Literal get_literal () const { return literal; }
 
@@ -103,13 +102,7 @@ protected:
 // Literal expression attribute body (non-macro attribute)
 class AttrInputLiteral : public AttrInput
 {
-  // Literal expression WITHOUT SUFFIX
-  // std::unique_ptr<LiteralExpr> literal_expr;
-  LiteralExpr
-    literal_expr; // as not using polymorphic behaviour, doesn't require pointer
-  // TODO: will require pointer if LiteralExpr is changed to have subclassing
-
-  // TODO: should this store location data?
+  LiteralExpr literal_expr;
 
 public:
   AttrInputLiteral (LiteralExpr lit_expr) : literal_expr (std::move (lit_expr))
@@ -127,6 +120,13 @@ public:
   bool check_cfg_predicate (const Session &) const override { return false; }
 
   bool is_meta_item () const override { return false; }
+
+  LiteralExpr &get_literal () { return literal_expr; }
+
+  AttrInputType get_attr_input_type () const final override
+  {
+    return AttrInput::AttrInputType::LITERAL;
+  }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -243,8 +243,7 @@ protected:
   OperatorExpr &operator= (OperatorExpr &&other) = default;
 
 public:
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   // Invalid if expr is null, so base stripping on that.
   void mark_for_strip () override { main_or_left_expr = nullptr; }
@@ -895,8 +894,7 @@ public:
   GroupedExpr (GroupedExpr &&other) = default;
   GroupedExpr &operator= (GroupedExpr &&other) = default;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -955,12 +953,11 @@ protected:
 class ArrayElemsValues : public ArrayElems
 {
   std::vector<std::unique_ptr<Expr> > values;
-
-  // TODO: should this store location data?
+  Location locus;
 
 public:
-  ArrayElemsValues (std::vector<std::unique_ptr<Expr> > elems)
-    : ArrayElems (), values (std::move (elems))
+  ArrayElemsValues (std::vector<std::unique_ptr<Expr> > elems, Location locus)
+    : ArrayElems (), values (std::move (elems)), locus (locus)
   {}
 
   // copy constructor with vector clone
@@ -998,15 +995,6 @@ public:
 
   size_t get_num_values () const { return values.size (); }
 
-  void iterate (std::function<bool (Expr *)> cb)
-  {
-    for (auto it = values.begin (); it != values.end (); it++)
-      {
-	if (!cb ((*it).get ()))
-	  return;
-      }
-  }
-
 protected:
   ArrayElemsValues *clone_array_elems_impl () const override
   {
@@ -1019,15 +1007,14 @@ class ArrayElemsCopied : public ArrayElems
 {
   std::unique_ptr<Expr> elem_to_copy;
   std::unique_ptr<Expr> num_copies;
-
-  // TODO: should this store location data?
+  Location locus;
 
 public:
   // Constructor requires pointers for polymorphism
   ArrayElemsCopied (std::unique_ptr<Expr> copied_elem,
-		    std::unique_ptr<Expr> copy_amount)
+		    std::unique_ptr<Expr> copy_amount, Location locus)
     : ArrayElems (), elem_to_copy (std::move (copied_elem)),
-      num_copies (std::move (copy_amount))
+      num_copies (std::move (copy_amount)), locus (locus)
   {}
 
   // Copy constructor required due to unique_ptr - uses custom clone
@@ -1139,8 +1126,7 @@ public:
   ArrayExpr (ArrayExpr &&other) = default;
   ArrayExpr &operator= (ArrayExpr &&other) = default;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -1223,8 +1209,7 @@ public:
   ArrayIndexExpr (ArrayIndexExpr &&other) = default;
   ArrayIndexExpr &operator= (ArrayIndexExpr &&other) = default;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -1337,8 +1322,7 @@ public:
   /* Note: syntactically, can disambiguate single-element tuple from parens with
    * comma, i.e. (0,) rather than (0) */
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -1422,8 +1406,7 @@ public:
   TupleIndexExpr (TupleIndexExpr &&other) = default;
   TupleIndexExpr &operator= (TupleIndexExpr &&other) = default;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -1512,8 +1495,7 @@ public:
       inner_attrs (std::move (inner_attribs)), locus (locus)
   {}
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -1532,11 +1514,11 @@ struct StructBase
 {
 private:
   std::unique_ptr<Expr> base_struct;
+  Location locus;
 
 public:
-  // TODO: should this store location data?
-  StructBase (std::unique_ptr<Expr> base_struct_ptr)
-    : base_struct (std::move (base_struct_ptr))
+  StructBase (std::unique_ptr<Expr> base_struct_ptr, Location locus)
+    : base_struct (std::move (base_struct_ptr)), locus (locus)
   {}
 
   // Copy constructor requires clone
@@ -1568,7 +1550,7 @@ public:
   StructBase &operator= (StructBase &&other) = default;
 
   // Returns a null expr-ed StructBase - error state
-  static StructBase error () { return StructBase (nullptr); }
+  static StructBase error () { return StructBase (nullptr, Location ()); }
 
   // Returns whether StructBase is in error state
   bool is_invalid () const { return base_struct == nullptr; }
@@ -1600,7 +1582,7 @@ public:
 
   virtual void accept_vis (ASTVisitor &vis) = 0;
 
-  virtual Location get_locus_slow () const = 0;
+  virtual Location get_locus () const = 0;
 
   NodeId get_node_id () const { return node_id; }
 
@@ -1628,8 +1610,7 @@ public:
 
   std::string as_string () const override { return field_name; }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -1703,8 +1684,7 @@ public:
 
   std::string get_field_name () const { return field_name; }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -1734,8 +1714,7 @@ public:
 
   TupleIndex get_index () const { return index; }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -1810,15 +1789,6 @@ public:
     return fields;
   }
 
-  void iterate (std::function<bool (StructExprField *)> cb)
-  {
-    for (auto &field : fields)
-      {
-	if (!cb (field.get ()))
-	  return;
-      }
-  }
-
   StructBase &get_struct_base () { return struct_base; }
   const StructBase &get_struct_base () const { return struct_base; }
 
@@ -1860,459 +1830,6 @@ protected:
   StructExprStructBase *clone_expr_without_block_impl () const override
   {
     return new StructExprStructBase (*this);
-  }
-};
-
-// AST node of a tuple struct creator
-class StructExprTuple : public StructExpr
-{
-  std::vector<Attribute> inner_attrs;
-  std::vector<std::unique_ptr<Expr> > exprs;
-
-  Location locus;
-
-public:
-  std::string as_string () const override;
-
-  const std::vector<Attribute> &get_inner_attrs () const { return inner_attrs; }
-  std::vector<Attribute> &get_inner_attrs () { return inner_attrs; }
-
-  StructExprTuple (PathInExpression struct_path,
-		   std::vector<std::unique_ptr<Expr> > tuple_exprs,
-		   std::vector<Attribute> inner_attribs,
-		   std::vector<Attribute> outer_attribs, Location locus)
-    : StructExpr (std::move (struct_path), std::move (outer_attribs)),
-      inner_attrs (std::move (inner_attribs)), exprs (std::move (tuple_exprs)),
-      locus (locus)
-  {}
-
-  // copy constructor with vector clone
-  StructExprTuple (StructExprTuple const &other)
-    : StructExpr (other), inner_attrs (other.inner_attrs), locus (other.locus)
-  {
-    exprs.reserve (other.exprs.size ());
-    for (const auto &e : other.exprs)
-      exprs.push_back (e->clone_expr ());
-  }
-
-  // overloaded assignment operator with vector clone
-  StructExprTuple &operator= (StructExprTuple const &other)
-  {
-    StructExpr::operator= (other);
-    inner_attrs = other.inner_attrs;
-    locus = other.locus;
-
-    exprs.reserve (other.exprs.size ());
-    for (const auto &e : other.exprs)
-      exprs.push_back (e->clone_expr ());
-
-    return *this;
-  }
-
-  // move constructors
-  StructExprTuple (StructExprTuple &&other) = default;
-  StructExprTuple &operator= (StructExprTuple &&other) = default;
-
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
-
-  void accept_vis (ASTVisitor &vis) override;
-
-  const std::vector<std::unique_ptr<Expr> > &get_elems () const
-  {
-    return exprs;
-  }
-  std::vector<std::unique_ptr<Expr> > &get_elems () { return exprs; }
-
-protected:
-  /* Use covariance to implement clone function as returning this object rather
-   * than base */
-  StructExprTuple *clone_expr_without_block_impl () const override
-  {
-    return new StructExprTuple (*this);
-  }
-};
-
-// AST node of a "unit" struct creator (no fields and no braces)
-class StructExprUnit : public StructExpr
-{
-  Location locus;
-
-public:
-  std::string as_string () const override
-  {
-    return get_struct_name ().as_string ();
-  }
-
-  StructExprUnit (PathInExpression struct_path,
-		  std::vector<Attribute> outer_attribs, Location locus)
-    : StructExpr (std::move (struct_path), std::move (outer_attribs)),
-      locus (locus)
-  {}
-
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
-
-  void accept_vis (ASTVisitor &vis) override;
-
-protected:
-  /* Use covariance to implement clone function as returning this object rather
-   * than base */
-  StructExprUnit *clone_expr_without_block_impl () const override
-  {
-    return new StructExprUnit (*this);
-  }
-};
-
-// aka EnumerationVariantExpr
-// Base AST node representing creation of an enum variant instance - abstract
-class EnumVariantExpr : public ExprWithoutBlock
-{
-  std::vector<Attribute> outer_attrs;
-  PathInExpression enum_variant_path;
-
-protected:
-  // Protected constructor for initialising enum_variant_path
-  EnumVariantExpr (PathInExpression path_to_enum_variant,
-		   std::vector<Attribute> outer_attribs)
-    : outer_attrs (std::move (outer_attribs)),
-      enum_variant_path (std::move (path_to_enum_variant))
-  {}
-
-public:
-  const PathInExpression &get_enum_variant_path () const
-  {
-    return enum_variant_path;
-  }
-  PathInExpression &get_enum_variant_path () { return enum_variant_path; }
-
-  // Invalid if path is in error state, so base stripping on that.
-  void mark_for_strip () override
-  {
-    enum_variant_path = PathInExpression::create_error ();
-  }
-  bool is_marked_for_strip () const override
-  {
-    return enum_variant_path.is_error ();
-  }
-
-  const std::vector<Attribute> &get_outer_attrs () const { return outer_attrs; }
-  std::vector<Attribute> &get_outer_attrs () { return outer_attrs; }
-
-  void set_outer_attrs (std::vector<Attribute> new_attrs) override
-  {
-    outer_attrs = std::move (new_attrs);
-  }
-};
-
-/* Base AST node for a single enum expression field (in enum instance creation)
- * - abstract */
-class EnumExprField
-{
-public:
-  virtual ~EnumExprField () {}
-
-  // Unique pointer custom clone function
-  std::unique_ptr<EnumExprField> clone_enum_expr_field () const
-  {
-    return std::unique_ptr<EnumExprField> (clone_enum_expr_field_impl ());
-  }
-
-  virtual std::string as_string () const = 0;
-
-  virtual void accept_vis (ASTVisitor &vis) = 0;
-
-  virtual Location get_locus_slow () const = 0;
-
-protected:
-  // Clone function implementation as pure virtual method
-  virtual EnumExprField *clone_enum_expr_field_impl () const = 0;
-};
-
-// Identifier-only variant of EnumExprField AST node
-class EnumExprFieldIdentifier : public EnumExprField
-{
-  Identifier field_name;
-  Location locus;
-
-public:
-  EnumExprFieldIdentifier (Identifier field_identifier, Location locus)
-    : field_name (std::move (field_identifier)), locus (locus)
-  {}
-
-  void accept_vis (ASTVisitor &vis) override;
-
-  std::string as_string () const override { return field_name; }
-
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
-
-protected:
-  /* Use covariance to implement clone function as returning this object rather
-   * than base */
-  EnumExprFieldIdentifier *clone_enum_expr_field_impl () const override
-  {
-    return new EnumExprFieldIdentifier (*this);
-  }
-};
-
-/* Base AST node for a single enum expression field with an assigned value -
- * abstract */
-class EnumExprFieldWithVal : public EnumExprField
-{
-  std::unique_ptr<Expr> value;
-
-protected:
-  EnumExprFieldWithVal (std::unique_ptr<Expr> field_value)
-    : value (std::move (field_value))
-  {}
-
-  // Copy constructor must clone unique_ptr value
-  EnumExprFieldWithVal (EnumExprFieldWithVal const &other)
-    : value (other.value->clone_expr ())
-  {}
-
-  // Overload assignment operator to clone
-  EnumExprFieldWithVal &operator= (EnumExprFieldWithVal const &other)
-  {
-    value = other.value->clone_expr ();
-
-    return *this;
-  }
-
-  // move constructors
-  EnumExprFieldWithVal (EnumExprFieldWithVal &&other) = default;
-  EnumExprFieldWithVal &operator= (EnumExprFieldWithVal &&other) = default;
-
-public:
-  std::string as_string () const override;
-
-  // TODO: is this better? Or is a "vis_block" better?
-  std::unique_ptr<Expr> &get_value ()
-  {
-    rust_assert (value != nullptr);
-    return value;
-  }
-};
-
-// Identifier and value variant of EnumExprField AST node
-class EnumExprFieldIdentifierValue : public EnumExprFieldWithVal
-{
-  Identifier field_name;
-  Location locus;
-
-public:
-  EnumExprFieldIdentifierValue (Identifier field_name,
-				std::unique_ptr<Expr> field_value,
-				Location locus)
-    : EnumExprFieldWithVal (std::move (field_value)),
-      field_name (std::move (field_name)), locus (locus)
-  {}
-
-  std::string as_string () const override;
-
-  void accept_vis (ASTVisitor &vis) override;
-
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
-
-protected:
-  /* Use covariance to implement clone function as returning this object rather
-   * than base */
-  EnumExprFieldIdentifierValue *clone_enum_expr_field_impl () const override
-  {
-    return new EnumExprFieldIdentifierValue (*this);
-  }
-};
-
-// Tuple index and value variant of EnumExprField AST node
-class EnumExprFieldIndexValue : public EnumExprFieldWithVal
-{
-  TupleIndex index;
-  // TODO: implement "with val" as a template with EnumExprField as type param?
-
-  Location locus;
-
-public:
-  EnumExprFieldIndexValue (TupleIndex field_index,
-			   std::unique_ptr<Expr> field_value, Location locus)
-    : EnumExprFieldWithVal (std::move (field_value)), index (field_index),
-      locus (locus)
-  {}
-
-  std::string as_string () const override;
-
-  void accept_vis (ASTVisitor &vis) override;
-
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
-
-protected:
-  /* Use covariance to implement clone function as returning this object rather
-   * than base */
-  EnumExprFieldIndexValue *clone_enum_expr_field_impl () const override
-  {
-    return new EnumExprFieldIndexValue (*this);
-  }
-};
-
-// Struct-like syntax enum variant instance creation AST node
-class EnumExprStruct : public EnumVariantExpr
-{
-  std::vector<std::unique_ptr<EnumExprField> > fields;
-  Location locus;
-
-public:
-  std::string as_string () const override;
-
-  EnumExprStruct (PathInExpression enum_variant_path,
-		  std::vector<std::unique_ptr<EnumExprField> > variant_fields,
-		  std::vector<Attribute> outer_attribs, Location locus)
-    : EnumVariantExpr (std::move (enum_variant_path),
-		       std::move (outer_attribs)),
-      fields (std::move (variant_fields)), locus (locus)
-  {}
-
-  // copy constructor with vector clone
-  EnumExprStruct (EnumExprStruct const &other)
-    : EnumVariantExpr (other), locus (other.locus)
-  {
-    fields.reserve (other.fields.size ());
-    for (const auto &e : other.fields)
-      fields.push_back (e->clone_enum_expr_field ());
-  }
-
-  // overloaded assignment operator with vector clone
-  EnumExprStruct &operator= (EnumExprStruct const &other)
-  {
-    EnumVariantExpr::operator= (other);
-    locus = other.locus;
-
-    fields.reserve (other.fields.size ());
-    for (const auto &e : other.fields)
-      fields.push_back (e->clone_enum_expr_field ());
-
-    return *this;
-  }
-
-  // move constructors
-  EnumExprStruct (EnumExprStruct &&other) = default;
-  EnumExprStruct &operator= (EnumExprStruct &&other) = default;
-
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
-
-  void accept_vis (ASTVisitor &vis) override;
-
-  // TODO: this mutable getter seems really dodgy. Think up better way.
-  std::vector<std::unique_ptr<EnumExprField> > &get_fields () { return fields; }
-  const std::vector<std::unique_ptr<EnumExprField> > &get_fields () const
-  {
-    return fields;
-  }
-
-protected:
-  /* Use covariance to implement clone function as returning this object rather
-   * than base */
-  EnumExprStruct *clone_expr_without_block_impl () const override
-  {
-    return new EnumExprStruct (*this);
-  }
-};
-
-// Tuple-like syntax enum variant instance creation AST node
-class EnumExprTuple : public EnumVariantExpr
-{
-  std::vector<std::unique_ptr<Expr> > values;
-  Location locus;
-
-public:
-  std::string as_string () const override;
-
-  EnumExprTuple (PathInExpression enum_variant_path,
-		 std::vector<std::unique_ptr<Expr> > variant_values,
-		 std::vector<Attribute> outer_attribs, Location locus)
-    : EnumVariantExpr (std::move (enum_variant_path),
-		       std::move (outer_attribs)),
-      values (std::move (variant_values)), locus (locus)
-  {}
-
-  // copy constructor with vector clone
-  EnumExprTuple (EnumExprTuple const &other)
-    : EnumVariantExpr (other), locus (other.locus)
-  {
-    values.reserve (other.values.size ());
-    for (const auto &e : other.values)
-      values.push_back (e->clone_expr ());
-  }
-
-  // overloaded assignment operator with vector clone
-  EnumExprTuple &operator= (EnumExprTuple const &other)
-  {
-    EnumVariantExpr::operator= (other);
-    locus = other.locus;
-
-    values.reserve (other.values.size ());
-    for (const auto &e : other.values)
-      values.push_back (e->clone_expr ());
-
-    return *this;
-  }
-
-  // move constructors
-  EnumExprTuple (EnumExprTuple &&other) = default;
-  EnumExprTuple &operator= (EnumExprTuple &&other) = default;
-
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
-
-  void accept_vis (ASTVisitor &vis) override;
-
-  const std::vector<std::unique_ptr<Expr> > &get_elems () const
-  {
-    return values;
-  }
-  std::vector<std::unique_ptr<Expr> > &get_elems () { return values; }
-
-protected:
-  /* Use covariance to implement clone function as returning this object rather
-   * than base */
-  EnumExprTuple *clone_expr_without_block_impl () const override
-  {
-    return new EnumExprTuple (*this);
-  }
-};
-
-// No-field enum variant instance creation AST node
-class EnumExprFieldless : public EnumVariantExpr
-{
-  Location locus;
-
-public:
-  std::string as_string () const override
-  {
-    // return enum_variant_path.as_string();
-    return get_enum_variant_path ().as_string ();
-  }
-
-  EnumExprFieldless (PathInExpression enum_variant_path,
-		     std::vector<Attribute> outer_attribs, Location locus)
-    : EnumVariantExpr (std::move (enum_variant_path),
-		       std::move (outer_attribs)),
-      locus (locus)
-  {}
-
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
-
-  void accept_vis (ASTVisitor &vis) override;
-
-protected:
-  /* Use covariance to implement clone function as returning this object rather
-   * than base */
-  EnumExprFieldless *clone_expr_without_block_impl () const override
-  {
-    return new EnumExprFieldless (*this);
   }
 };
 
@@ -2381,23 +1898,13 @@ public:
   // Returns whether function call has parameters.
   bool has_params () const { return !params.empty (); }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
   // Invalid if function expr is null, so base stripping on that.
   void mark_for_strip () override { function = nullptr; }
   bool is_marked_for_strip () const override { return function == nullptr; }
-
-  void iterate_params (std::function<bool (Expr *)> cb)
-  {
-    for (auto &param : params)
-      {
-	if (!cb (param.get ()))
-	  return;
-      }
-  }
 
   // TODO: this mutable getter seems really dodgy. Think up better way.
   const std::vector<std::unique_ptr<Expr> > &get_params () const
@@ -2491,23 +1998,13 @@ public:
   MethodCallExpr (MethodCallExpr &&other) = default;
   MethodCallExpr &operator= (MethodCallExpr &&other) = default;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
   // Invalid if receiver expr is null, so base stripping on that.
   void mark_for_strip () override { receiver = nullptr; }
   bool is_marked_for_strip () const override { return receiver == nullptr; }
-
-  void iterate_params (std::function<bool (Expr *)> cb)
-  {
-    for (auto &param : params)
-      {
-	if (!cb (param.get ()))
-	  return;
-      }
-  }
 
   // TODO: this mutable getter seems really dodgy. Think up better way.
   const std::vector<std::unique_ptr<Expr> > &get_params () const
@@ -2594,8 +2091,7 @@ public:
   FieldAccessExpr (FieldAccessExpr &&other) = default;
   FieldAccessExpr &operator= (FieldAccessExpr &&other) = default;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -2638,8 +2134,7 @@ private:
 
   // bool has_type_given;
   std::unique_ptr<Type> type;
-
-  // TODO: should this store location data?
+  Location locus;
 
 public:
   // Returns whether the type of the parameter has been given.
@@ -2648,11 +2143,12 @@ public:
   bool has_outer_attrs () const { return !outer_attrs.empty (); }
 
   // Constructor for closure parameter
-  ClosureParam (std::unique_ptr<Pattern> param_pattern,
+  ClosureParam (std::unique_ptr<Pattern> param_pattern, Location locus,
 		std::unique_ptr<Type> param_type = nullptr,
 		std::vector<Attribute> outer_attrs = {})
     : outer_attrs (std::move (outer_attrs)),
-      pattern (std::move (param_pattern)), type (std::move (param_type))
+      pattern (std::move (param_pattern)), type (std::move (param_type)),
+      locus (locus)
   {}
 
   // Copy constructor required due to cloning as a result of unique_ptrs
@@ -2693,7 +2189,10 @@ public:
   bool is_error () const { return pattern == nullptr; }
 
   // Creates an error state closure parameter.
-  static ClosureParam create_error () { return ClosureParam (nullptr); }
+  static ClosureParam create_error ()
+  {
+    return ClosureParam (nullptr, Location ());
+  }
 
   std::string as_string () const;
 
@@ -2733,8 +2232,7 @@ protected:
 public:
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   // TODO: this mutable getter seems really dodgy. Think up better way.
   const std::vector<ClosureParam> &get_params () const { return params; }
@@ -2829,7 +2327,8 @@ class BlockExpr : public ExprWithBlock
   std::vector<Attribute> inner_attrs;
   std::vector<std::unique_ptr<Stmt> > statements;
   std::unique_ptr<Expr> expr;
-  Location locus;
+  Location start_locus;
+  Location end_locus;
   bool marked_for_strip = false;
 
 public:
@@ -2844,18 +2343,19 @@ public:
   BlockExpr (std::vector<std::unique_ptr<Stmt> > block_statements,
 	     std::unique_ptr<Expr> block_expr,
 	     std::vector<Attribute> inner_attribs,
-	     std::vector<Attribute> outer_attribs, Location locus)
+	     std::vector<Attribute> outer_attribs, Location start_locus,
+	     Location end_locus)
     : outer_attrs (std::move (outer_attribs)),
       inner_attrs (std::move (inner_attribs)),
       statements (std::move (block_statements)), expr (std::move (block_expr)),
-      locus (locus)
+      start_locus (start_locus), end_locus (end_locus)
   {}
 
   // Copy constructor with clone
   BlockExpr (BlockExpr const &other)
     : ExprWithBlock (other), outer_attrs (other.outer_attrs),
-      inner_attrs (other.inner_attrs), locus (other.locus),
-      marked_for_strip (other.marked_for_strip)
+      inner_attrs (other.inner_attrs), start_locus (other.start_locus),
+      end_locus (other.end_locus), marked_for_strip (other.marked_for_strip)
   {
     // guard to protect from null pointer dereference
     if (other.expr != nullptr)
@@ -2871,7 +2371,8 @@ public:
   {
     ExprWithBlock::operator= (other);
     inner_attrs = other.inner_attrs;
-    locus = other.locus;
+    start_locus = other.start_locus;
+    end_locus = other.end_locus;
     marked_for_strip = other.marked_for_strip;
     outer_attrs = other.outer_attrs;
 
@@ -2898,23 +2399,16 @@ public:
     return std::unique_ptr<BlockExpr> (clone_block_expr_impl ());
   }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return start_locus; }
+
+  Location get_start_locus () const { return start_locus; }
+  Location get_end_locus () const { return end_locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
   // Can be completely empty, so have to have a separate flag.
   void mark_for_strip () override { marked_for_strip = true; }
   bool is_marked_for_strip () const override { return marked_for_strip; }
-
-  void iterate_stmts (std::function<bool (Stmt *)> cb)
-  {
-    for (auto it = statements.begin (); it != statements.end (); it++)
-      {
-	if (!cb (it->get ()))
-	  return;
-      }
-  }
 
   size_t num_statements () const { return statements.size (); }
 
@@ -3075,8 +2569,7 @@ public:
       locus (locus)
   {}
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -3165,8 +2658,7 @@ public:
   BreakExpr (BreakExpr &&other) = default;
   BreakExpr &operator= (BreakExpr &&other) = default;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -3210,8 +2702,7 @@ protected:
   RangeExpr (Location locus) : locus (locus) {}
 
 public:
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   // should never be called - error if called
   void set_outer_attrs (std::vector<Attribute> /* new_attrs */) override
@@ -3657,8 +3148,7 @@ public:
   ReturnExpr (ReturnExpr &&other) = default;
   ReturnExpr &operator= (ReturnExpr &&other) = default;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -3740,8 +3230,7 @@ public:
   UnsafeBlockExpr (UnsafeBlockExpr &&other) = default;
   UnsafeBlockExpr &operator= (UnsafeBlockExpr &&other) = default;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -3862,8 +3351,7 @@ public:
 
   LoopLabel &get_loop_label () { return loop_label; }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   // Invalid if loop block is null, so base stripping on that.
   void mark_for_strip () override { loop_block = nullptr; }
@@ -4187,8 +3675,7 @@ public:
    * vector of else ifs - i.e. not like a switch statement. TODO - is this a
    * better approach? or does it not parse correctly and have downsides? */
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -4430,8 +3917,7 @@ public:
     return std::unique_ptr<IfLetExpr> (clone_if_let_expr_impl ());
   }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -4740,7 +4226,7 @@ private:
   // inlined from MatchArmGuard
   std::unique_ptr<Expr> guard_expr;
 
-  // TODO: should this store location data?
+  Location locus;
 
 public:
   // Returns whether the MatchArm has a match arm guard expression
@@ -4748,11 +4234,11 @@ public:
 
   // Constructor for match arm with a guard expression
   MatchArm (std::vector<std::unique_ptr<Pattern> > match_arm_patterns,
-	    std::unique_ptr<Expr> guard_expr = nullptr,
+	    Location locus, std::unique_ptr<Expr> guard_expr = nullptr,
 	    std::vector<Attribute> outer_attrs = std::vector<Attribute> ())
     : outer_attrs (std::move (outer_attrs)),
       match_arm_patterns (std::move (match_arm_patterns)),
-      guard_expr (std::move (guard_expr))
+      guard_expr (std::move (guard_expr)), locus (locus)
   {}
 
   // Copy constructor with clone
@@ -4765,6 +4251,8 @@ public:
     match_arm_patterns.reserve (other.match_arm_patterns.size ());
     for (const auto &e : other.match_arm_patterns)
       match_arm_patterns.push_back (e->clone_pattern ());
+
+    locus = other.locus;
   }
 
   ~MatchArm () = default;
@@ -4796,7 +4284,8 @@ public:
   // Creates a match arm in an error state.
   static MatchArm create_error ()
   {
-    return MatchArm (std::vector<std::unique_ptr<Pattern> > ());
+    Location locus = Location ();
+    return MatchArm (std::vector<std::unique_ptr<Pattern> > (), locus);
   }
 
   std::string as_string () const;
@@ -4820,36 +4309,9 @@ public:
   {
     return match_arm_patterns;
   }
+
+  Location get_locus () const { return locus; }
 };
-
-/*
-// Base "match case" for a match expression - abstract
-class MatchCase
-{
-  MatchArm arm;
-
-protected:
-  MatchCase (MatchArm arm) : arm (std::move (arm)) {}
-
-  // Should not require copy constructor or assignment operator overloading
-
-  // Clone function implementation as pure virtual method
-  virtual MatchCase *clone_match_case_impl () const = 0;
-
-public:
-  virtual ~MatchCase () {}
-
-  // Unique pointer custom clone function
-  std::unique_ptr<MatchCase> clone_match_case () const
-  {
-    return std::unique_ptr<MatchCase> (clone_match_case_impl ());
-  }
-
-  virtual std::string as_string () const;
-
-  virtual void accept_vis (ASTVisitor &vis) = 0;
-};
-*/
 
 /* A "match case" - a correlated match arm and resulting expression. Not
  * abstract. */
@@ -4858,23 +4320,26 @@ struct MatchCase
 private:
   MatchArm arm;
   std::unique_ptr<Expr> expr;
+  NodeId node_id;
 
   /* TODO: does whether trailing comma exists need to be stored? currently
    * assuming it is only syntactical and has no effect on meaning. */
 
 public:
   MatchCase (MatchArm arm, std::unique_ptr<Expr> expr)
-    : arm (std::move (arm)), expr (std::move (expr))
+    : arm (std::move (arm)), expr (std::move (expr)),
+      node_id (Analysis::Mappings::get ()->get_next_node_id ())
   {}
 
   MatchCase (const MatchCase &other)
-    : arm (other.arm), expr (other.expr->clone_expr ())
+    : arm (other.arm), expr (other.expr->clone_expr ()), node_id (other.node_id)
   {}
 
   MatchCase &operator= (const MatchCase &other)
   {
     arm = other.arm;
     expr = other.expr->clone_expr ();
+    node_id = other.node_id;
 
     return *this;
   }
@@ -4899,97 +4364,9 @@ public:
     rust_assert (!arm.is_error ());
     return arm;
   }
+
+  NodeId get_node_id () const { return node_id; }
 };
-
-#if 0
-// Block expression match case
-class MatchCaseBlockExpr : public MatchCase
-{
-  std::unique_ptr<BlockExpr> block_expr;
-
-  // TODO: should this store location data?
-
-public:
-  MatchCaseBlockExpr (MatchArm arm, std::unique_ptr<BlockExpr> block_expr)
-    : MatchCase (std::move (arm)), block_expr (std::move (block_expr))
-  {}
-
-  // Copy constructor requires clone
-  MatchCaseBlockExpr (MatchCaseBlockExpr const &other)
-    : MatchCase (other), block_expr (other.block_expr->clone_block_expr ())
-  {}
-
-  // Overload assignment operator to have clone
-  MatchCaseBlockExpr &operator= (MatchCaseBlockExpr const &other)
-  {
-    MatchCase::operator= (other);
-    block_expr = other.block_expr->clone_block_expr ();
-    // arm = other.arm;
-
-    return *this;
-  }
-
-  // move constructors
-  MatchCaseBlockExpr (MatchCaseBlockExpr &&other) = default;
-  MatchCaseBlockExpr &operator= (MatchCaseBlockExpr &&other) = default;
-
-  std::string as_string () const override;
-
-  void accept_vis (ASTVisitor &vis) override;
-
-protected:
-  /* Use covariance to implement clone function as returning this object rather
-   * than base */
-  MatchCaseBlockExpr *clone_match_case_impl () const override
-  {
-    return new MatchCaseBlockExpr (*this);
-  }
-};
-
-// Expression (except block expression) match case
-class MatchCaseExpr : public MatchCase
-{
-  std::unique_ptr<Expr> expr;
-
-  // TODO: should this store location data?
-
-public:
-  MatchCaseExpr (MatchArm arm, std::unique_ptr<Expr> expr)
-    : MatchCase (std::move (arm)), expr (std::move (expr))
-  {}
-
-  // Copy constructor requires clone
-  MatchCaseExpr (MatchCaseExpr const &other)
-    : MatchCase (other), expr (other.expr->clone_expr ())
-  {}
-
-  // Overload assignment operator to have clone
-  MatchCaseExpr &operator= (MatchCaseExpr const &other)
-  {
-    MatchCase::operator= (other);
-    expr = other.expr->clone_expr ();
-    // arm = other.arm;
-
-    return *this;
-  }
-
-  // move constructors
-  MatchCaseExpr (MatchCaseExpr &&other) = default;
-  MatchCaseExpr &operator= (MatchCaseExpr &&other) = default;
-
-  std::string as_string () const override;
-
-  void accept_vis (ASTVisitor &vis) override;
-
-protected:
-  /* Use covariance to implement clone function as returning this object rather
-   * than base */
-  MatchCaseExpr *clone_match_case_impl () const override
-  {
-    return new MatchCaseExpr (*this);
-  }
-};
-#endif
 
 // Match expression AST node
 class MatchExpr : public ExprWithBlock
@@ -5049,8 +4426,7 @@ public:
   MatchExpr (MatchExpr &&other) = default;
   MatchExpr &operator= (MatchExpr &&other) = default;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -5136,8 +4512,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -5218,8 +4593,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 

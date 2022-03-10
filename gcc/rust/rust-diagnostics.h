@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -48,7 +48,12 @@
 // All other format specifiers are as defined by 'sprintf'. The final resulting
 // message is then sent to the back end via rust_be_error_at/rust_be_warning_at.
 
+// clang-format off
 // simple location
+extern void
+rust_internal_error_at (const Location, const char *fmt, ...)
+  RUST_ATTRIBUTE_GCC_DIAG (2, 3)
+  RUST_ATTRIBUTE_NORETURN;
 extern void
 rust_error_at (const Location, const char *fmt, ...)
   RUST_ATTRIBUTE_GCC_DIAG (2, 3);
@@ -57,15 +62,17 @@ rust_warning_at (const Location, int opt, const char *fmt, ...)
   RUST_ATTRIBUTE_GCC_DIAG (3, 4);
 extern void
 rust_fatal_error (const Location, const char *fmt, ...)
-  RUST_ATTRIBUTE_GCC_DIAG (2, 3);
+  RUST_ATTRIBUTE_GCC_DIAG (2, 3)
+  RUST_ATTRIBUTE_NORETURN;
 extern void
 rust_inform (const Location, const char *fmt, ...)
   RUST_ATTRIBUTE_GCC_DIAG (2, 3);
 
 // rich locations
 extern void
-rust_error_at (const RichLocation, const char *fmt, ...)
+rust_error_at (const RichLocation &, const char *fmt, ...)
   RUST_ATTRIBUTE_GCC_DIAG (2, 3);
+// clang-format on
 
 // These interfaces provide a way for the front end to ask for
 // the open/close quote characters it should use when formatting
@@ -81,20 +88,26 @@ rust_close_quote ();
 // instead use the equivalent routines above. The back end is required to
 // implement these routines.
 
+// clang-format off
+extern void
+rust_be_internal_error_at (const Location, const std::string &errmsg)
+  RUST_ATTRIBUTE_NORETURN;
 extern void
 rust_be_error_at (const Location, const std::string &errmsg);
 extern void
-rust_be_error_at (const RichLocation, const std::string &errmsg);
+rust_be_error_at (const RichLocation &, const std::string &errmsg);
 extern void
 rust_be_warning_at (const Location, int opt, const std::string &warningmsg);
 extern void
-rust_be_fatal_error (const Location, const std::string &errmsg);
+rust_be_fatal_error (const Location, const std::string &errmsg)
+  RUST_ATTRIBUTE_NORETURN;
 extern void
 rust_be_inform (const Location, const std::string &infomsg);
 extern void
 rust_be_get_quotechars (const char **open_quote, const char **close_quote);
 extern bool
 rust_be_debug_p (void);
+// clang-format on
 
 namespace Rust {
 /* A structure used to represent an error. Useful for enabling

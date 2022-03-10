@@ -1,4 +1,4 @@
-// Copyright (C) 2021 Free Software Foundation, Inc.
+// Copyright (C) 2021-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -149,10 +149,8 @@ MarkLive::visit (HIR::MethodCallExpr &expr)
 {
   expr.get_receiver ()->accept_vis (*this);
   visit_path_segment (expr.get_method_name ());
-  expr.iterate_params ([&] (HIR::Expr *param) -> bool {
-    param->accept_vis (*this);
-    return true;
-  });
+  for (auto &argument : expr.get_arguments ())
+    argument->accept_vis (*this);
 
   // Trying to find the method definition and mark it alive.
   NodeId ast_node_id = expr.get_mappings ().get_nodeid ();
@@ -211,25 +209,45 @@ MarkLive::visit (HIR::FieldAccessExpr &expr)
   if (!tyctx->lookup_type (
 	expr.get_receiver_expr ()->get_mappings ().get_hirid (), &receiver))
     {
-      rust_error_at (expr.get_receiver_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_receiver_expr ()->get_locus (),
 		     "unresolved type for receiver");
     }
-  bool ok = receiver->get_kind () == TyTy::TypeKind::ADT;
-  rust_assert (ok);
-  TyTy::ADTType *adt = static_cast<TyTy::ADTType *> (receiver);
+
+  TyTy::ADTType *adt = nullptr;
+  if (receiver->get_kind () == TyTy::TypeKind::ADT)
+    {
+      adt = static_cast<TyTy::ADTType *> (receiver);
+    }
+  else if (receiver->get_kind () == TyTy::TypeKind::REF)
+    {
+      TyTy::ReferenceType *r = static_cast<TyTy::ReferenceType *> (receiver);
+      TyTy::BaseType *b = r->get_base ();
+      rust_assert (b->get_kind () == TyTy::TypeKind::ADT);
+
+      adt = static_cast<TyTy::ADTType *> (b);
+    }
+
+  rust_assert (adt != nullptr);
+  rust_assert (!adt->is_enum ());
+  rust_assert (adt->number_of_variants () == 1);
+
+  TyTy::VariantDef *variant = adt->get_variants ().at (0);
 
   // get the field index
-  size_t index = 0;
-  adt->get_field (expr.get_field_name (), &index);
-  if (index >= adt->num_fields ())
+  size_t index;
+  TyTy::StructFieldType *field;
+  bool ok = variant->lookup_field (expr.get_field_name (), &field, &index);
+  rust_assert (ok);
+  if (index >= variant->num_fields ())
     {
-      rust_error_at (expr.get_receiver_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_receiver_expr ()->get_locus (),
 		     "cannot access struct %s by index: %ld",
 		     adt->get_name ().c_str (), index);
       return;
     }
+
   // get the field hir id
-  HirId field_id = adt->get_field (index)->get_ref ();
+  HirId field_id = field->get_ref ();
   mark_hir_id (field_id);
 }
 

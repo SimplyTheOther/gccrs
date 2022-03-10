@@ -1,4 +1,4 @@
-// Copyright (C) 2021 Free Software Foundation, Inc.
+// Copyright (C) 2021-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -31,11 +31,34 @@ class TypeBoundsProbe : public TypeCheckBase
   using Rust::Resolver::TypeCheckBase::visit;
 
 public:
-  static std::vector<TraitReference *> Probe (const TyTy::BaseType *receiver)
+  static std::vector<std::pair<TraitReference *, HIR::ImplBlock *>>
+  Probe (const TyTy::BaseType *receiver)
   {
     TypeBoundsProbe probe (receiver);
     probe.scan ();
     return probe.trait_references;
+  }
+
+  static bool is_bound_satisfied_for_type (TyTy::BaseType *receiver,
+					   TraitReference *ref)
+  {
+    for (auto &bound : receiver->get_specified_bounds ())
+      {
+	const TraitReference *b = bound.get ();
+	if (b->is_equal (*ref))
+	  return true;
+      }
+
+    std::vector<std::pair<TraitReference *, HIR::ImplBlock *>> bounds
+      = Probe (receiver);
+    for (auto &bound : bounds)
+      {
+	const TraitReference *b = bound.first;
+	if (b->is_equal (*ref))
+	  return true;
+      }
+
+    return false;
   }
 
 private:
@@ -47,7 +70,7 @@ private:
   {}
 
   const TyTy::BaseType *receiver;
-  std::vector<TraitReference *> trait_references;
+  std::vector<std::pair<TraitReference *, HIR::ImplBlock *>> trait_references;
 };
 
 } // namespace Resolver

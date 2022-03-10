@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -19,6 +19,7 @@
 #ifndef RUST_HIR_TYPE_H
 #define RUST_HIR_TYPE_H
 
+#include "rust-common.h"
 #include "rust-hir.h"
 #include "rust-hir-path.h"
 
@@ -54,16 +55,14 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
 
   Analysis::NodeMapping get_mappings () const override final
   {
     return mappings;
   }
-
-  Location get_locus_slow () const override final { return get_locus (); }
 
   BoundType get_bound_type () const final override { return TRAITBOUND; }
 
@@ -139,17 +138,15 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
 };
 
 // An opaque value of another type that implements a set of traits
 class TraitObjectType : public Type
 {
   bool has_dyn;
-  // TypeParamBounds type_param_bounds;
-  std::vector<std::unique_ptr<TypeParamBound> >
-    type_param_bounds; // inlined form
-
+  std::vector<std::unique_ptr<TypeParamBound> > type_param_bounds;
   Location locus;
 
 protected:
@@ -164,7 +161,7 @@ public:
   TraitObjectType (
     Analysis::NodeMapping mappings,
     std::vector<std::unique_ptr<TypeParamBound> > type_param_bounds,
-    Location locus, bool is_dyn_dispatch = false)
+    Location locus, bool is_dyn_dispatch)
     : Type (mappings), has_dyn (is_dyn_dispatch),
       type_param_bounds (std::move (type_param_bounds)), locus (locus)
   {}
@@ -199,7 +196,19 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
+
+  std::vector<std::unique_ptr<TypeParamBound> > &get_type_param_bounds ()
+  {
+    return type_param_bounds;
+  }
+
+  const std::vector<std::unique_ptr<TypeParamBound> > &
+  get_type_param_bounds () const
+  {
+    return type_param_bounds;
+  }
 };
 
 // A type with parentheses around it, used to avoid ambiguity.
@@ -267,7 +276,8 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
 };
 
 // Impl trait with a single bound? Poor reference material here.
@@ -303,54 +313,8 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
-};
-
-/* A trait object with a single trait bound. The "trait bound" is really just
- * the trait. Basically like using an interface as a type in an OOP language. */
-class TraitObjectTypeOneBound : public TypeNoBounds
-{
-  bool has_dyn;
-  TraitBound trait_bound;
-
-  Location locus;
-
-protected:
-  /* Use covariance to implement clone function as returning this object rather
-   * than base */
-  TraitObjectTypeOneBound *clone_type_impl () const override
-  {
-    return new TraitObjectTypeOneBound (*this);
-  }
-
-  /* Use covariance to implement clone function as returning this object rather
-   * than base */
-  TraitObjectTypeOneBound *clone_type_no_bounds_impl () const override
-  {
-    return new TraitObjectTypeOneBound (*this);
-  }
-
-public:
-  TraitObjectTypeOneBound (Analysis::NodeMapping mappings,
-			   TraitBound trait_bound, Location locus,
-			   bool is_dyn_dispatch = false)
-    : TypeNoBounds (mappings), has_dyn (is_dyn_dispatch),
-      trait_bound (std::move (trait_bound)), locus (locus)
-  {}
-
-  std::string as_string () const override;
-
-  // Creates a trait bound (clone of this one's trait bound) - HACK
-  TraitBound *to_trait_bound (bool in_parens ATTRIBUTE_UNUSED) const override
-  {
-    /* NOTE: this assumes there is no dynamic dispatch specified- if there was,
-     * this cloning would not be required as parsing is unambiguous. */
-    return new HIR::TraitBound (trait_bound);
-  }
-
-  Location get_locus () const { return locus; }
-
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
 };
 
 class TypePath; // definition moved to "rust-path.h"
@@ -401,7 +365,8 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
 
   std::vector<std::unique_ptr<Type> > &get_elems () { return elems; }
   const std::vector<std::unique_ptr<Type> > &get_elems () const
@@ -450,28 +415,28 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
 };
 
 // A type consisting of a pointer without safety or liveness guarantees
 class RawPointerType : public TypeNoBounds
 {
 private:
-  bool is_mutable;
+  Mutability mut;
   std::unique_ptr<Type> type;
   Location locus;
 
 public:
   // Constructor requires pointer for polymorphism reasons
-  RawPointerType (Analysis::NodeMapping mappings, bool is_mutable,
+  RawPointerType (Analysis::NodeMapping mappings, Mutability mut,
 		  std::unique_ptr<Type> type, Location locus)
-    : TypeNoBounds (mappings), is_mutable (is_mutable), type (std::move (type)),
-      locus (locus)
+    : TypeNoBounds (mappings), mut (mut), type (std::move (type)), locus (locus)
   {}
 
   // Copy constructor calls custom polymorphic clone function
   RawPointerType (RawPointerType const &other)
-    : TypeNoBounds (other.mappings), is_mutable (other.is_mutable),
+    : TypeNoBounds (other.mappings), mut (other.mut),
       type (other.type->clone_type ()), locus (other.locus)
   {}
 
@@ -479,7 +444,7 @@ public:
   RawPointerType &operator= (RawPointerType const &other)
   {
     mappings = other.mappings;
-    is_mutable = other.is_mutable;
+    mut = other.mut;
     type = other.type->clone_type ();
     locus = other.locus;
     return *this;
@@ -493,13 +458,16 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
 
   std::unique_ptr<Type> &get_type () { return type; }
 
-  bool is_mut () const { return is_mutable; }
+  Mutability get_mut () const { return mut; }
 
-  bool is_const () const { return !is_mutable; }
+  bool is_mut () const { return mut == Mutability::Mut; }
+
+  bool is_const () const { return mut == Mutability::Imm; }
 
   std::unique_ptr<Type> &get_base_type () { return type; }
 
@@ -525,30 +493,29 @@ class ReferenceType : public TypeNoBounds
   // bool has_lifetime; // TODO: handle in lifetime or something?
   Lifetime lifetime;
 
-  bool has_mut;
+  Mutability mut;
   std::unique_ptr<Type> type;
   Location locus;
 
 public:
   // Returns whether the reference is mutable or immutable.
-  bool is_mut () const { return has_mut; }
+  bool is_mut () const { return mut == Mutability::Mut; }
 
   // Returns whether the reference has a lifetime.
   bool has_lifetime () const { return !lifetime.is_error (); }
 
   // Constructor
-  ReferenceType (Analysis::NodeMapping mappings, bool is_mut,
+  ReferenceType (Analysis::NodeMapping mappings, Mutability mut,
 		 std::unique_ptr<Type> type_no_bounds, Location locus,
 		 Lifetime lifetime)
-    : TypeNoBounds (mappings), lifetime (std::move (lifetime)),
-      has_mut (is_mut), type (std::move (type_no_bounds)), locus (locus)
+    : TypeNoBounds (mappings), lifetime (std::move (lifetime)), mut (mut),
+      type (std::move (type_no_bounds)), locus (locus)
   {}
 
   // Copy constructor with custom clone method
   ReferenceType (ReferenceType const &other)
-    : TypeNoBounds (other.mappings), lifetime (other.lifetime),
-      has_mut (other.has_mut), type (other.type->clone_type ()),
-      locus (other.locus)
+    : TypeNoBounds (other.mappings), lifetime (other.lifetime), mut (other.mut),
+      type (other.type->clone_type ()), locus (other.locus)
   {}
 
   // Operator overload assignment operator to custom clone the unique pointer
@@ -556,7 +523,7 @@ public:
   {
     mappings = other.mappings;
     lifetime = other.lifetime;
-    has_mut = other.has_mut;
+    mut = other.mut;
     type = other.type->clone_type ();
     locus = other.locus;
 
@@ -571,11 +538,12 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
 
   Lifetime &get_lifetime () { return lifetime; }
 
-  bool get_has_mut () const { return has_mut; }
+  Mutability get_mut () const { return mut; }
 
   std::unique_ptr<Type> &get_base_type () { return type; }
 
@@ -637,7 +605,8 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
 
   Type *get_element_type () { return elem_type.get (); }
 
@@ -696,7 +665,8 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -742,7 +712,8 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
 };
 
 class QualifiedPathInType; // definition moved to "rust-path.h"
@@ -884,7 +855,8 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
 
   std::vector<MaybeNamedParam> &get_function_params () { return params; }
   const std::vector<MaybeNamedParam> &get_function_params () const

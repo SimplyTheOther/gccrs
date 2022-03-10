@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -38,15 +38,15 @@ public:
 
   EmptyStmt (Location locus) : locus (locus) {}
 
-  Location get_locus_slow () const final override { return get_locus (); }
-
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
   // Can't think of any invalid invariants, so store boolean.
   void mark_for_strip () override { marked_for_strip = true; }
   bool is_marked_for_strip () const override { return marked_for_strip; }
+
+  bool is_item () const override final { return false; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -137,9 +137,7 @@ public:
   LetStmt (LetStmt &&other) = default;
   LetStmt &operator= (LetStmt &&other) = default;
 
-  Location get_locus_slow () const final override { return get_locus (); }
-
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -173,6 +171,8 @@ public:
     return type;
   }
 
+  bool is_item () const override final { return false; }
+
 protected:
   /* Use covariance to implement clone function as returning this object rather
    * than base */
@@ -188,9 +188,9 @@ class ExprStmt : public Stmt
   Location locus;
 
 public:
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
-  Location get_locus () const { return locus; }
+  bool is_item () const override final { return false; }
 
 protected:
   ExprStmt (Location locus) : locus (locus) {}
@@ -211,8 +211,9 @@ public:
   std::string as_string () const override;
 
   ExprStmtWithoutBlock (std::unique_ptr<ExprWithoutBlock> expr, Location locus)
-    : ExprStmt (locus), expr (std::move (expr))
+    : ExprStmt (locus), expr (std::move (expr->to_stmt ()))
   {}
+
   /*ExprStmtWithoutBlock (std::unique_ptr<Expr> expr, Location locus)
     : ExprStmt (locus), expr (std::move (expr))
   {}*/
@@ -336,9 +337,6 @@ protected:
   }
 };
 
-/* Replaced definition of MacroInvocationSemi with forward decl - defined in
- * rust-macro.h */
-class MacroInvocationSemi;
 } // namespace AST
 } // namespace Rust
 

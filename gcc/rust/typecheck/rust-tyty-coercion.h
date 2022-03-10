@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -24,6 +24,7 @@
 #include "rust-tyty-visitor.h"
 #include "rust-hir-map.h"
 #include "rust-hir-type-check.h"
+#include "rust-hir-type-bounds.h"
 
 extern ::Backend *
 rust_get_backend ();
@@ -45,6 +46,19 @@ public:
 	  {
 	    other = p->resolve ();
 	  }
+      }
+    else if (other->get_kind () == TypeKind::PLACEHOLDER)
+      {
+	PlaceholderType *p = static_cast<PlaceholderType *> (other);
+	if (p->can_resolve ())
+	  {
+	    other = p->resolve ();
+	  }
+      }
+    else if (other->get_kind () == TypeKind::PROJECTION)
+      {
+	ProjectionType *p = static_cast<ProjectionType *> (other);
+	other = p->get ();
       }
 
     other->accept_vis (*this);
@@ -143,6 +157,17 @@ public:
   }
 
   virtual void visit (ArrayType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
+    RichLocation r (ref_locus);
+    r.add_range (base_locus);
+    rust_error_at (r, "expected [%s] got [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
+  virtual void visit (SliceType &type) override
   {
     Location ref_locus = mappings->lookup_location (type.get_ref ());
     Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
@@ -307,6 +332,39 @@ public:
 		   type.as_string ().c_str ());
   }
 
+  virtual void visit (ProjectionType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
+    RichLocation r (ref_locus);
+    r.add_range (base_locus);
+    rust_error_at (r, "expected [%s] got [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
+  virtual void visit (DynamicObjectType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
+    RichLocation r (ref_locus);
+    r.add_range (base_locus);
+    rust_error_at (r, "expected [%s] got [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
+  virtual void visit (ClosureType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
+    RichLocation r (ref_locus);
+    r.add_range (base_locus);
+    rust_error_at (r, "expected [%s] got [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
 protected:
   BaseCoercionRules (BaseType *base)
     : mappings (Analysis::Mappings::get ()),
@@ -436,6 +494,19 @@ public:
     BaseCoercionRules::visit (type);
   }
 
+  void visit (SliceType &type) override
+  {
+    bool is_valid
+      = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
+    if (is_valid)
+      {
+	resolved = type.clone ();
+	return;
+      }
+
+    BaseCoercionRules::visit (type);
+  }
+
   void visit (ADTType &type) override
   {
     bool is_valid
@@ -544,6 +615,32 @@ public:
   }
 
   void visit (ParamType &type) override
+  {
+    bool is_valid
+      = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
+    if (is_valid)
+      {
+	resolved = type.clone ();
+	return;
+      }
+
+    BaseCoercionRules::visit (type);
+  }
+
+  void visit (DynamicObjectType &type) override
+  {
+    bool is_valid
+      = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
+    if (is_valid)
+      {
+	resolved = type.clone ();
+	return;
+      }
+
+    BaseCoercionRules::visit (type);
+  }
+
+  void visit (ClosureType &type) override
   {
     bool is_valid
       = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
@@ -715,6 +812,23 @@ private:
   FnPtr *base;
 };
 
+class ClosureCoercionRules : public BaseCoercionRules
+{
+  using Rust::TyTy::BaseCoercionRules::visit;
+
+public:
+  ClosureCoercionRules (ClosureType *base)
+    : BaseCoercionRules (base), base (base)
+  {}
+
+  // TODO
+
+private:
+  BaseType *get_base () override { return base; }
+
+  ClosureType *base;
+};
+
 class ArrayCoercionRules : public BaseCoercionRules
 {
   using Rust::TyTy::BaseCoercionRules::visit;
@@ -734,25 +848,46 @@ public:
 	return;
       }
 
-    auto backend = rust_get_backend ();
-
-    // need to check the base types and capacity
-    if (!backend->const_values_equal (type.get_capacity (),
-				      base->get_capacity ()))
-      {
-	BaseCoercionRules::visit (type);
-	return;
-      }
-
     resolved
       = new ArrayType (type.get_ref (), type.get_ty_ref (),
-		       type.get_capacity (), TyVar (base_resolved->get_ref ()));
+		       type.get_ident ().locus, type.get_capacity_expr (),
+		       TyVar (base_resolved->get_ref ()));
   }
 
 private:
   BaseType *get_base () override { return base; }
 
   ArrayType *base;
+};
+
+class SliceCoercionRules : public BaseCoercionRules
+{
+  using Rust::TyTy::BaseCoercionRules::visit;
+
+public:
+  SliceCoercionRules (SliceType *base) : BaseCoercionRules (base), base (base)
+  {}
+
+  void visit (SliceType &type) override
+  {
+    // check base type
+    auto base_resolved
+      = base->get_element_type ()->unify (type.get_element_type ());
+    if (base_resolved == nullptr)
+      {
+	BaseCoercionRules::visit (type);
+	return;
+      }
+
+    resolved = new SliceType (type.get_ref (), type.get_ty_ref (),
+			      type.get_ident ().locus,
+			      TyVar (base_resolved->get_ref ()));
+  }
+
+private:
+  BaseType *get_base () override { return base; }
+
+  SliceType *base;
 };
 
 class BoolCoercionRules : public BaseCoercionRules
@@ -910,29 +1045,47 @@ public:
 
   void visit (ADTType &type) override
   {
+    if (base->get_adt_kind () != type.get_adt_kind ())
+      {
+	BaseCoercionRules::visit (type);
+	return;
+      }
+
     if (base->get_identifier ().compare (type.get_identifier ()) != 0)
       {
 	BaseCoercionRules::visit (type);
 	return;
       }
 
-    if (base->num_fields () != type.num_fields ())
+    if (base->number_of_variants () != type.number_of_variants ())
       {
 	BaseCoercionRules::visit (type);
 	return;
       }
 
-    for (size_t i = 0; i < type.num_fields (); ++i)
+    for (size_t i = 0; i < type.number_of_variants (); ++i)
       {
-	TyTy::StructFieldType *base_field = base->get_field (i);
-	TyTy::StructFieldType *other_field = type.get_field (i);
+	TyTy::VariantDef *a = base->get_variants ().at (i);
+	TyTy::VariantDef *b = type.get_variants ().at (i);
 
-	TyTy::BaseType *this_field_ty = base_field->get_field_type ();
-	TyTy::BaseType *other_field_ty = other_field->get_field_type ();
+	if (a->num_fields () != b->num_fields ())
+	  {
+	    BaseCoercionRules::visit (type);
+	    return;
+	  }
 
-	BaseType *unified_ty = this_field_ty->unify (other_field_ty);
-	if (unified_ty->get_kind () == TyTy::TypeKind::ERROR)
-	  return;
+	for (size_t j = 0; j < a->num_fields (); j++)
+	  {
+	    TyTy::StructFieldType *base_field = a->get_field_at_index (j);
+	    TyTy::StructFieldType *other_field = b->get_field_at_index (j);
+
+	    TyTy::BaseType *this_field_ty = base_field->get_field_type ();
+	    TyTy::BaseType *other_field_ty = other_field->get_field_type ();
+
+	    BaseType *unified_ty = this_field_ty->unify (other_field_ty);
+	    if (unified_ty->get_kind () == TyTy::TypeKind::ERROR)
+	      return;
+	  }
       }
 
     resolved = type.clone ();
@@ -973,8 +1126,8 @@ public:
 	fields.push_back (TyVar (unified_ty->get_ref ()));
       }
 
-    resolved
-      = new TyTy::TupleType (type.get_ref (), type.get_ty_ref (), fields);
+    resolved = new TyTy::TupleType (type.get_ref (), type.get_ty_ref (),
+				    type.get_ident ().locus, fields);
   }
 
 private:
@@ -1082,7 +1235,7 @@ public:
     auto base_type = base->get_base ();
     auto other_base_type = type.get_base ();
 
-    TyTy::BaseType *base_resolved = base_type->unify (other_base_type);
+    TyTy::BaseType *base_resolved = base_type->coerce (other_base_type);
     if (base_resolved == nullptr
 	|| base_resolved->get_kind () == TypeKind::ERROR)
       {
@@ -1097,7 +1250,7 @@ public:
       {
 	resolved = new ReferenceType (base->get_ref (), base->get_ty_ref (),
 				      TyVar (base_resolved->get_ref ()),
-				      base->is_mutable ());
+				      base->mutability ());
 	return;
       }
 
@@ -1139,7 +1292,7 @@ public:
       {
 	resolved = new PointerType (base->get_ref (), base->get_ty_ref (),
 				    TyVar (base_resolved->get_ref ()),
-				    base->is_mutable ());
+				    base->mutability ());
 	return;
       }
 
@@ -1166,7 +1319,7 @@ public:
       {
 	resolved = new PointerType (base->get_ref (), base->get_ty_ref (),
 				    TyVar (base_resolved->get_ref ()),
-				    base->is_mutable ());
+				    base->mutability ());
 	return;
       }
 
@@ -1278,10 +1431,84 @@ public:
     : BaseCoercionRules (base), base (base)
   {}
 
+  BaseType *coerce (BaseType *other) override final
+  {
+    if (!base->can_resolve ())
+      return BaseCoercionRules::coerce (other);
+
+    BaseType *lookup = base->resolve ();
+    return lookup->unify (other);
+  }
+
+  void visit (PlaceholderType &type) override
+  {
+    if (base->get_symbol ().compare (type.get_symbol ()) != 0)
+      {
+	BaseCoercionRules::visit (type);
+	return;
+      }
+
+    resolved = type.clone ();
+  }
+
+  void visit (InferType &type) override
+  {
+    if (type.get_infer_kind () != InferType::InferTypeKind::GENERAL)
+      {
+	BaseCoercionRules::visit (type);
+	return;
+      }
+
+    resolved = base->clone ();
+  }
+
 private:
   BaseType *get_base () override { return base; }
 
   PlaceholderType *base;
+};
+
+class DynamicCoercionRules : public BaseCoercionRules
+{
+  using Rust::TyTy::BaseCoercionRules::visit;
+
+public:
+  DynamicCoercionRules (DynamicObjectType *base)
+    : BaseCoercionRules (base), base (base)
+  {}
+
+  void visit (DynamicObjectType &type) override
+  {
+    if (base->num_specified_bounds () != type.num_specified_bounds ())
+      {
+	BaseCoercionRules::visit (type);
+	return;
+      }
+
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    if (!base->bounds_compatible (type, ref_locus, true))
+      {
+	BaseCoercionRules::visit (type);
+	return;
+      }
+
+    resolved = base->clone ();
+  }
+
+  void visit (ADTType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    bool ok = base->bounds_compatible (type, ref_locus, true);
+    if (!ok)
+      return;
+
+    resolved = base->clone ();
+  }
+
+private:
+  BaseType *get_base () override { return base; }
+
+  DynamicObjectType *base;
 };
 
 } // namespace TyTy

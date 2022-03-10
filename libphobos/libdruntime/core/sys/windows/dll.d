@@ -6,7 +6,7 @@
  *      $(LINK2 http://www.boost.org/LICENSE_1_0.txt, Boost Software License 1.0).
  *    (See accompanying file LICENSE)
  * Authors:   Rainer Schuetze
- * Source: $(DRUNTIMESRC src/core/sys/windows/_dll.d)
+ * Source: $(DRUNTIMESRC core/sys/windows/_dll.d)
  */
 
 /* NOTE: This file has been patched from the original DMD distribution to
@@ -31,17 +31,7 @@ public import core.sys.windows.threadaux;
 //  not access tls_array[tls_index] as needed for thread local _tlsstart and _tlsend
 extern (C)
 {
-        version (MinGW)
-        {
-            extern __gshared void* _tls_start;
-            extern __gshared void* _tls_end;
-            extern __gshared void* __xl_a;
-
-            alias _tls_start _tlsstart;
-            alias _tls_end   _tlsend;
-            alias __xl_a     _tls_callbacks_a;
-        }
-        else version (Win32)
+    version (Win32)
     {
         version (CRuntime_DigitalMars)
         {
@@ -424,7 +414,7 @@ int dll_getRefCount( HINSTANCE hInstance ) nothrow @nogc
     {
         version (GNU_InlineAsm)
         {
-            asm pure nothrow @nogc { "movq %%gs:0x60, %0;" : "=r" peb; }
+            asm pure nothrow @nogc { "movq %%gs:0x60, %0;" : "=r" (peb); }
         }
         else
         {
@@ -435,13 +425,12 @@ int dll_getRefCount( HINSTANCE hInstance ) nothrow @nogc
                 mov peb, RAX;
             }
         }
-
     }
     else version (Win32)
     {
         version (GNU_InlineAsm)
         {
-            asm pure nothrow @nogc { "movl %%fs:0x30, %0;" : "=r" peb; }
+            asm pure nothrow @nogc { "movl %%fs:0x30, %0;" : "=r" (peb); }
         }
         else
         {
@@ -584,10 +573,10 @@ bool dll_thread_detach( bool detach_thread = true, bool exitTls = true )
 /// ---
 mixin template SimpleDllMain()
 {
-    import core.sys.windows.windef : HINSTANCE;
+    import core.sys.windows.windef : HINSTANCE, BOOL, DWORD, LPVOID;
 
     extern(Windows)
-    bool DllMain(HINSTANCE hInstance, uint ulReason, void* reserved)
+    BOOL DllMain(HINSTANCE hInstance, DWORD ulReason, LPVOID reserved)
     {
         import core.sys.windows.winnt;
         import core.sys.windows.dll :

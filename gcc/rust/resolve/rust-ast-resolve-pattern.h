@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -82,6 +82,24 @@ public:
     resolver->mark_decl_mutability (pattern.get_node_id (),
 				    pattern.get_is_mut ());
   }
+
+  void visit (AST::WildcardPattern &pattern) override
+  {
+    resolver->get_name_scope ().insert (
+      CanonicalPath::new_seg (pattern.get_node_id (), "_"),
+      pattern.get_node_id (), pattern.get_locus ());
+    resolver->insert_new_definition (pattern.get_node_id (),
+				     Definition{pattern.get_node_id (),
+						parent});
+    resolver->mark_decl_mutability (pattern.get_node_id (), false);
+  }
+
+  // cases in a match expression
+  void visit (AST::PathInExpression &pattern) override;
+
+  void visit (AST::StructPattern &pattern) override;
+
+  void visit (AST::TupleStructPattern &pattern) override;
 
 private:
   PatternDeclaration (NodeId parent) : ResolverBase (parent) {}

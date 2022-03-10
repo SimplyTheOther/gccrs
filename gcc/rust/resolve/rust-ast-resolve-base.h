@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -38,7 +38,6 @@ public:
   void visit (AST::IdentifierExpr &) {}
   void visit (AST::Lifetime &) {}
   void visit (AST::LifetimeParam &) {}
-  void visit (AST::MacroInvocationSemi &) {}
   void visit (AST::PathInExpression &) {}
   void visit (AST::TypePathSegment &) {}
   void visit (AST::TypePathSegmentGeneric &) {}
@@ -73,14 +72,6 @@ public:
   void visit (AST::StructExprFieldIndexValue &) {}
   void visit (AST::StructExprStructFields &) {}
   void visit (AST::StructExprStructBase &) {}
-  void visit (AST::StructExprTuple &) {}
-  void visit (AST::StructExprUnit &) {}
-  void visit (AST::EnumExprFieldIdentifier &) {}
-  void visit (AST::EnumExprFieldIdentifierValue &) {}
-  void visit (AST::EnumExprFieldIndexValue &) {}
-  void visit (AST::EnumExprStruct &) {}
-  void visit (AST::EnumExprTuple &) {}
-  void visit (AST::EnumExprFieldless &) {}
   void visit (AST::CallExpr &) {}
   void visit (AST::MethodCallExpr &) {}
   void visit (AST::FieldAccessExpr &) {}
@@ -209,13 +200,14 @@ public:
 
 protected:
   ResolverBase (NodeId parent)
-    : resolver (Resolver::get ()), resolved_node (UNKNOWN_NODEID),
-      parent (parent), locus (Location ())
+    : resolver (Resolver::get ()), mappings (Analysis::Mappings::get ()),
+      resolved_node (UNKNOWN_NODEID), parent (parent), locus (Location ())
   {}
 
   bool resolved () const { return resolved_node != UNKNOWN_NODEID; }
 
   Resolver *resolver;
+  Analysis::Mappings *mappings;
   NodeId resolved_node;
   NodeId parent;
   Location locus;

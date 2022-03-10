@@ -1,5 +1,5 @@
 /* General AST-related method implementations for Rust frontend.
-   Copyright (C) 2009-2020 Free Software Foundation, Inc.
+   Copyright (C) 2009-2022 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -17,10 +17,15 @@ You should have received a copy of the GNU General Public License
 along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
+// FIXME: This does not work on Windows
+#include <unistd.h>
+
 #include "rust-ast-full.h"
 #include "rust-diagnostics.h"
 #include "rust-ast-visitor.h"
 #include "rust-session-manager.h"
+#include "rust-lex.h"
+#include "rust-parse.h"
 #include "operator.h"
 
 /* Compilation unit used for various AST-related functions that would make
@@ -1271,18 +1276,6 @@ TypeAlias::as_string () const
 }
 
 std::string
-MacroInvocationSemi::as_string () const
-{
-  std::string str = "MacroInvocationSemi: ";
-
-  str += append_attributes (outer_attrs, OUTER);
-
-  str += "\n" + invoc_data.as_string ();
-
-  return str;
-}
-
-std::string
 ExternBlock::as_string () const
 {
   std::string str = VisItem::as_string ();
@@ -1371,6 +1364,9 @@ MacroInvocation::as_string () const
   str += append_attributes (outer_attrs, OUTER);
 
   str += "\n " + invoc_data.as_string ();
+
+  str += "\n has semicolon: ";
+  str += has_semicolon () ? "true" : "false";
 
   return str;
 }
@@ -2283,10 +2279,10 @@ FunctionQualifiers::as_string () const
     case NONE:
       // do nothing
       break;
-    case CONST:
+    case CONST_FN:
       str += "const ";
       break;
-    case ASYNC:
+    case ASYNC_FN:
       str += "async ";
       break;
     default:
@@ -2441,13 +2437,13 @@ MacroMatchRepetition::as_string () const
   str += "\n Op: ";
   switch (op)
     {
-    case ASTERISK:
+    case ANY:
       str += "*";
       break;
-    case PLUS:
+    case ONE_OR_MORE:
       str += "+";
       break;
-    case QUESTION_MARK:
+    case ZERO_OR_ONE:
       str += "?";
       break;
     case NONE:
@@ -3237,44 +3233,6 @@ StructExpr::as_string () const
 }
 
 std::string
-StructExprTuple::as_string () const
-{
-  std::string str = StructExpr::as_string ();
-
-  if (exprs.empty ())
-    {
-      str += "()";
-    }
-  else
-    {
-      auto i = exprs.begin ();
-      auto e = exprs.end ();
-
-      // debug - null pointer check
-      if (*i == nullptr)
-	return "ERROR_MARK_STRING - nullptr struct expr tuple field";
-
-      str += '(';
-      for (; i != e; i++)
-	{
-	  str += (*i)->as_string ();
-	  if (e != i + 1)
-	    str += ", ";
-	}
-      str += ')';
-    }
-
-  indent_spaces (enter);
-  indent_spaces (enter);
-  // inner attributes
-  str += append_attributes (inner_attrs, INNER);
-  indent_spaces (out);
-  indent_spaces (out);
-
-  return str;
-}
-
-std::string
 StructExprStruct::as_string () const
 {
   // TODO: doesn't this require data from StructExpr?
@@ -3344,54 +3302,10 @@ StructExprStructFields::as_string () const
 }
 
 std::string
-EnumExprStruct::as_string () const
-{
-  std::string str ("EnumExprStruct (or subclass): ");
-
-  str += "\n Path: " + get_enum_variant_path ().as_string ();
-
-  str += "\n Fields: ";
-  if (fields.empty ())
-    {
-      str += "none";
-    }
-  else
-    {
-      for (const auto &field : fields)
-	str += "\n  " + field->as_string ();
-    }
-
-  return str;
-}
-
-std::string
-EnumExprFieldWithVal::as_string () const
-{
-  // used to get value string
-  return value->as_string ();
-}
-
-std::string
-EnumExprFieldIdentifierValue::as_string () const
-{
-  // TODO: rewrite to work with non-linearisable exprs
-  return field_name + " : " + EnumExprFieldWithVal::as_string ();
-}
-
-std::string
-EnumExprFieldIndexValue::as_string () const
-{
-  // TODO: rewrite to work with non-linearisable exprs
-  return std::to_string (index) + " : " + EnumExprFieldWithVal::as_string ();
-}
-
-std::string
 EnumItem::as_string () const
 {
-  // outer attributes
-  std::string str = append_attributes (outer_attrs, OUTER);
-
-  str += "\n" + variant_name;
+  std::string str = VisItem::as_string ();
+  str += variant_name;
 
   return str;
 }
@@ -3963,6 +3877,7 @@ MetaItemInner::~MetaItemInner () = default;
 std::unique_ptr<MetaNameValueStr>
 MetaItemInner::to_meta_name_value_str () const
 {
+  // TODO parse foo = bar
   return nullptr;
 }
 
@@ -4050,6 +3965,129 @@ Module::add_crate_name (std::vector<std::string> &names) const
     item->add_crate_name (names);
 }
 
+static bool
+file_exists (const std::string path)
+{
+  // Simply check if the file exists
+  // FIXME: This does not work on Windows
+  return access (path.c_str (), F_OK) != -1;
+}
+
+static std::string
+filename_from_path_attribute (std::vector<Attribute> &outer_attrs)
+{
+  // An out-of-line module cannot have inner attributes. Additionally, the
+  // default name is specified as `""` so that the caller can detect the case
+  // of "no path given" and use the default path logic (`name.rs` or
+  // `name/mod.rs`).
+  return extract_module_path ({}, outer_attrs, "");
+}
+
+void
+Module::process_file_path ()
+{
+  rust_assert (kind == Module::ModuleKind::UNLOADED);
+  rust_assert (module_file.empty ());
+
+  // This corresponds to the path of the file 'including' the module. So the
+  // file that contains the 'mod <file>;' directive
+  std::string including_fname (outer_filename);
+
+  std::string expected_file_path = module_name + ".rs";
+  std::string expected_dir_path = "mod.rs";
+
+  auto dir_slash_pos = including_fname.rfind (file_separator);
+  std::string current_directory_name;
+
+  // If we haven't found a file_separator, then we have to look for files in the
+  // current directory ('.')
+  if (dir_slash_pos == std::string::npos)
+    current_directory_name = std::string (".") + file_separator;
+  else
+    current_directory_name
+      = including_fname.substr (0, dir_slash_pos) + file_separator;
+
+  // Handle inline module declarations adding path components.
+  for (auto const &name : module_scope)
+    {
+      current_directory_name.append (name);
+      current_directory_name.append (file_separator);
+    }
+
+  auto path_string = filename_from_path_attribute (get_outer_attrs ());
+  if (!path_string.empty ())
+    {
+      module_file = current_directory_name + path_string;
+      return;
+    }
+
+  // FIXME: We also have to search for
+  // <directory>/<including_fname>/<module_name>.rs In rustc, this is done via
+  // the concept of `DirOwnernship`, which is based on whether or not the
+  // current file is titled `mod.rs`.
+
+  // First, we search for <directory>/<module_name>.rs
+  std::string file_mod_path = current_directory_name + expected_file_path;
+  bool file_mod_found = file_exists (file_mod_path);
+
+  // Then, search for <directory>/<module_name>/mod.rs
+  std::string dir_mod_path
+    = current_directory_name + module_name + file_separator + expected_dir_path;
+  bool dir_mod_found = file_exists (dir_mod_path);
+
+  bool multiple_candidates_found = file_mod_found && dir_mod_found;
+  bool no_candidates_found = !file_mod_found && !dir_mod_found;
+
+  if (multiple_candidates_found)
+    rust_error_at (locus,
+		   "two candidates found for module %s: %s.rs and %s%smod.rs",
+		   module_name.c_str (), module_name.c_str (),
+		   module_name.c_str (), file_separator);
+
+  if (no_candidates_found)
+    rust_error_at (locus, "no candidate found for module %s",
+		   module_name.c_str ());
+
+  if (no_candidates_found || multiple_candidates_found)
+    return;
+
+  module_file = std::move (file_mod_found ? file_mod_path : dir_mod_path);
+}
+
+void
+Module::load_items ()
+{
+  process_file_path ();
+
+  // We will already have errored out appropriately in the process_file_path ()
+  // method
+  if (module_file.empty ())
+    return;
+
+  RAIIFile file_wrap (module_file.c_str ());
+  Linemap *linemap = Session::get_instance ().linemap;
+
+  if (file_wrap.get_raw () == nullptr)
+    {
+      rust_error_at (get_locus (), "cannot open module file %s: %m",
+		     module_file.c_str ());
+      return;
+    }
+
+  rust_debug ("Attempting to parse file %s", module_file.c_str ());
+
+  Lexer lex (module_file.c_str (), std::move (file_wrap), linemap);
+  Parser<Lexer> parser (std::move (lex));
+
+  auto parsed_items = parser.parse_items ();
+
+  for (const auto &error : parser.get_errors ())
+    error.emit_error ();
+
+  items = std::move (parsed_items);
+  kind = ModuleKind::LOADED;
+}
+
 void
 Attribute::parse_attr_to_meta_item ()
 {
@@ -4057,8 +4095,8 @@ Attribute::parse_attr_to_meta_item ()
   if (!has_attr_input () || is_parsed_to_meta_item ())
     return;
 
-  std::unique_ptr<AttrInput> converted_input (
-    attr_input->parse_to_meta_item ());
+  auto res = attr_input->parse_to_meta_item ();
+  std::unique_ptr<AttrInput> converted_input (res);
 
   if (converted_input != nullptr)
     attr_input = std::move (converted_input);
@@ -4075,7 +4113,7 @@ DelimTokenTree::parse_to_meta_item () const
    * to token stream */
   std::vector<std::unique_ptr<Token> > token_stream = to_token_stream ();
 
-  MacroParser parser (std::move (token_stream));
+  AttributeParser parser (std::move (token_stream));
   std::vector<std::unique_ptr<MetaItemInner> > meta_items (
     parser.parse_meta_item_seq ());
 
@@ -4083,7 +4121,7 @@ DelimTokenTree::parse_to_meta_item () const
 }
 
 std::unique_ptr<MetaItemInner>
-MacroParser::parse_meta_item_inner ()
+AttributeParser::parse_meta_item_inner ()
 {
   // if first tok not identifier, not a "special" case one
   if (peek_token ()->get_id () != IDENTIFIER)
@@ -4098,15 +4136,15 @@ MacroParser::parse_meta_item_inner ()
 	case FLOAT_LITERAL:
 	case TRUE_LITERAL:
 	case FALSE_LITERAL:
-	  // stream_pos++;
 	  return parse_meta_item_lit ();
+
 	case SUPER:
 	case SELF:
 	case CRATE:
 	case DOLLAR_SIGN:
-	  case SCOPE_RESOLUTION: {
-	    return parse_path_meta_item ();
-	  }
+	case SCOPE_RESOLUTION:
+	  return parse_path_meta_item ();
+
 	default:
 	  rust_error_at (peek_token ()->get_locus (),
 			 "unrecognised token '%s' in meta item",
@@ -4162,10 +4200,13 @@ MacroParser::parse_meta_item_inner ()
       return nullptr;
     }
 
-  /* HACK: parse parenthesised sequence, and then try conversions to other
-   * stuff */
-  std::vector<std::unique_ptr<MetaItemInner> > meta_items
-    = parse_meta_item_seq ();
+  // is it one of those special cases like not?
+  if (peek_token ()->get_id () == IDENTIFIER)
+    {
+      return parse_path_meta_item ();
+    }
+
+  auto meta_items = parse_meta_item_seq ();
 
   // pass for meta name value str
   std::vector<MetaNameValueStr> meta_name_value_str_items;
@@ -4188,23 +4229,25 @@ MacroParser::parse_meta_item_inner ()
 				  std::move (meta_name_value_str_items)));
     }
 
-  // pass for meta list idents
-  /*std::vector<Identifier> ident_items;
-  for (const auto& item : meta_items) {
-      std::unique_ptr<Identifier> converted_ident(item->to_ident_item());
-      if (converted_ident == nullptr) {
-	  ident_items.clear();
-	  break;
-      }
-      ident_items.push_back(std::move(*converted_ident));
-  }
-  // if valid return this
-  if (!ident_items.empty()) {
-      return std::unique_ptr<MetaListIdents>(new
-  MetaListIdents(std::move(ident),
-  std::move(ident_items)));
-  }*/
-  // as currently no meta list ident, currently no path. may change in future
+  // // pass for meta list idents
+  // std::vector<Identifier> ident_items;
+  // for (const auto &item : meta_items)
+  //   {
+  //     std::unique_ptr<Identifier> converted_ident (item->to_ident_item ());
+  //     if (converted_ident == nullptr)
+  //       {
+  //         ident_items.clear ();
+  //         break;
+  //       }
+  //     ident_items.push_back (std::move (*converted_ident));
+  //   }
+  // // if valid return this
+  // if (!ident_items.empty ())
+  //   {
+  //     return std::unique_ptr<MetaListIdents> (
+  //       new MetaListIdents (std::move (ident), std::move (ident_items)));
+  //   }
+  // // as currently no meta list ident, currently no path. may change in future
 
   // pass for meta list paths
   std::vector<SimplePath> path_items;
@@ -4230,13 +4273,13 @@ MacroParser::parse_meta_item_inner ()
 }
 
 bool
-MacroParser::is_end_meta_item_tok (TokenId id) const
+AttributeParser::is_end_meta_item_tok (TokenId id) const
 {
   return id == COMMA || id == RIGHT_PAREN;
 }
 
 std::unique_ptr<MetaItem>
-MacroParser::parse_path_meta_item ()
+AttributeParser::parse_path_meta_item ()
 {
   SimplePath path = parse_simple_path ();
   if (path.is_empty ())
@@ -4288,15 +4331,8 @@ MacroParser::parse_path_meta_item ()
 /* Parses a parenthesised sequence of meta item inners. Parentheses are
  * required here. */
 std::vector<std::unique_ptr<MetaItemInner> >
-MacroParser::parse_meta_item_seq ()
+AttributeParser::parse_meta_item_seq ()
 {
-  if (stream_pos != 0)
-    {
-      // warning?
-      rust_debug ("WARNING: stream pos for parse_meta_item_seq is not 0!");
-    }
-
-  // int i = 0;
   int vec_length = token_stream.size ();
   std::vector<std::unique_ptr<MetaItemInner> > meta_items;
 
@@ -4342,13 +4378,6 @@ std::vector<std::unique_ptr<Token> >
 DelimTokenTree::to_token_stream () const
 {
   std::vector<std::unique_ptr<Token> > tokens;
-
-  // simulate presence of delimiters
-  const_TokenPtr left_paren
-    = Rust::Token::make (LEFT_PAREN, Linemap::unknown_location ());
-  tokens.push_back (
-    std::unique_ptr<Token> (new Token (std::move (left_paren))));
-
   for (const auto &tree : token_trees)
     {
       std::vector<std::unique_ptr<Token> > stream = tree->to_token_stream ();
@@ -4357,18 +4386,12 @@ DelimTokenTree::to_token_stream () const
 		     std::make_move_iterator (stream.end ()));
     }
 
-  const_TokenPtr right_paren
-    = Rust::Token::make (RIGHT_PAREN, Linemap::unknown_location ());
-  tokens.push_back (
-    std::unique_ptr<Token> (new Token (std::move (right_paren))));
-
   tokens.shrink_to_fit ();
-
   return tokens;
 }
 
 Literal
-MacroParser::parse_literal ()
+AttributeParser::parse_literal ()
 {
   const std::unique_ptr<Token> &tok = peek_token ();
   switch (tok->get_id ())
@@ -4407,7 +4430,7 @@ MacroParser::parse_literal ()
 }
 
 SimplePath
-MacroParser::parse_simple_path ()
+AttributeParser::parse_simple_path ()
 {
   bool has_opening_scope_res = false;
   if (peek_token ()->get_id () == SCOPE_RESOLUTION)
@@ -4448,7 +4471,7 @@ MacroParser::parse_simple_path ()
 }
 
 SimplePathSegment
-MacroParser::parse_simple_path_segment ()
+AttributeParser::parse_simple_path_segment ()
 {
   const std::unique_ptr<Token> &tok = peek_token ();
   switch (tok->get_id ())
@@ -4481,7 +4504,7 @@ MacroParser::parse_simple_path_segment ()
 }
 
 std::unique_ptr<MetaItemLitExpr>
-MacroParser::parse_meta_item_lit ()
+AttributeParser::parse_meta_item_lit ()
 {
   Location locus = peek_token ()->get_locus ();
   LiteralExpr lit_expr (parse_literal (), {}, locus);
@@ -4492,27 +4515,16 @@ MacroParser::parse_meta_item_lit ()
 bool
 AttrInputMetaItemContainer::check_cfg_predicate (const Session &session) const
 {
-  /* NOTE: assuming that only first item must be true - cfg should only have one
-   * item, and cfg_attr only has first item as predicate. TODO ensure that this
-   * is correct. */
   if (items.empty ())
     return false;
 
-  // DEBUG
-  rust_debug (
-    "asked to check cfg of attrinputmetaitemcontainer - delegating to "
-    "first item. container: '%s'",
-    as_string ().c_str ());
-
-  return items[0]->check_cfg_predicate (session);
-
-  /*for (const auto &inner_item : items)
+  for (const auto &inner_item : items)
     {
       if (!inner_item->check_cfg_predicate (session))
 	return false;
     }
 
-  return true;*/
+  return true;
 }
 
 bool
@@ -4901,12 +4913,6 @@ LifetimeParam::accept_vis (ASTVisitor &vis)
 }
 
 void
-MacroInvocationSemi::accept_vis (ASTVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
 PathInExpression::accept_vis (ASTVisitor &vis)
 {
   vis.visit (*this);
@@ -5106,54 +5112,6 @@ StructExprStructFields::accept_vis (ASTVisitor &vis)
 
 void
 StructExprStructBase::accept_vis (ASTVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-StructExprTuple::accept_vis (ASTVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-StructExprUnit::accept_vis (ASTVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-EnumExprFieldIdentifier::accept_vis (ASTVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-EnumExprFieldIdentifierValue::accept_vis (ASTVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-EnumExprFieldIndexValue::accept_vis (ASTVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-EnumExprStruct::accept_vis (ASTVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-EnumExprTuple::accept_vis (ASTVisitor &vis)
-{
-  vis.visit (*this);
-}
-
-void
-EnumExprFieldless::accept_vis (ASTVisitor &vis)
 {
   vis.visit (*this);
 }

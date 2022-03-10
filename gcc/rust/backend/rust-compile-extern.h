@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -20,26 +20,19 @@
 #define RUST_COMPILE_EXTERN_ITEM
 
 #include "rust-compile-base.h"
-#include "rust-compile-tyty.h"
-#include "rust-compile-implitem.h"
-#include "rust-compile-var-decl.h"
-#include "rust-compile-stmt.h"
-#include "rust-compile-expr.h"
-#include "rust-compile-fnparam.h"
+#include "rust-compile-intrinsic.h"
 
 namespace Rust {
 namespace Compile {
 
-class CompileExternItem : public HIRCompileBase
+class CompileExternItem : public HIRCompileBase,
+			  public HIR::HIRExternalItemVisitor
 {
-  using Rust::Compile::HIRCompileBase::visit;
-
 public:
   static void compile (HIR::ExternalItem *item, Context *ctx,
-		       bool compile_fns = true,
 		       TyTy::BaseType *concrete = nullptr)
   {
-    CompileExternItem compiler (ctx, compile_fns, concrete);
+    CompileExternItem compiler (ctx, concrete);
     item->accept_vis (compiler);
   }
 
@@ -54,7 +47,7 @@ public:
     // FIXME this is assuming C ABI
     std::string asm_name = name;
 
-    Btype *type = TyTyResolveCompile::compile (ctx, resolved_type);
+    tree type = TyTyResolveCompile::compile (ctx, resolved_type);
     bool is_external = true;
     bool is_hidden = false;
     bool in_unique_section = false;
@@ -69,9 +62,6 @@ public:
 
   void visit (HIR::ExternalFunctionItem &function) override
   {
-    if (!compile_fns)
-      return;
-
     TyTy::BaseType *fntype_tyty;
     if (!ctx->get_tyctx ()->lookup_type (function.get_mappings ().get_hirid (),
 					 &fntype_tyty))
@@ -98,15 +88,16 @@ public:
 
     // items can be forward compiled which means we may not need to invoke this
     // code. We might also have already compiled this generic function as well.
-    Bfunction *lookup = nullptr;
-    if (ctx->lookup_function_decl (fntype->get_ty_ref (), &lookup, fntype))
+    tree lookup = NULL_TREE;
+    if (ctx->lookup_function_decl (fntype->get_ty_ref (), &lookup,
+				   fntype->get_id (), fntype))
       {
 	// has this been added to the list then it must be finished
 	if (ctx->function_completed (lookup))
 	  {
-	    Bfunction *dummy = nullptr;
+	    tree dummy = NULL_TREE;
 	    if (!ctx->lookup_function_decl (fntype->get_ty_ref (), &dummy))
-	      ctx->insert_function_decl (fntype->get_ty_ref (), lookup, fntype);
+	      ctx->insert_function_decl (fntype, lookup);
 
 	    return;
 	  }
@@ -118,27 +109,33 @@ public:
 	fntype->override_context ();
       }
 
-    ::Btype *compiled_fn_type = TyTyResolveCompile::compile (ctx, fntype);
+    if (fntype->get_abi () == ABI::INTRINSIC)
+      {
+	Intrinsics compile (ctx);
+	tree fndecl = compile.compile (fntype);
+	ctx->insert_function_decl (fntype, fndecl);
+	return;
+      }
 
-    const unsigned int flags
-      = Backend::function_is_declaration | Backend::function_is_visible;
-
+    tree compiled_fn_type = TyTyResolveCompile::compile (ctx, fntype);
     std::string ir_symbol_name = function.get_item_name ();
-    // FIXME this assumes C ABI
     std::string asm_name = function.get_item_name ();
 
-    Bfunction *fndecl
+    const unsigned int flags = Backend::function_is_declaration;
+    tree fndecl
       = ctx->get_backend ()->function (compiled_fn_type, ir_symbol_name,
 				       asm_name, flags, function.get_locus ());
-    ctx->insert_function_decl (fntype->get_ty_ref (), fndecl, fntype);
+    TREE_PUBLIC (fndecl) = 1;
+    setup_abi_options (fndecl, fntype->get_abi ());
+
+    ctx->insert_function_decl (fntype, fndecl);
   }
 
 private:
-  CompileExternItem (Context *ctx, bool compile_fns, TyTy::BaseType *concrete)
-    : HIRCompileBase (ctx), compile_fns (compile_fns), concrete (concrete)
+  CompileExternItem (Context *ctx, TyTy::BaseType *concrete)
+    : HIRCompileBase (ctx), concrete (concrete)
   {}
 
-  bool compile_fns;
   TyTy::BaseType *concrete;
 };
 

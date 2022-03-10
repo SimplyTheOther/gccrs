@@ -1,15 +1,21 @@
 // { dg-options "-O0" }
 // { dg-shouldfail "segv or bus error" }
 import core.thread;
+import core.sys.posix.signal;
 import core.sys.posix.sys.mman;
+
+version (LDC) import ldc.attributes;
+else struct optStrategy { string a; }
 
 // this should be true for most architectures
 // (taken from core.thread)
-version = StackGrowsDown;
+version (GNU_StackGrowsDown)
+    version = StackGrowsDown;
 
-enum stackSize = 4096;
+enum stackSize = MINSIGSTKSZ;
 
 // Simple method that causes a stack overflow
+@optStrategy("none")
 void stackMethod()
 {
     // Over the stack size, so it overflows the stack

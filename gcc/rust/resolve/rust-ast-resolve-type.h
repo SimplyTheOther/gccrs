@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -97,9 +97,11 @@ public:
 
 class ResolveTypeToCanonicalPath : public ResolverBase
 {
+protected:
   using Rust::Resolver::ResolverBase::visit;
 
 public:
+  // FIXME this should really only take AST::TypeNoBounds&
   static CanonicalPath resolve (AST::Type &type,
 				bool include_generic_args = true,
 				bool type_resolve_generic_args = true)
@@ -120,6 +122,8 @@ public:
       }
   }
 
+  void visit (AST::ReferenceType &ref) override;
+
   void visit (AST::TypePathSegmentGeneric &seg) override;
 
   void visit (AST::TypePathSegment &seg) override;
@@ -128,7 +132,7 @@ public:
 
   static bool type_resolve_generic_args (AST::GenericArgs &args);
 
-private:
+protected:
   ResolveTypeToCanonicalPath (bool include_generic_args,
 			      bool type_resolve_generic_args)
     : ResolverBase (UNKNOWN_NODEID), result (CanonicalPath::create_empty ()),
@@ -182,39 +186,62 @@ public:
   }
 };
 
-class ResolveRelativeTypePath
+class ResolveRelativeTypePath : public ResolveTypeToCanonicalPath
 {
+  using ResolveTypeToCanonicalPath::visit;
+
 public:
-  static NodeId go (AST::TypePath &path, NodeId parent,
-		    const CanonicalPath &prefix,
-		    bool canonicalize_type_with_generics)
+  static bool go (AST::QualifiedPathInType &path, NodeId parent,
+		  bool canonicalize_type_with_generics)
   {
-    CanonicalPath canonical_path
-      = ResolveTypeToCanonicalPath::resolve (path,
-					     canonicalize_type_with_generics,
-					     true);
-    if (canonical_path.is_error ())
-      {
-	rust_error_at (path.get_locus (),
-		       "Failed to resolve canonical path for TypePath");
-	return UNKNOWN_NODEID;
-      }
+    // resolve the type and trait path
+    auto &qualified_path = path.get_qualified_path_type ();
+    CanonicalPath result = CanonicalPath::create_empty ();
+    if (!resolve_qual_seg (qualified_path, result))
+      return false;
 
-    CanonicalPath lookup = canonical_path;
-    if (!prefix.is_error ())
-      lookup = prefix.append (canonical_path);
-
+    // resolve the associated impl if available but it can also be from a trait
+    // and this is allowed to fail
     auto resolver = Resolver::get ();
-    NodeId resolved_node = UNKNOWN_NODEID;
-    if (!resolver->get_type_scope ().lookup (canonical_path, &resolved_node))
+    NodeId projection_resolved_id = UNKNOWN_NODEID;
+    if (resolver->get_name_scope ().lookup (result, &projection_resolved_id))
       {
-	rust_error_at (path.get_locus_slow (), "failed to resolve TypePath: %s",
-		       canonical_path.get ().c_str ());
-	return UNKNOWN_NODEID;
+	// mark the resolution for this
+	resolver->insert_resolved_name (qualified_path.get_node_id (),
+					projection_resolved_id);
       }
 
-    return resolved_node;
+    // qualified types are similar to other paths in that we cannot guarantee
+    // that we can resolve the path at name resolution. We must look up
+    // associated types and type information to figure this out properly
+
+    ResolveRelativeTypePath o (result);
+    std::unique_ptr<AST::TypePathSegment> &associated
+      = path.get_associated_segment ();
+
+    associated->accept_vis (o);
+    if (o.failure_flag)
+      return false;
+
+    for (auto &seg : path.get_segments ())
+      {
+	seg->accept_vis (o);
+	if (o.failure_flag)
+	  return false;
+      }
+
+    return true;
   }
+
+private:
+  ResolveRelativeTypePath (CanonicalPath qualified_path)
+    : ResolveTypeToCanonicalPath (true, true)
+  {
+    result = qualified_path;
+  }
+
+  static bool resolve_qual_seg (AST::QualifiedPathType &seg,
+				CanonicalPath &result);
 };
 
 class ResolveType : public ResolverBase
@@ -223,12 +250,14 @@ class ResolveType : public ResolverBase
 
 public:
   static NodeId go (AST::Type *type, NodeId parent,
-		    bool canonicalize_type_with_generics = false)
+		    bool canonicalize_type_with_generics = false,
+		    CanonicalPath *canonical_path = nullptr)
   {
-    ResolveType resolver (parent, canonicalize_type_with_generics);
+    ResolveType resolver (parent, canonicalize_type_with_generics,
+			  canonical_path);
     type->accept_vis (resolver);
     if (!resolver.ok)
-      rust_error_at (type->get_locus_slow (), "unresolved type");
+      rust_error_at (type->get_locus (), "unresolved type");
 
     return resolver.resolved_node;
   };
@@ -258,43 +287,124 @@ public:
 
   void visit (AST::TypePath &path) override
   {
-    resolved_node
-      = ResolveRelativeTypePath::go (path, parent,
-				     CanonicalPath::create_empty (),
-				     canonicalize_type_with_generics);
-    ok = resolved_node != UNKNOWN_NODEID;
-    if (ok)
+    auto rel_canonical_path
+      = ResolveTypeToCanonicalPath::resolve (path,
+					     canonicalize_type_with_generics,
+					     true);
+    if (rel_canonical_path.is_empty ())
+      {
+	rust_error_at (path.get_locus (),
+		       "Failed to resolve canonical path for TypePath");
+	return;
+      }
+
+    ok = !rel_canonical_path.is_empty ();
+
+    // lets try and resolve in one go else leave it up to the type resolver to
+    // figure outer
+
+    if (resolver->get_type_scope ().lookup (rel_canonical_path, &resolved_node))
       {
 	resolver->insert_resolved_type (path.get_node_id (), resolved_node);
 	resolver->insert_new_definition (path.get_node_id (),
 					 Definition{path.get_node_id (),
 						    parent});
+
+	if (canonical_path != nullptr)
+	  {
+	    const CanonicalPath *cpath = nullptr;
+	    bool ok
+	      = mappings->lookup_canonical_path (mappings->get_current_crate (),
+						 resolved_node, &cpath);
+	    if (!ok)
+	      {
+		*canonical_path = rel_canonical_path;
+	      }
+	    else
+	      {
+		*canonical_path = *cpath;
+	      }
+	  }
+
+	return;
       }
+
+    // lets resolve as many segments as we can and leave it up to the type
+    // resolver otherwise
+    size_t nprocessed = 0;
+    rel_canonical_path.iterate ([&] (const CanonicalPath &seg) -> bool {
+      resolved_node = UNKNOWN_NODEID;
+
+      if (!resolver->get_type_scope ().lookup (seg, &resolved_node))
+	return false;
+
+      resolver->insert_resolved_type (seg.get_node_id (), resolved_node);
+      resolver->insert_new_definition (seg.get_node_id (),
+				       Definition{path.get_node_id (), parent});
+      nprocessed++;
+      return true;
+    });
+
+    if (nprocessed == 0)
+      {
+	rust_error_at (path.get_locus (), "failed to resolve TypePath: %s",
+		       path.as_string ().c_str ());
+	return;
+      }
+
+    // its ok if this fails since the type resolver sometimes will need to
+    // investigate the bounds of a type for the associated type for example see:
+    // https://github.com/Rust-GCC/gccrs/issues/746
+    if (nprocessed == rel_canonical_path.size ())
+      {
+	resolver->insert_resolved_type (path.get_node_id (), resolved_node);
+	resolver->insert_new_definition (path.get_node_id (),
+					 Definition{path.get_node_id (),
+						    parent});
+
+	if (canonical_path != nullptr)
+	  {
+	    const CanonicalPath *cpath = nullptr;
+	    bool ok
+	      = mappings->lookup_canonical_path (mappings->get_current_crate (),
+						 resolved_node, &cpath);
+	    rust_assert (ok);
+	    *canonical_path = *cpath;
+	  }
+      }
+  }
+
+  void visit (AST::QualifiedPathInType &path) override
+  {
+    ok = ResolveRelativeTypePath::go (path, parent,
+				      canonicalize_type_with_generics);
   }
 
   void visit (AST::ArrayType &type) override;
 
-  void visit (AST::ReferenceType &type) override
-  {
-    type.get_type_referenced ()->accept_vis (*this);
-  }
+  void visit (AST::ReferenceType &type) override;
 
-  void visit (AST::InferredType &type) override { ok = true; }
+  void visit (AST::InferredType &type) override;
 
-  void visit (AST::RawPointerType &type) override
-  {
-    type.get_type_pointed_to ()->accept_vis (*this);
-  }
+  void visit (AST::RawPointerType &type) override;
+
+  void visit (AST::TraitObjectTypeOneBound &type) override;
+
+  void visit (AST::TraitObjectType &type) override;
+
+  void visit (AST::SliceType &type) override;
 
 private:
-  ResolveType (NodeId parent, bool canonicalize_type_with_generics)
+  ResolveType (NodeId parent, bool canonicalize_type_with_generics,
+	       CanonicalPath *canonical_path)
     : ResolverBase (parent),
       canonicalize_type_with_generics (canonicalize_type_with_generics),
-      ok (false)
+      ok (false), canonical_path (canonical_path)
   {}
 
   bool canonicalize_type_with_generics;
   bool ok;
+  CanonicalPath *canonical_path;
 };
 
 class ResolveTypeBound : public ResolverBase
@@ -308,7 +418,7 @@ public:
     ResolveTypeBound resolver (parent, canonicalize_type_with_generics);
     type->accept_vis (resolver);
     if (!resolver.ok)
-      rust_error_at (type->get_locus_slow (), "unresolved type bound");
+      rust_error_at (type->get_locus (), "unresolved type bound");
 
     return resolver.resolved_node;
   };
@@ -343,7 +453,7 @@ public:
     ResolveGenericParam resolver (parent);
     param->accept_vis (resolver);
     if (!resolver.ok)
-      rust_error_at (param->get_locus_slow (), "unresolved generic parameter");
+      rust_error_at (param->get_locus (), "unresolved generic parameter");
 
     return resolver.resolved_node;
   };
@@ -370,22 +480,57 @@ public:
 	  }
       }
 
-    // for now lets focus on handling the basics: like struct<T> { a:T, ....}
+    auto seg = CanonicalPath::new_seg (param.get_node_id (),
+				       param.get_type_representation ());
     resolver->get_type_scope ().insert (
-      CanonicalPath::new_seg (param.get_node_id (),
-			      param.get_type_representation ()),
-      param.get_node_id (), param.get_locus (), false,
+      seg, param.get_node_id (), param.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
 	rust_error_at (param.get_locus (),
 		       "generic param redefined multiple times");
 	rust_error_at (locus, "was defined here");
       });
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     param.get_node_id (), seg);
   }
 
 private:
   ResolveGenericParam (NodeId parent) : ResolverBase (parent), ok (false) {}
 
   bool ok;
+};
+
+class ResolveWhereClause : public ResolverBase
+{
+  using Rust::Resolver::ResolverBase::visit;
+
+public:
+  static void Resolve (AST::WhereClause &where_clause)
+  {
+    ResolveWhereClause r (where_clause.get_node_id ());
+    for (auto &clause : where_clause.get_items ())
+      clause->accept_vis (r);
+  }
+
+  void visit (AST::LifetimeWhereClauseItem &) override
+  {
+    // nothing to do
+  }
+
+  void visit (AST::TypeBoundWhereClauseItem &item) override
+  {
+    ResolveType::go (item.get_type ().get (), item.get_node_id ());
+    if (item.has_type_param_bounds ())
+      {
+	for (auto &bound : item.get_type_param_bounds ())
+	  {
+	    ResolveTypeBound::go (bound.get (), item.get_node_id ());
+	  }
+      }
+  }
+
+private:
+  ResolveWhereClause (NodeId parent) : ResolverBase (parent) {}
 };
 
 } // namespace Resolver

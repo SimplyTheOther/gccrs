@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -24,9 +24,6 @@
 #include "rust-tyty-visitor.h"
 #include "rust-hir-map.h"
 #include "rust-hir-type-check.h"
-
-extern ::Backend *
-rust_get_backend ();
 
 namespace Rust {
 namespace TyTy {
@@ -67,6 +64,19 @@ public:
 	  {
 	    other = p->resolve ();
 	  }
+      }
+    else if (other->get_kind () == TypeKind::PLACEHOLDER)
+      {
+	PlaceholderType *p = static_cast<PlaceholderType *> (other);
+	if (p->can_resolve ())
+	  {
+	    other = p->resolve ();
+	  }
+      }
+    else if (other->get_kind () == TypeKind::PROJECTION)
+      {
+	ProjectionType *p = static_cast<ProjectionType *> (other);
+	other = p->get ();
       }
 
     other->accept_vis (*this);
@@ -165,6 +175,17 @@ public:
   }
 
   virtual void visit (ArrayType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
+    RichLocation r (ref_locus);
+    r.add_range (base_locus);
+    rust_error_at (r, "expected [%s] got [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
+  virtual void visit (SliceType &type) override
   {
     Location ref_locus = mappings->lookup_location (type.get_ref ());
     Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
@@ -329,6 +350,39 @@ public:
 		   type.as_string ().c_str ());
   }
 
+  virtual void visit (ProjectionType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
+    RichLocation r (ref_locus);
+    r.add_range (base_locus);
+    rust_error_at (r, "expected [%s] got [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
+  virtual void visit (DynamicObjectType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
+    RichLocation r (ref_locus);
+    r.add_range (base_locus);
+    rust_error_at (r, "expected [%s] got [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
+  virtual void visit (ClosureType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
+    RichLocation r (ref_locus);
+    r.add_range (base_locus);
+    rust_error_at (r, "expected [%s] got [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
 protected:
   BaseRules (BaseType *base)
     : mappings (Analysis::Mappings::get ()),
@@ -457,6 +511,19 @@ public:
     BaseRules::visit (type);
   }
 
+  void visit (SliceType &type) override
+  {
+    bool is_valid
+      = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
+    if (is_valid)
+      {
+	resolved = type.clone ();
+	return;
+      }
+
+    BaseRules::visit (type);
+  }
+
   void visit (ADTType &type) override
   {
     bool is_valid
@@ -565,6 +632,32 @@ public:
   }
 
   void visit (ParamType &type) override
+  {
+    bool is_valid
+      = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
+    if (is_valid)
+      {
+	resolved = type.clone ();
+	return;
+      }
+
+    BaseRules::visit (type);
+  }
+
+  void visit (DynamicObjectType &type) override
+  {
+    bool is_valid
+      = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
+    if (is_valid)
+      {
+	resolved = type.clone ();
+	return;
+      }
+
+    BaseRules::visit (type);
+  }
+
+  void visit (ClosureType &type) override
   {
     bool is_valid
       = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
@@ -736,6 +829,21 @@ private:
   FnPtr *base;
 };
 
+class ClosureRules : public BaseRules
+{
+  using Rust::TyTy::BaseRules::visit;
+
+public:
+  ClosureRules (ClosureType *base) : BaseRules (base), base (base) {}
+
+  // TODO
+
+private:
+  BaseType *get_base () override { return base; }
+
+  ClosureType *base;
+};
+
 class ArrayRules : public BaseRules
 {
   using Rust::TyTy::BaseRules::visit;
@@ -754,25 +862,45 @@ public:
 	return;
       }
 
-    auto backend = rust_get_backend ();
-
-    // need to check the base types and capacity
-    if (!backend->const_values_equal (type.get_capacity (),
-				      base->get_capacity ()))
-      {
-	BaseRules::visit (type);
-	return;
-      }
-
     resolved
       = new ArrayType (type.get_ref (), type.get_ty_ref (),
-		       type.get_capacity (), TyVar (base_resolved->get_ref ()));
+		       type.get_ident ().locus, type.get_capacity_expr (),
+		       TyVar (base_resolved->get_ref ()));
   }
 
 private:
   BaseType *get_base () override { return base; }
 
   ArrayType *base;
+};
+
+class SliceRules : public BaseRules
+{
+  using Rust::TyTy::BaseRules::visit;
+
+public:
+  SliceRules (SliceType *base) : BaseRules (base), base (base) {}
+
+  void visit (SliceType &type) override
+  {
+    // check base type
+    auto base_resolved
+      = base->get_element_type ()->unify (type.get_element_type ());
+    if (base_resolved == nullptr)
+      {
+	BaseRules::visit (type);
+	return;
+      }
+
+    resolved = new SliceType (type.get_ref (), type.get_ty_ref (),
+			      type.get_ident ().locus,
+			      TyVar (base_resolved->get_ref ()));
+  }
+
+private:
+  BaseType *get_base () override { return base; }
+
+  SliceType *base;
 };
 
 class BoolRules : public BaseRules
@@ -929,29 +1057,47 @@ public:
 
   void visit (ADTType &type) override
   {
+    if (base->get_adt_kind () != type.get_adt_kind ())
+      {
+	BaseRules::visit (type);
+	return;
+      }
+
     if (base->get_identifier ().compare (type.get_identifier ()) != 0)
       {
 	BaseRules::visit (type);
 	return;
       }
 
-    if (base->num_fields () != type.num_fields ())
+    if (base->number_of_variants () != type.number_of_variants ())
       {
 	BaseRules::visit (type);
 	return;
       }
 
-    for (size_t i = 0; i < type.num_fields (); ++i)
+    for (size_t i = 0; i < type.number_of_variants (); ++i)
       {
-	TyTy::StructFieldType *base_field = base->get_field (i);
-	TyTy::StructFieldType *other_field = type.get_field (i);
+	TyTy::VariantDef *a = base->get_variants ().at (i);
+	TyTy::VariantDef *b = type.get_variants ().at (i);
 
-	TyTy::BaseType *this_field_ty = base_field->get_field_type ();
-	TyTy::BaseType *other_field_ty = other_field->get_field_type ();
+	if (a->num_fields () != b->num_fields ())
+	  {
+	    BaseRules::visit (type);
+	    return;
+	  }
 
-	BaseType *unified_ty = this_field_ty->unify (other_field_ty);
-	if (unified_ty->get_kind () == TyTy::TypeKind::ERROR)
-	  return;
+	for (size_t j = 0; j < a->num_fields (); j++)
+	  {
+	    TyTy::StructFieldType *base_field = a->get_field_at_index (j);
+	    TyTy::StructFieldType *other_field = b->get_field_at_index (j);
+
+	    TyTy::BaseType *this_field_ty = base_field->get_field_type ();
+	    TyTy::BaseType *other_field_ty = other_field->get_field_type ();
+
+	    BaseType *unified_ty = this_field_ty->unify (other_field_ty);
+	    if (unified_ty->get_kind () == TyTy::TypeKind::ERROR)
+	      return;
+	  }
       }
 
     resolved = type.clone ();
@@ -991,8 +1137,8 @@ public:
 	fields.push_back (TyVar (unified_ty->get_ref ()));
       }
 
-    resolved
-      = new TyTy::TupleType (type.get_ref (), type.get_ty_ref (), fields);
+    resolved = new TyTy::TupleType (type.get_ref (), type.get_ty_ref (),
+				    type.get_ident ().locus, fields);
   }
 
 private:
@@ -1104,7 +1250,10 @@ public:
 	return;
       }
 
-    if (base->is_mutable () != type.is_mutable ())
+    // rust is permissive about mutablity here you can always go from mutable to
+    // immutable but not the otherway round
+    bool mutability_ok = base->is_mutable () ? type.is_mutable () : true;
+    if (!mutability_ok)
       {
 	BaseRules::visit (type);
 	return;
@@ -1112,7 +1261,7 @@ public:
 
     resolved = new ReferenceType (base->get_ref (), base->get_ty_ref (),
 				  TyVar (base_resolved->get_ref ()),
-				  base->is_mutable ());
+				  base->mutability ());
   }
 
 private:
@@ -1141,7 +1290,10 @@ public:
 	return;
       }
 
-    if (base->is_mutable () != type.is_mutable ())
+    // rust is permissive about mutablity here you can always go from mutable to
+    // immutable but not the otherway round
+    bool mutability_ok = base->is_mutable () ? type.is_mutable () : true;
+    if (!mutability_ok)
       {
 	BaseRules::visit (type);
 	return;
@@ -1149,7 +1301,7 @@ public:
 
     resolved = new PointerType (base->get_ref (), base->get_ty_ref (),
 				TyVar (base_resolved->get_ref ()),
-				base->is_mutable ());
+				base->mutability ());
   }
 
 private:
@@ -1238,7 +1390,7 @@ class NeverRules : public BaseRules
 public:
   NeverRules (NeverType *base) : BaseRules (base), base (base) {}
 
-  virtual void visit (NeverType &type) override { resolved = type.clone (); }
+  void visit (NeverType &type) override { resolved = type.clone (); }
 
 private:
   BaseType *get_base () override { return base; }
@@ -1253,10 +1405,83 @@ class PlaceholderRules : public BaseRules
 public:
   PlaceholderRules (PlaceholderType *base) : BaseRules (base), base (base) {}
 
+  BaseType *unify (BaseType *other) override final
+  {
+    if (!base->can_resolve ())
+      return BaseRules::unify (other);
+
+    BaseType *lookup = base->resolve ();
+    return lookup->unify (other);
+  }
+
+  void visit (PlaceholderType &type) override
+  {
+    if (base->get_symbol ().compare (type.get_symbol ()) != 0)
+      {
+	BaseRules::visit (type);
+	return;
+      }
+
+    resolved = type.clone ();
+  }
+
+  void visit (InferType &type) override
+  {
+    if (type.get_infer_kind () != InferType::InferTypeKind::GENERAL)
+      {
+	BaseRules::visit (type);
+	return;
+      }
+
+    resolved = base->clone ();
+  }
+
 private:
   BaseType *get_base () override { return base; }
 
   PlaceholderType *base;
+};
+
+class DynamicRules : public BaseRules
+{
+  using Rust::TyTy::BaseRules::visit;
+
+public:
+  DynamicRules (DynamicObjectType *base) : BaseRules (base), base (base) {}
+
+  void visit (InferType &type) override
+  {
+    if (type.get_infer_kind () != InferType::InferTypeKind::GENERAL)
+      {
+	BaseRules::visit (type);
+	return;
+      }
+
+    resolved = base->clone ();
+  }
+
+  void visit (DynamicObjectType &type) override
+  {
+    if (base->num_specified_bounds () != type.num_specified_bounds ())
+      {
+	BaseRules::visit (type);
+	return;
+      }
+
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    if (!base->bounds_compatible (type, ref_locus, true))
+      {
+	BaseRules::visit (type);
+	return;
+      }
+
+    resolved = base->clone ();
+  }
+
+private:
+  BaseType *get_base () override { return base; }
+
+  DynamicObjectType *base;
 };
 
 } // namespace TyTy

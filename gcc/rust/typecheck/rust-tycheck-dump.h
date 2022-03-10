@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -22,14 +22,17 @@
 #include "rust-hir-type-check-base.h"
 #include "rust-hir-full.h"
 
+#include <fstream>
+#include <sstream>
+
 namespace Rust {
 namespace Resolver {
 
 class TypeResolverDump : public TypeCheckBase
 {
-public:
-  using Rust::Resolver::TypeCheckBase::visit;
+  using Rust::HIR::HIRFullVisitorBase::visit;
 
+public:
   static void go (HIR::Crate &crate, std::ofstream &out)
   {
     TypeResolverDump dumper;
@@ -52,6 +55,12 @@ public:
   {
     dump
       += indent () + "union " + type_string (union_decl.get_mappings ()) + "\n";
+  }
+
+  void visit (HIR::TupleStruct &struct_decl) override
+  {
+    dump += indent () + "struct" + type_string (struct_decl.get_mappings ())
+	    + "\n";
   }
 
   void visit (HIR::ImplBlock &impl_block) override
@@ -94,12 +103,12 @@ public:
   {
     indentation_level++;
 
-    expr.iterate_stmts ([&] (HIR::Stmt *s) mutable -> bool {
-      dump += indent ();
-      s->accept_vis (*this);
-      dump += ";\n";
-      return true;
-    });
+    for (auto &s : expr.get_statements ())
+      {
+	dump += indent ();
+	s->accept_vis (*this);
+	dump += ";\n";
+      }
 
     if (expr.has_expr ())
       {
@@ -141,7 +150,7 @@ public:
 
   void visit (HIR::LiteralExpr &expr) override
   {
-    dump += expr.get_literal ()->as_string () + ":"
+    dump += expr.get_literal ().as_string () + ":"
 	    + type_string (expr.get_mappings ());
   }
 
@@ -162,11 +171,11 @@ public:
 
   void visit (HIR::ArrayElemsValues &elems) override
   {
-    elems.iterate ([&] (HIR::Expr *e) mutable -> bool {
-      e->accept_vis (*this);
-      dump += ",";
-      return true;
-    });
+    for (auto &elem : elems.get_values ())
+      {
+	elem->accept_vis (*this);
+	dump += ",";
+      }
   }
 
   void visit (HIR::GroupedExpr &expr) override

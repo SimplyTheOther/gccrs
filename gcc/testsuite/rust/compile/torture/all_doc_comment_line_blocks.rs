@@ -9,39 +9,37 @@
 
 /// outer doc line for module
 /** outer doc block for module               */
-pub mod module
-{
-  //!  inner line doc
-  //!! inner line doc!
-  /*!  inner block doc  */
-  /*!! inner block doc! */
+pub mod module {
+    //!  inner line doc
+    //!! inner line doc!
+    /*!  inner block doc  */
+    /*!! inner block doc! */
 
-  //   line comment
-  ///  outer line doc
-  //// line comment
+    //   line comment
+    ///  outer line doc
+    //// line comment
 
-  /*   block comment   */
-  /**  outer block doc */
-  /*** block comment   */
+    /*   block comment   */
+    /**  outer block doc */
+    /*** block comment   */
 
-  mod block_doc_comments
-  {
-    /*   /* */  /** */  /*! */  */
-    /*!  /* */  /** */  /*! */  */
-    /**  /* */  /** */  /*! */  */
-    mod item { }
-  }
+    mod block_doc_comments {
+        /*   /* */  /** */  /*! */  */
+        /*!  /* */  /** */  /*! */  */
+        /**  /* */  /** */  /*! */  */
+        mod item {}
+    }
 
-  pub mod empty
-  {
-    //!
-    /*!*/
-    //
+    pub mod empty {
+        //!
+        /*!*/
+        //
 
-    ///
-    mod doc { }
-    /**/
-    /***/
-  }
+        ///
+        // the following warning is issued one line earlier
+        mod doc {}
+        /**/
+        /***/
+    }
 }
-pub fn main () { }
+pub fn main() {}

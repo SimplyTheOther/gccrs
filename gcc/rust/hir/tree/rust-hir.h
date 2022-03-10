@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -32,7 +32,15 @@ typedef int TupleIndex;
 
 namespace HIR {
 // foward decl: ast visitor
-class HIRVisitor;
+class HIRFullVisitor;
+class HIRStmtVisitor;
+class HIRTraitItemVisitor;
+class HIRExternalItemVisitor;
+class HIRVisItemVisitor;
+class HIRExpressionVisitor;
+class HIRPatternVisitor;
+class HIRImplVisitor;
+class HIRTypeVisitor;
 
 // forward decl for use in token tree method
 class Token;
@@ -45,10 +53,8 @@ public:
   {
     CHAR,
     STRING,
-    RAW_STRING,
     BYTE,
     BYTE_STRING,
-    RAW_BYTE_STRING,
     INT,
     FLOAT,
     BOOL
@@ -98,15 +104,16 @@ public:
 
   virtual std::string as_string () const = 0;
 
-  virtual void accept_vis (HIRVisitor &vis) = 0;
+  virtual void accept_vis (HIRFullVisitor &vis) = 0;
+  virtual void accept_vis (HIRStmtVisitor &vis) = 0;
 
-  /* HACK: slow way of getting location from base expression through virtual
-   * methods. */
-  virtual Location get_locus_slow () const { return Location (); }
+  virtual Location get_locus () const = 0;
 
   virtual bool is_unit_check_needed () const { return false; }
 
   const Analysis::NodeMapping &get_mappings () const { return mappings; }
+
+  virtual bool is_item () const = 0;
 
 protected:
   Stmt (Analysis::NodeMapping mappings) : mappings (std::move (mappings)) {}
@@ -131,7 +138,7 @@ public:
     return std::unique_ptr<Item> (clone_item_impl ());
   }
 
-  std::string as_string () const;
+  std::string as_string () const override;
 
   /* Adds crate names to the vector passed by reference, if it can
    * (polymorphism). */
@@ -139,10 +146,10 @@ public:
   add_crate_name (std::vector<std::string> &names ATTRIBUTE_UNUSED) const
   {}
 
-  virtual void accept_vis (HIRVisitor &vis ATTRIBUTE_UNUSED) {}
-
   AST::AttrVec &get_outer_attrs () { return outer_attrs; }
   const AST::AttrVec &get_outer_attrs () const { return outer_attrs; }
+
+  bool is_item () const override final { return true; }
 
 protected:
   // Constructor
@@ -166,12 +173,46 @@ class ExprWithoutBlock;
 // Base expression HIR node - abstract
 class Expr
 {
-  // TODO: move outer attribute data to derived classes?
   AST::AttrVec outer_attrs;
-
   Analysis::NodeMapping mappings;
 
 public:
+  enum BlockType
+  {
+    WITH_BLOCK,
+    WITHOUT_BLOCK,
+  };
+
+  enum ExprType
+  {
+    Lit,
+    Operator,
+    Grouped,
+    Array,
+    ArrayIndex,
+    Tuple,
+    TupleIdx,
+    Struct,
+    Call,
+    MethodCall,
+    FieldAccess,
+    Closure,
+    Block,
+    Continue,
+    Break,
+    Range,
+    Return,
+    UnsafeBlock,
+    BaseLoop,
+    If,
+    IfLet,
+    Match,
+    Await,
+    AsyncBlock,
+    Ident,
+    Path,
+  };
+
   const AST::AttrVec &get_outer_attrs () const { return outer_attrs; }
 
   // Unique pointer custom clone function
@@ -179,11 +220,6 @@ public:
   {
     return std::unique_ptr<Expr> (clone_expr_impl ());
   }
-
-  /* TODO: public methods that could be useful:
-   *  - get_type() - returns type of expression. set_type() may also be useful
-   * for some?
-   *  - evaluate() - evaluates expression if constant? can_evaluate()? */
 
   /* HACK: downcasting without dynamic_cast (if possible) via polymorphism -
    * overrided in subclasses of ExprWithoutBlock */
@@ -194,19 +230,19 @@ public:
 
   virtual ~Expr () {}
 
-  /* HACK: slow way of getting location from base expression through virtual
-   * methods. */
-  virtual Location get_locus_slow () const { return Location (); }
-
-  // HACK: strictly not needed, but faster than full downcast clone
-  virtual bool is_expr_without_block () const = 0;
-
-  virtual void accept_vis (HIRVisitor &vis) = 0;
+  virtual Location get_locus () const = 0;
 
   const Analysis::NodeMapping &get_mappings () const { return mappings; }
 
   // Clone function implementation as pure virtual method
   virtual Expr *clone_expr_impl () const = 0;
+
+  virtual BlockType get_block_expr_type () const = 0;
+
+  virtual ExprType get_expression_type () const = 0;
+
+  virtual void accept_vis (HIRExpressionVisitor &vis) = 0;
+  virtual void accept_vis (HIRFullVisitor &vis) = 0;
 
 protected:
   // Constructor
@@ -244,8 +280,6 @@ protected:
     return clone_expr_without_block_impl ();
   }
 
-  bool is_expr_without_block () const final override { return true; };
-
 public:
   // Unique pointer custom clone function
   std::unique_ptr<ExprWithoutBlock> clone_expr_without_block () const
@@ -259,6 +293,11 @@ public:
   {
     return clone_expr_without_block_impl ();
   }
+
+  BlockType get_block_expr_type () const final override
+  {
+    return BlockType::WITHOUT_BLOCK;
+  };
 };
 
 /* HACK: IdentifierExpr, delete when figure out identifier vs expr problem in
@@ -284,10 +323,10 @@ public:
     return "( " + ident + " (" + get_mappings ().as_string () + "))";
   }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRExpressionVisitor &vis) override;
 
   // Clones this object.
   std::unique_ptr<IdentifierExpr> clone_identifier_expr () const
@@ -296,6 +335,11 @@ public:
   }
 
   Identifier get_identifier () const { return ident; }
+
+  ExprType get_expression_type () const final override
+  {
+    return ExprType::Ident;
+  }
 
 protected:
   // Clone method implementation
@@ -317,6 +361,21 @@ protected:
 class Pattern
 {
 public:
+  enum PatternType
+  {
+    PATH,
+    LITERAL,
+    IDENTIFIER,
+    WILDCARD,
+    RANGE,
+    REFERENCE,
+    STRUCT,
+    TUPLE_STRUCT,
+    TUPLE,
+    GROUPED,
+    SLICE,
+  };
+
   // Unique pointer custom clone function
   std::unique_ptr<Pattern> clone_pattern () const
   {
@@ -329,7 +388,14 @@ public:
 
   virtual std::string as_string () const = 0;
 
-  virtual void accept_vis (HIRVisitor &vis) = 0;
+  virtual void accept_vis (HIRFullVisitor &vis) = 0;
+  virtual void accept_vis (HIRPatternVisitor &vis) = 0;
+
+  virtual Analysis::NodeMapping get_pattern_mappings () const = 0;
+
+  virtual Location get_locus () const = 0;
+
+  virtual PatternType get_pattern_type () const = 0;
 
 protected:
   // Clone pattern implementation as pure virtual method
@@ -363,7 +429,8 @@ public:
   /* as pointer, shouldn't require definition beforehand, only forward
    * declaration. */
 
-  virtual void accept_vis (HIRVisitor &vis) = 0;
+  virtual void accept_vis (HIRFullVisitor &vis) = 0;
+  virtual void accept_vis (HIRTypeVisitor &vis) = 0;
 
   virtual Analysis::NodeMapping get_mappings () const { return mappings; }
 
@@ -422,11 +489,11 @@ public:
 
   virtual std::string as_string () const = 0;
 
-  virtual void accept_vis (HIRVisitor &vis) = 0;
+  virtual void accept_vis (HIRFullVisitor &vis) = 0;
 
   virtual Analysis::NodeMapping get_mappings () const = 0;
 
-  virtual Location get_locus_slow () const = 0;
+  virtual Location get_locus () const = 0;
 
   virtual BoundType get_bound_type () const = 0;
 
@@ -467,7 +534,7 @@ public:
 
   std::string as_string () const override;
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
 
   std::string get_name () const { return lifetime_name; }
 
@@ -476,14 +543,12 @@ public:
     return lifetime_type;
   }
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   Analysis::NodeMapping get_mappings () const override final
   {
     return mappings;
   }
-
-  Location get_locus_slow () const override final { return get_locus (); }
 
   BoundType get_bound_type () const final override { return LIFETIME; }
 
@@ -520,9 +585,9 @@ public:
 
   virtual std::string as_string () const = 0;
 
-  virtual void accept_vis (HIRVisitor &vis) = 0;
+  virtual void accept_vis (HIRFullVisitor &vis) = 0;
 
-  virtual Location get_locus_slow () const = 0;
+  virtual Location get_locus () const = 0;
 
   Analysis::NodeMapping get_mappings () const { return mappings; }
 
@@ -607,11 +672,9 @@ public:
 
   std::string as_string () const override;
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
 
-  Location get_locus () const { return locus; }
-
-  Location get_locus_slow () const override final { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -625,6 +688,14 @@ protected:
 // Item used in trait declarations - abstract base class
 class TraitItem
 {
+public:
+  enum TraitItemKind
+  {
+    FUNC,
+    CONST,
+    TYPE
+  };
+
 protected:
   // Constructor
   TraitItem (Analysis::NodeMapping mappings) : mappings (mappings) {}
@@ -644,18 +715,29 @@ public:
 
   virtual std::string as_string () const = 0;
 
-  virtual void accept_vis (HIRVisitor &vis) = 0;
+  virtual void accept_vis (HIRTraitItemVisitor &vis) = 0;
+  virtual void accept_vis (HIRFullVisitor &vis) = 0;
 
-  const Analysis::NodeMapping &get_mappings () const { return mappings; }
+  virtual const std::string trait_identifier () const = 0;
+
+  const Analysis::NodeMapping get_mappings () const { return mappings; }
+
+  virtual TraitItemKind get_item_kind () const = 0;
+
+  virtual AST::AttrVec &get_outer_attrs () = 0;
+  virtual const AST::AttrVec &get_outer_attrs () const = 0;
 };
 
 class ImplItem
 {
-protected:
-  // Clone function implementation as pure virtual method
-  virtual ImplItem *clone_inherent_impl_item_impl () const = 0;
-
 public:
+  enum ImplItemType
+  {
+    FUNCTION,
+    TYPE_ALIAS,
+    CONSTANT
+  };
+
   virtual ~ImplItem () {}
 
   // Unique pointer custom clone function
@@ -666,11 +748,19 @@ public:
 
   virtual std::string as_string () const = 0;
 
-  virtual void accept_vis (HIRVisitor &vis) = 0;
+  virtual void accept_vis (HIRImplVisitor &vis) = 0;
+  virtual void accept_vis (HIRFullVisitor &vis) = 0;
+  virtual void accept_vis (HIRStmtVisitor &vis) = 0;
 
   virtual Analysis::NodeMapping get_impl_mappings () const = 0;
 
-  virtual Location get_impl_locus () const = 0;
+  virtual Location get_locus () const = 0;
+
+  virtual ImplItemType get_impl_item_type () const = 0;
+
+protected:
+  // Clone function implementation as pure virtual method
+  virtual ImplItem *clone_inherent_impl_item_impl () const = 0;
 };
 
 // A crate HIR object - holds all the data for a single compilation unit
@@ -735,13 +825,16 @@ protected:
   {}
 
 public:
-  // TODO: think of a better and less hacky way to allow this
-
   /* Replaces the outer attributes of this path expression with the given outer
    * attributes. */
   void replace_outer_attrs (AST::AttrVec outer_attrs)
   {
     set_outer_attrs (std::move (outer_attrs));
+  }
+
+  ExprType get_expression_type () const final override
+  {
+    return ExprType::Path;
   }
 };
 } // namespace HIR

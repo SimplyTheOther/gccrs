@@ -1,4 +1,4 @@
-// Copyright (C) 2021 Free Software Foundation, Inc.
+// Copyright (C) 2021-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -81,23 +81,25 @@ public:
     HirId hirId = stct.get_mappings ().get_hirid ();
     if (should_warn (hirId))
       {
-	rust_warning_at (stct.get_locus (), 0,
-			 "struct is never constructed: %<%s%>",
-			 stct.get_identifier ().c_str ());
+	bool name_starts_underscore = stct.get_identifier ().at (0) == '_';
+	if (!name_starts_underscore)
+	  rust_warning_at (stct.get_locus (), 0,
+			   "struct is never constructed: %<%s%>",
+			   stct.get_identifier ().c_str ());
       }
     else
       {
 	// only warn the unused fields when in unwarned struct.
-	stct.iterate ([&] (HIR::StructField &field) -> bool {
-	  HirId field_hir_id = field.get_mappings ().get_hirid ();
-	  if (should_warn (field_hir_id))
-	    {
-	      rust_warning_at (field.get_locus (), 0,
-			       "field is never read: %<%s%>",
-			       field.get_field_name ().c_str ());
-	    }
-	  return true;
-	});
+	for (auto &field : stct.get_fields ())
+	  {
+	    HirId field_hir_id = field.get_mappings ().get_hirid ();
+	    if (should_warn (field_hir_id))
+	      {
+		rust_warning_at (field.get_locus (), 0,
+				 "field is never read: %<%s%>",
+				 field.get_field_name ().c_str ());
+	      }
+	  }
       }
   }
 
@@ -122,6 +124,12 @@ public:
 	    implItem->accept_vis (*this);
 	  }
       }
+  }
+
+  void visit (HIR::Module &mod) override
+  {
+    for (auto &item : mod.get_items ())
+      item->accept_vis (*this);
   }
 
 private:

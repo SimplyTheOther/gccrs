@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -37,9 +37,12 @@ public:
     : Stmt (std::move (mappings)), locus (locus)
   {}
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRStmtVisitor &vis) override;
+
+  bool is_item () const override final { return false; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -109,17 +112,18 @@ public:
   LetStmt (LetStmt &&other) = default;
   LetStmt &operator= (LetStmt &&other) = default;
 
-  Location get_locus_slow () const override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
-  Location get_locus () const { return locus; }
-
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRStmtVisitor &vis) override;
 
   HIR::Type *get_type () { return type.get (); }
 
   HIR::Expr *get_init_expr () { return init_expr.get (); }
 
   HIR::Pattern *get_pattern () { return variables_pattern.get (); }
+
+  bool is_item () const override final { return false; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -136,7 +140,9 @@ class ExprStmt : public Stmt
   Location locus;
 
 public:
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
+
+  bool is_item () const override final { return false; }
 
 protected:
   ExprStmt (Analysis::NodeMapping mappings, Location locus)
@@ -176,7 +182,8 @@ public:
   ExprStmtWithoutBlock (ExprStmtWithoutBlock &&other) = default;
   ExprStmtWithoutBlock &operator= (ExprStmtWithoutBlock &&other) = default;
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRStmtVisitor &vis) override;
 
   Expr *get_expr () { return expr.get (); }
 
@@ -223,7 +230,8 @@ public:
   ExprStmtWithBlock (ExprStmtWithBlock &&other) = default;
   ExprStmtWithBlock &operator= (ExprStmtWithBlock &&other) = default;
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRStmtVisitor &vis) override;
 
   ExprWithBlock *get_expr () { return expr.get (); }
 

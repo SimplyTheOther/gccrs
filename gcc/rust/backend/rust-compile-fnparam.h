@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -24,51 +24,66 @@
 namespace Rust {
 namespace Compile {
 
-class CompileFnParam : public HIRCompileBase
+class CompileFnParam : public HIRCompileBase, public HIR::HIRPatternVisitor
 {
-  using Rust::Compile::HIRCompileBase::visit;
-
 public:
-  static Bvariable *compile (Context *ctx, Bfunction *fndecl,
-			     HIR::FunctionParam *param, Btype *decl_type,
+  static Bvariable *compile (Context *ctx, tree fndecl,
+			     HIR::FunctionParam *param, tree decl_type,
 			     Location locus)
   {
     CompileFnParam compiler (ctx, fndecl, decl_type, locus);
     param->get_param_name ()->accept_vis (compiler);
-    return compiler.translated;
+    return compiler.compiled_param;
   }
 
   void visit (HIR::IdentifierPattern &pattern) override
   {
-    if (!pattern.is_mut)
+    if (!pattern.is_mut ())
       decl_type = ctx->get_backend ()->immutable_type (decl_type);
 
-    translated
-      = ctx->get_backend ()->parameter_variable (fndecl, pattern.variable_ident,
-						 decl_type,
-						 false /* address_taken */,
-						 locus);
+    compiled_param
+      = ctx->get_backend ()->parameter_variable (fndecl,
+						 pattern.get_identifier (),
+						 decl_type, locus);
   }
 
+  void visit (HIR::WildcardPattern &pattern) override
+  {
+    decl_type = ctx->get_backend ()->immutable_type (decl_type);
+
+    compiled_param
+      = ctx->get_backend ()->parameter_variable (fndecl, "_", decl_type, locus);
+  }
+
+  // Empty visit for unused Pattern HIR nodes.
+  void visit (HIR::GroupedPattern &) override {}
+  void visit (HIR::LiteralPattern &) override {}
+  void visit (HIR::PathInExpression &) override {}
+  void visit (HIR::QualifiedPathInExpression &) override {}
+  void visit (HIR::RangePattern &) override {}
+  void visit (HIR::ReferencePattern &) override {}
+  void visit (HIR::SlicePattern &) override {}
+  void visit (HIR::StructPattern &) override {}
+  void visit (HIR::TuplePattern &) override {}
+  void visit (HIR::TupleStructPattern &) override {}
+
 private:
-  CompileFnParam (Context *ctx, ::Bfunction *fndecl, ::Btype *decl_type,
-		  Location locus)
+  CompileFnParam (Context *ctx, tree fndecl, tree decl_type, Location locus)
     : HIRCompileBase (ctx), fndecl (fndecl), decl_type (decl_type),
-      locus (locus), translated (nullptr)
+      locus (locus), compiled_param (ctx->get_backend ()->error_variable ())
   {}
 
-  ::Bfunction *fndecl;
-  ::Btype *decl_type;
+  tree fndecl;
+  tree decl_type;
   Location locus;
-  ::Bvariable *translated;
+  Bvariable *compiled_param;
 };
 
-class CompileSelfParam : public HIRCompileBase
+class CompileSelfParam : public HIRCompileBase, public HIR::HIRStmtVisitor
 {
 public:
-  static Bvariable *compile (Context *ctx, Bfunction *fndecl,
-			     HIR::SelfParam &self, Btype *decl_type,
-			     Location locus)
+  static Bvariable *compile (Context *ctx, tree fndecl, HIR::SelfParam &self,
+			     tree decl_type, Location locus)
   {
     bool is_immutable
       = self.get_self_kind () == HIR::SelfParam::ImplicitSelfKind::IMM
@@ -77,7 +92,6 @@ public:
       decl_type = ctx->get_backend ()->immutable_type (decl_type);
 
     return ctx->get_backend ()->parameter_variable (fndecl, "self", decl_type,
-						    false /* address_taken */,
 						    locus);
   }
 };

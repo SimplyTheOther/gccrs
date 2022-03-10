@@ -1,5 +1,5 @@
 ;; ARM Thumb-1 Machine Description
-;; Copyright (C) 2007-2021 Free Software Foundation, Inc.
+;; Copyright (C) 2007-2022 Free Software Foundation, Inc.
 ;;
 ;; This file is part of GCC.
 ;;
@@ -57,7 +57,7 @@
 
 ;; Changes to the constraints of this pattern must be propagated to those of
 ;; atomic additions in sync.md and to the logic for bind_old_new in
-;; arm_split_atomic_op in arm.c.  These must be at least as strict as the
+;; arm_split_atomic_op in arm.cc.  These must be at least as strict as the
 ;; constraints here and aim to be as permissive.
 (define_insn_and_split "*thumb1_addsi3"
   [(set (match_operand:SI          0 "register_operand" "=l,l,l,*rk,*hk,l,k,l,l,l")
@@ -137,7 +137,7 @@
 
 ;; Changes to the constraints of this pattern must be propagated to those of
 ;; atomic subtractions in sync.md and to the logic for bind_old_new in
-;; arm_split_atomic_op in arm.c.  These must be at least as strict as the
+;; arm_split_atomic_op in arm.cc.  These must be at least as strict as the
 ;; constraints here and aim to be as permissive.
 (define_insn "thumb1_subsi3_insn"
   [(set (match_operand:SI           0 "register_operand" "=l")
@@ -183,7 +183,7 @@
 
 ;; Changes to the constraints of this pattern must be propagated to those of
 ;; atomic bitwise ANDs and NANDs in sync.md and to the logic for bind_old_new
-;; in arm_split_atomic_op in arm.c.  These must be at least as strict as the
+;; in arm_split_atomic_op in arm.cc.  These must be at least as strict as the
 ;; constraints here and aim to be as permissive.
 (define_insn "*thumb1_andsi3_insn"
   [(set (match_operand:SI         0 "register_operand" "=l")
@@ -241,7 +241,7 @@
 
 ;; Changes to the constraints of this pattern must be propagated to those of
 ;; atomic inclusive ORs in sync.md and to the logic for bind_old_new in
-;; arm_split_atomic_op in arm.c.  These must be at least as strict as the
+;; arm_split_atomic_op in arm.cc.  These must be at least as strict as the
 ;; constraints here and aim to be as permissive.
 (define_insn "*thumb1_iorsi3_insn"
   [(set (match_operand:SI         0 "register_operand" "=l")
@@ -255,7 +255,7 @@
 
 ;; Changes to the constraints of this pattern must be propagated to those of
 ;; atomic exclusive ORs in sync.md and to the logic for bind_old_new in
-;; arm_split_atomic_op in arm.c.  These must be at least as strict as the
+;; arm_split_atomic_op in arm.cc.  These must be at least as strict as the
 ;; constraints here and aim to be as permissive.
 (define_insn "*thumb1_xorsi3_insn"
   [(set (match_operand:SI         0 "register_operand" "=l")
@@ -1204,6 +1204,21 @@
 		(const_int 6)
 		(const_int 8))))
    (set_attr "type" "multiple")]
+)
+
+;; An expander which makes use of the cbranchsi4_scratch insn, but can
+;; be used safely after RA.
+(define_expand "cbranchsi4_neg_late"
+  [(parallel [
+     (set (pc) (if_then_else
+		(match_operator 4 "arm_comparison_operator"
+		 [(match_operand:SI 1 "s_register_operand")
+		  (match_operand:SI 2 "thumb1_cmpneg_operand")])
+		(label_ref (match_operand 3 "" ""))
+		(pc)))
+     (clobber (match_operand:SI 0 "s_register_operand"))
+  ])]
+  "TARGET_THUMB1"
 )
 
 ;; Changes to the constraints of this pattern must be propagated to those of

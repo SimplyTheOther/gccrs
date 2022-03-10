@@ -1,4 +1,4 @@
-// Copyright (C) 2016-2021 Free Software Foundation, Inc.
+// Copyright (C) 2016-2022 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -48,6 +48,3 @@ test01()
   sa.construct(p);  // this is required to be ill-formed
   // { dg-error "failed: .* uses_allocator is true" "" { target *-*-* } 0 }
 }
-
-// Needed because of PR c++/92193
-// { dg-prune-output "no matching function for call to" }

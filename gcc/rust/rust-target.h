@@ -1,5 +1,5 @@
 /* rust-target.h -- Data structure definitions for target-specific Rust
-   behavior. Copyright (C) 2020 Free Software Foundation, Inc.
+   behavior. Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
    This program is free software; you can redistribute it and/or modify it
    under the terms of the GNU General Public License as published by the
@@ -18,9 +18,14 @@
 #ifndef GCC_RUST_TARGET_H
 #define GCC_RUST_TARGET_H
 
+#include "target.h"
+#include "tm.h"
+#include "memmodel.h"
+#include "tm_p.h"
+
 // TODO: find out what this stuff actually does
 #define DEFHOOKPOD(NAME, DOC, TYPE, INIT) TYPE NAME;
-#define DEFHOOK(NAME, DOC, TYPE, PARAMS, INIT) TYPE (*NAME) PARAMS;
+// #define DEFHOOK(NAME, DOC, TYPE, PARAMS, INIT) TYPE (*NAME) PARAMS;
 #define DEFHOOK_UNDOC DEFHOOK
 #define HOOKSTRUCT(FRAGMENT) FRAGMENT
 

@@ -1,5 +1,5 @@
 /* d-diagnostics.cc -- D frontend interface to gcc diagnostics.
-   Copyright (C) 2017-2021 Free Software Foundation, Inc.
+   Copyright (C) 2017-2022 Free Software Foundation, Inc.
 
 GCC is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -48,7 +48,7 @@ expand_d_format (const char *format)
 
   for (const char *p = format; *p;)
     {
-      while (*p != '\0' && *p != '%' && *p != '`')
+      while (*p != '\0' && *p != '\\' && *p != '%' && *p != '`')
 	{
 	  obstack_1grow (&buf, *p);
 	  p++;
@@ -56,6 +56,21 @@ expand_d_format (const char *format)
 
       if (*p == '\0')
 	break;
+
+      if (*p == '\\')
+	{
+	  if (p[1] == '`')
+	    {
+	      /* Escaped backtick, don't expand it as a quoted string.  */
+	      obstack_1grow (&buf, '`');
+	      p++;;
+	    }
+	  else
+	    obstack_1grow (&buf, *p);
+
+	  p++;
+	  continue;
+	}
 
       if (*p == '`')
 	{
@@ -114,6 +129,55 @@ expand_d_format (const char *format)
   return (char *) obstack_finish (&buf);
 }
 
+/* Rewrite the format string FORMAT to deal with any characters that require
+   escaping before expand_d_format expands it.  */
+
+static char *
+escape_d_format (const char *format)
+{
+  bool quoted = false;
+  size_t format_len = 0;
+  obstack buf;
+
+  gcc_obstack_init (&buf);
+
+  /* If the format string is enclosed by two '`' characters, then don't escape
+     the first and last characters.  */
+  if (*format == '`')
+    {
+      format_len = strlen (format) - 1;
+      if (format_len && format[format_len] == '`')
+	quoted = true;
+    }
+
+  for (const char *p = format; *p; p++)
+    {
+      switch (*p)
+	{
+	case '%':
+	  /* Escape `%' characters so that pp_format does not confuse them
+	     for actual format specifiers.  */
+	  obstack_1grow (&buf, '%');
+	  break;
+
+	case '`':
+	  /* Escape '`' characters so that expand_d_format does not confuse them
+	     for a quoted string.  */
+	  if (!quoted || (p != format && p != (format + format_len)))
+	    obstack_1grow (&buf, '\\');
+	  break;
+
+	default:
+	  break;
+	}
+
+      obstack_1grow (&buf, *p);
+    }
+
+  obstack_1grow (&buf, '\0');
+  return (char *) obstack_finish (&buf);
+}
+
 /* Helper routine for all error routines.  Reports a diagnostic specified by
    KIND at the explicit location LOC.  The message FORMAT comes from the dmd
    front-end, which does not get translated by the gcc diagnostic routines.  */
@@ -158,15 +222,6 @@ d_diagnostic_report_diagnostic (const Loc &loc, int opt, const char *format,
    message prefix PREFIX1 and PREFIX2, increasing the global or gagged
    error count.  */
 
-void ATTRIBUTE_GCC_DIAG(2,3)
-error (const Loc &loc, const char *format, ...)
-{
-  va_list ap;
-  va_start (ap, format);
-  verror (loc, format, ap);
-  va_end (ap);
-}
-
 void ATTRIBUTE_GCC_DIAG(2,0)
 verror (const Loc &loc, const char *format, va_list ap,
 	const char *prefix1, const char *prefix2, const char *)
@@ -177,9 +232,10 @@ verror (const Loc &loc, const char *format, va_list ap,
 
       /* Build string and emit.  */
       if (prefix2 != NULL)
-	xformat = xasprintf ("%s %s %s", prefix1, prefix2, format);
+	xformat = xasprintf ("%s %s %s", escape_d_format (prefix1),
+			     escape_d_format (prefix2), format);
       else if (prefix1 != NULL)
-	xformat = xasprintf ("%s %s", prefix1, format);
+	xformat = xasprintf ("%s %s", escape_d_format (prefix1), format);
       else
 	xformat = xasprintf ("%s", format);
 
@@ -198,15 +254,6 @@ verror (const Loc &loc, const char *format, va_list ap,
 /* Print supplementary message about the last error with explicit location LOC.
    This doesn't increase the global error count.  */
 
-void ATTRIBUTE_GCC_DIAG(2,3)
-errorSupplemental (const Loc &loc, const char *format, ...)
-{
-  va_list ap;
-  va_start (ap, format);
-  verrorSupplemental (loc, format, ap);
-  va_end (ap);
-}
-
 void ATTRIBUTE_GCC_DIAG(2,0)
 verrorSupplemental (const Loc &loc, const char *format, va_list ap)
 {
@@ -219,15 +266,6 @@ verrorSupplemental (const Loc &loc, const char *format, va_list ap)
 /* Print a warning message with explicit location LOC, increasing the
    global warning count.  */
 
-void ATTRIBUTE_GCC_DIAG(2,3)
-warning (const Loc &loc, const char *format, ...)
-{
-  va_list ap;
-  va_start (ap, format);
-  vwarning (loc, format, ap);
-  va_end (ap);
-}
-
 void ATTRIBUTE_GCC_DIAG(2,0)
 vwarning (const Loc &loc, const char *format, va_list ap)
 {
@@ -239,19 +277,12 @@ vwarning (const Loc &loc, const char *format, va_list ap)
 
       d_diagnostic_report_diagnostic (loc, 0, format, ap, DK_WARNING, false);
     }
+  else if (global.gag)
+    global.gaggedWarnings++;
 }
 
 /* Print supplementary message about the last warning with explicit location
    LOC.  This doesn't increase the global warning count.  */
-
-void ATTRIBUTE_GCC_DIAG(2,3)
-warningSupplemental (const Loc &loc, const char *format, ...)
-{
-  va_list ap;
-  va_start (ap, format);
-  vwarningSupplemental (loc, format, ap);
-  va_end (ap);
-}
 
 void ATTRIBUTE_GCC_DIAG(2,0)
 vwarningSupplemental (const Loc &loc, const char *format, va_list ap)
@@ -266,15 +297,6 @@ vwarningSupplemental (const Loc &loc, const char *format, va_list ap)
    message prefix PREFIX1 and PREFIX2, increasing the global warning or
    error count depending on how deprecations are treated.  */
 
-void ATTRIBUTE_GCC_DIAG(2,3)
-deprecation (const Loc &loc, const char *format, ...)
-{
-  va_list ap;
-  va_start (ap, format);
-  vdeprecation (loc, format, ap);
-  va_end (ap);
-}
-
 void ATTRIBUTE_GCC_DIAG(2,0)
 vdeprecation (const Loc &loc, const char *format, va_list ap,
 	      const char *prefix1, const char *prefix2)
@@ -287,9 +309,10 @@ vdeprecation (const Loc &loc, const char *format, va_list ap,
 
       /* Build string and emit.  */
       if (prefix2 != NULL)
-	xformat = xasprintf ("%s %s %s", prefix1, prefix2, format);
+	xformat = xasprintf ("%s %s %s", escape_d_format (prefix1),
+			     escape_d_format (prefix2), format);
       else if (prefix1 != NULL)
-	xformat = xasprintf ("%s %s", prefix1, format);
+	xformat = xasprintf ("%s %s", escape_d_format (prefix1), format);
       else
 	xformat = xasprintf ("%s", format);
 
@@ -297,19 +320,12 @@ vdeprecation (const Loc &loc, const char *format, va_list ap,
 				      DK_WARNING, false);
       free (xformat);
     }
+  else if (global.gag)
+    global.gaggedWarnings++;
 }
 
 /* Print supplementary message about the last deprecation with explicit
    location LOC.  This does not increase the global error count.  */
-
-void ATTRIBUTE_GCC_DIAG(2,3)
-deprecationSupplemental (const Loc &loc, const char *format, ...)
-{
-  va_list ap;
-  va_start (ap, format);
-  vdeprecationSupplemental (loc, format, ap);
-  va_end (ap);
-}
 
 void ATTRIBUTE_GCC_DIAG(2,0)
 vdeprecationSupplemental (const Loc &loc, const char *format, va_list ap)
@@ -322,30 +338,19 @@ vdeprecationSupplemental (const Loc &loc, const char *format, va_list ap)
 
 /* Print a verbose message with explicit location LOC.  */
 
-void ATTRIBUTE_GCC_DIAG(2, 3)
-message (const Loc &loc, const char *format, ...)
-{
-  va_list ap;
-  va_start (ap, format);
-  vmessage (loc, format, ap);
-  va_end (ap);
-}
-
 void ATTRIBUTE_GCC_DIAG(2,0)
 vmessage (const Loc &loc, const char *format, va_list ap)
 {
   d_diagnostic_report_diagnostic (loc, 0, format, ap, DK_NOTE, true);
 }
 
-/* Same as above, but doesn't take a location argument.  */
+/* Print a tip message with prefix and highlighing.  */
 
-void ATTRIBUTE_GCC_DIAG(1, 2)
-message (const char *format, ...)
+void ATTRIBUTE_GCC_DIAG(1,0)
+vtip (const char *format, va_list ap)
 {
-  va_list ap;
-  va_start (ap, format);
-  vmessage (Loc (), format, ap);
-  va_end (ap);
+  if (!global.gag)
+    d_diagnostic_report_diagnostic (Loc (), 0, format, ap, DK_DEBUG, true);
 }
 
 /* Call this after printing out fatal error messages to clean up and

@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -19,6 +19,7 @@
 #include "rust-hir-map.h"
 #include "rust-ast-full.h"
 #include "rust-hir-full.h"
+#include "rust-macro-builtins.h"
 
 namespace Rust {
 namespace Analysis {
@@ -63,7 +64,7 @@ NodeMapping::get_defid () const
 DefId
 NodeMapping::get_defid (CrateNum crate_num, LocalDefId local_defid)
 {
-  return ((uint64_t) crate_num << 32) | local_defid;
+  return DefId{crate_num, local_defid};
 }
 
 std::string
@@ -138,7 +139,10 @@ NodeId
 Mappings::get_next_node_id (CrateNum crateNum)
 {
   auto it = nodeIdIter.find (crateNum);
-  rust_assert (it != nodeIdIter.end ());
+  // We're probably *not* parsing actual rust code... but mostly reusing
+  // the parser in another way. Return 0
+  if (it == nodeIdIter.end ())
+    return 0;
 
   auto id = it->second + 1;
   nodeIdIter[crateNum] = id;
@@ -209,8 +213,8 @@ Mappings::insert_hir_crate (HIR::Crate *crate)
 void
 Mappings::insert_defid_mapping (DefId id, HIR::Item *item)
 {
-  CrateNum crate_num = (id & DEF_ID_CRATE_MASK) >> 32;
-  LocalDefId local_def_id = id & DEF_ID_LOCAL_DEF_MASK;
+  CrateNum crate_num = id.crateNum;
+  LocalDefId local_def_id = id.localDefId;
 
   rust_assert (lookup_defid (id) == nullptr);
   rust_assert (lookup_local_defid (crate_num, local_def_id) == nullptr);
@@ -325,6 +329,28 @@ Mappings::lookup_hir_impl_block (CrateNum crateNum, HirId id)
 }
 
 void
+Mappings::insert_module (CrateNum crateNum, HirId id, HIR::Module *module)
+{
+  rust_assert (lookup_module (crateNum, id) == nullptr);
+
+  hirModuleMappings[crateNum][id] = module;
+}
+
+HIR::Module *
+Mappings::lookup_module (CrateNum crateNum, HirId id)
+{
+  auto it = hirModuleMappings.find (crateNum);
+  if (it == hirModuleMappings.end ())
+    return nullptr;
+
+  auto iy = it->second.find (id);
+  if (iy == it->second.end ())
+    return nullptr;
+
+  return iy->second;
+}
+
+void
 Mappings::insert_hir_implitem (CrateNum crateNum, HirId id,
 			       HirId parent_impl_id, HIR::ImplItem *item)
 {
@@ -358,7 +384,7 @@ Mappings::insert_hir_expr (CrateNum crateNum, HirId id, HIR::Expr *expr)
 {
   hirExprMappings[crateNum][id] = expr;
   nodeIdToHirMappings[crateNum][expr->get_mappings ().get_nodeid ()] = id;
-  insert_location (crateNum, id, expr->get_locus_slow ());
+  insert_location (crateNum, id, expr->get_locus ());
 }
 
 HIR::Expr *
@@ -408,7 +434,7 @@ Mappings::insert_hir_generic_param (CrateNum crateNum, HirId id,
 
   hirGenericParamMappings[crateNum][id] = param;
   nodeIdToHirMappings[crateNum][param->get_mappings ().get_nodeid ()] = id;
-  insert_location (crateNum, id, param->get_locus_slow ());
+  insert_location (crateNum, id, param->get_locus ());
 }
 
 HIR::GenericParam *
@@ -534,6 +560,29 @@ Mappings::lookup_hir_struct_field (CrateNum crateNum, HirId id)
 {
   auto it = hirStructFieldMappings.find (crateNum);
   if (it == hirStructFieldMappings.end ())
+    return nullptr;
+
+  auto iy = it->second.find (id);
+  if (iy == it->second.end ())
+    return nullptr;
+
+  return iy->second;
+}
+
+void
+Mappings::insert_hir_pattern (CrateNum crateNum, HirId id,
+			      HIR::Pattern *pattern)
+{
+  hirPatternMappings[crateNum][id] = pattern;
+  nodeIdToHirMappings[crateNum][pattern->get_pattern_mappings ().get_nodeid ()]
+    = id;
+}
+
+HIR::Pattern *
+Mappings::lookup_hir_pattern (CrateNum crateNum, HirId id)
+{
+  auto it = hirPatternMappings.find (crateNum);
+  if (it == hirPatternMappings.end ())
     return nullptr;
 
   auto iy = it->second.find (id);
@@ -672,6 +721,56 @@ Mappings::iterate_impl_blocks (std::function<bool (HirId, HIR::ImplBlock *)> cb)
 	    return;
 	}
     }
+}
+
+void
+Mappings::iterate_trait_items (
+  std::function<bool (HIR::TraitItem *, HIR::Trait *)> cb)
+{
+  for (auto it = hirTraitItemMappings.begin ();
+       it != hirTraitItemMappings.end (); it++)
+    {
+      for (auto iy = it->second.begin (); iy != it->second.end (); iy++)
+	{
+	  HirId trait_item_id = iy->first;
+	  HIR::TraitItem *trait_item = iy->second;
+	  HIR::Trait *trait = lookup_trait_item_mapping (trait_item_id);
+
+	  if (!cb (trait_item, trait))
+	    return;
+	}
+    }
+}
+
+void
+Mappings::insert_macro_def (AST::MacroRulesDefinition *macro)
+{
+  static std::map<std::string, std::function<AST::ASTFragment (
+				 Location, AST::MacroInvocData &)>>
+    builtin_macros = {
+      {"assert", MacroBuiltin::assert},
+      {"file", MacroBuiltin::file},
+    };
+
+  auto builtin = builtin_macros.find (macro->get_rule_name ());
+  if (builtin != builtin_macros.end ())
+    macro->set_builtin_transcriber (builtin->second);
+
+  auto it = macroMappings.find (macro->get_node_id ());
+  rust_assert (it == macroMappings.end ());
+
+  macroMappings[macro->get_node_id ()] = macro;
+}
+
+bool
+Mappings::lookup_macro_def (NodeId id, AST::MacroRulesDefinition **def)
+{
+  auto it = macroMappings.find (id);
+  if (it == macroMappings.end ())
+    return false;
+
+  *def = it->second;
+  return true;
 }
 
 } // namespace Analysis

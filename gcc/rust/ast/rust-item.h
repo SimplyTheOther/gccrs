@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -21,18 +21,18 @@
 
 #include "rust-ast.h"
 #include "rust-path.h"
+#include "rust-common.h"
 
 namespace Rust {
 namespace AST {
 // forward decls
 class BlockExpr;
 class TypePath;
-class MacroInvocationSemi;
 
 // TODO: inline?
 /*struct AbiName {
     std::string abi_name;
-    // Technically is meant to be STRING_LITERAL or RAW_STRING_LITERAL
+    // Technically is meant to be STRING_LITERAL
 
   public:
     // Returns whether abi name is empty, i.e. doesn't exist.
@@ -130,9 +130,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
-
-  Location get_locus_slow () const override final { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -179,6 +177,8 @@ public:
 
   virtual void accept_vis (ASTVisitor &vis) = 0;
 
+  virtual NodeId get_node_id () const = 0;
+
 protected:
   // Clone function implementation as pure virtual method
   virtual WhereClauseItem *clone_where_clause_item_impl () const = 0;
@@ -188,22 +188,30 @@ protected:
 class LifetimeWhereClauseItem : public WhereClauseItem
 {
   Lifetime lifetime;
-
-  // LifetimeBounds lifetime_bounds;
-  std::vector<Lifetime> lifetime_bounds; // inlined lifetime bounds
-
-  // should this store location info?
+  std::vector<Lifetime> lifetime_bounds;
+  Location locus;
+  NodeId node_id;
 
 public:
   LifetimeWhereClauseItem (Lifetime lifetime,
-			   std::vector<Lifetime> lifetime_bounds)
+			   std::vector<Lifetime> lifetime_bounds,
+			   Location locus)
     : lifetime (std::move (lifetime)),
-      lifetime_bounds (std::move (lifetime_bounds))
+      lifetime_bounds (std::move (lifetime_bounds)), locus (locus),
+      node_id (Analysis::Mappings::get ()->get_next_node_id ())
   {}
 
   std::string as_string () const override;
 
   void accept_vis (ASTVisitor &vis) override;
+
+  NodeId get_node_id () const override final { return node_id; }
+
+  Lifetime &get_lifetime () { return lifetime; }
+
+  std::vector<Lifetime> &get_lifetime_bounds () { return lifetime_bounds; }
+
+  Location get_locus () const { return locus; }
 
 protected:
   // Clone function implementation as (not pure) virtual method
@@ -216,18 +224,11 @@ protected:
 // A type bound where clause item
 class TypeBoundWhereClauseItem : public WhereClauseItem
 {
-  // bool has_for_lifetimes;
-  // LifetimeParams for_lifetimes;
-  std::vector<LifetimeParam> for_lifetimes; // inlined
-
+  std::vector<LifetimeParam> for_lifetimes;
   std::unique_ptr<Type> bound_type;
-
-  // bool has_type_param_bounds;
-  // TypeParamBounds type_param_bounds;
-  std::vector<std::unique_ptr<TypeParamBound>>
-    type_param_bounds; // inlined form
-
-  // should this store location info?
+  std::vector<std::unique_ptr<TypeParamBound>> type_param_bounds;
+  NodeId node_id;
+  Location locus;
 
 public:
   // Returns whether the item has ForLifetimes
@@ -238,10 +239,12 @@ public:
 
   TypeBoundWhereClauseItem (
     std::vector<LifetimeParam> for_lifetimes, std::unique_ptr<Type> bound_type,
-    std::vector<std::unique_ptr<TypeParamBound>> type_param_bounds)
+    std::vector<std::unique_ptr<TypeParamBound>> type_param_bounds,
+    Location locus)
     : for_lifetimes (std::move (for_lifetimes)),
       bound_type (std::move (bound_type)),
-      type_param_bounds (std::move (type_param_bounds))
+      type_param_bounds (std::move (type_param_bounds)),
+      node_id (Analysis::Mappings::get ()->get_next_node_id ()), locus (locus)
   {}
 
   // Copy constructor requires clone
@@ -249,6 +252,7 @@ public:
     : for_lifetimes (other.for_lifetimes),
       bound_type (other.bound_type->clone_type ())
   {
+    node_id = other.node_id;
     type_param_bounds.reserve (other.type_param_bounds.size ());
     for (const auto &e : other.type_param_bounds)
       type_param_bounds.push_back (e->clone_type_param_bound ());
@@ -257,9 +261,9 @@ public:
   // Overload assignment operator to clone
   TypeBoundWhereClauseItem &operator= (TypeBoundWhereClauseItem const &other)
   {
+    node_id = other.node_id;
     for_lifetimes = other.for_lifetimes;
     bound_type = other.bound_type->clone_type ();
-
     type_param_bounds.reserve (other.type_param_bounds.size ());
     for (const auto &e : other.type_param_bounds)
       type_param_bounds.push_back (e->clone_type_param_bound ());
@@ -276,7 +280,6 @@ public:
 
   void accept_vis (ASTVisitor &vis) override;
 
-  // TODO: is this better? Or is a "vis_block" better?
   std::unique_ptr<Type> &get_type ()
   {
     rust_assert (bound_type != nullptr);
@@ -288,11 +291,16 @@ public:
   {
     return type_param_bounds;
   }
+
   const std::vector<std::unique_ptr<TypeParamBound>> &
   get_type_param_bounds () const
   {
     return type_param_bounds;
   }
+
+  NodeId get_node_id () const override final { return node_id; }
+
+  Location get_locus () const { return locus; }
 
 protected:
   // Clone function implementation as (not pure) virtual method
@@ -307,17 +315,18 @@ struct WhereClause
 {
 private:
   std::vector<std::unique_ptr<WhereClauseItem>> where_clause_items;
-
-  // should this store location info?
+  NodeId node_id;
 
 public:
   WhereClause (std::vector<std::unique_ptr<WhereClauseItem>> where_clause_items)
-    : where_clause_items (std::move (where_clause_items))
+    : where_clause_items (std::move (where_clause_items)),
+      node_id (Analysis::Mappings::get ()->get_next_node_id ())
   {}
 
   // copy constructor with vector clone
   WhereClause (WhereClause const &other)
   {
+    node_id = other.node_id;
     where_clause_items.reserve (other.where_clause_items.size ());
     for (const auto &e : other.where_clause_items)
       where_clause_items.push_back (e->clone_where_clause_item ());
@@ -326,6 +335,7 @@ public:
   // overloaded assignment operator with vector clone
   WhereClause &operator= (WhereClause const &other)
   {
+    node_id = other.node_id;
     where_clause_items.reserve (other.where_clause_items.size ());
     for (const auto &e : other.where_clause_items)
       where_clause_items.push_back (e->clone_where_clause_item ());
@@ -347,6 +357,8 @@ public:
   bool is_empty () const { return where_clause_items.empty (); }
 
   std::string as_string () const;
+
+  NodeId get_node_id () const { return node_id; }
 
   // TODO: this mutable getter seems kinda dodgy
   std::vector<std::unique_ptr<WhereClauseItem>> &get_items ()
@@ -472,31 +484,20 @@ public:
 // Qualifiers for function, i.e. const, unsafe, extern etc.
 struct FunctionQualifiers
 {
-public:
-  /* Whether the function is neither const nor async, const only, or async
-   * only. */
-  enum AsyncConstStatus
-  {
-    NONE,
-    CONST,
-    ASYNC
-  };
-
 private:
   AsyncConstStatus const_status;
   bool has_unsafe;
   bool has_extern;
-  std::string extern_abi; // e.g. extern "C" fn() -> i32 {}
-  // TODO: maybe ensure that extern_abi only exists if extern exists?
-
-  // should this store location info?
+  std::string extern_abi;
+  Location locus;
 
 public:
-  FunctionQualifiers (AsyncConstStatus const_status, bool has_unsafe,
-		      bool has_extern = false,
+  FunctionQualifiers (Location locus, AsyncConstStatus const_status,
+		      bool has_unsafe, bool has_extern = false,
 		      std::string extern_abi = std::string ())
     : const_status (const_status), has_unsafe (has_unsafe),
-      has_extern (has_extern), extern_abi (std::move (extern_abi))
+      has_extern (has_extern), extern_abi (std::move (extern_abi)),
+      locus (locus)
   {
     if (!this->extern_abi.empty ())
       {
@@ -506,6 +507,14 @@ public:
   }
 
   std::string as_string () const;
+
+  AsyncConstStatus get_const_status () const { return const_status; }
+  bool is_unsafe () const { return has_unsafe; }
+  bool is_extern () const { return has_extern; }
+  std::string get_extern_abi () const { return extern_abi; }
+  bool has_abi () const { return !extern_abi.empty (); }
+
+  Location get_locus () const { return locus; }
 };
 
 // A function parameter
@@ -688,34 +697,17 @@ protected:
 // A method (function belonging to a type)
 class Method : public InherentImplItem, public TraitImplItem
 {
-  // moved from impl items for consistency
   std::vector<Attribute> outer_attrs;
   Visibility vis;
-
   FunctionQualifiers qualifiers;
   Identifier method_name;
-
-  // bool has_generics;
-  // Generics generic_params;
-  std::vector<std::unique_ptr<GenericParam>> generic_params; // inlined
-
+  std::vector<std::unique_ptr<GenericParam>> generic_params;
   SelfParam self_param;
-
-  // bool has_params;
-  // FunctionParams function_params;
-  std::vector<FunctionParam> function_params; // inlined
-
-  // bool has_return_type;
-  // FunctionReturnType return_type;
-  std::unique_ptr<Type> return_type; // inlined
-
-  // bool has_where_clause;
+  std::vector<FunctionParam> function_params;
+  std::unique_ptr<Type> return_type;
   WhereClause where_clause;
-
   std::unique_ptr<BlockExpr> function_body;
-
   Location locus;
-
   NodeId node_id;
 
 public:
@@ -729,7 +721,7 @@ public:
   // Creates an error state method.
   static Method create_error ()
   {
-    return Method ("", FunctionQualifiers (FunctionQualifiers::NONE, true),
+    return Method ("", FunctionQualifiers (Location (), NONE, true),
 		   std::vector<std::unique_ptr<GenericParam>> (),
 		   SelfParam::create_error (), std::vector<FunctionParam> (),
 		   nullptr, WhereClause::create_empty (), nullptr,
@@ -879,19 +871,15 @@ public:
   }
 
   // TODO: is this better? Or is a "vis_block" better?
-  WhereClause &get_where_clause ()
-  {
-    rust_assert (has_where_clause ());
-    return where_clause;
-  }
+  WhereClause &get_where_clause () { return where_clause; }
 
   Identifier get_method_name () const { return method_name; }
 
   NodeId get_node_id () const { return node_id; }
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
-  Location get_locus_slow () const override { return get_locus (); }
+  FunctionQualifiers get_qualifiers () { return qualifiers; }
 
 protected:
   /* Use covariance to implement clone function as returning this object
@@ -972,15 +960,25 @@ public:
     UNLOADED,
   };
 
+  Identifier get_name () const { return module_name; }
+
 private:
   Identifier module_name;
   Location locus;
   ModuleKind kind;
 
+  // Name of the file including the module
+  std::string outer_filename;
   // bool has_inner_attrs;
   std::vector<Attribute> inner_attrs;
   // bool has_items;
   std::vector<std::unique_ptr<Item>> items;
+  // Names of including inline modules (immediate parent is last in the list)
+  std::vector<std::string> module_scope;
+
+  // Filename the module refers to. Empty string on LOADED modules or if an
+  // error occured when dealing with UNLOADED modules
+  std::string module_file;
 
   void clone_items (const std::vector<std::unique_ptr<Item>> &other_items)
   {
@@ -998,11 +996,13 @@ public:
 
   // Unloaded module constructor
   Module (Identifier module_name, Visibility visibility,
-	  std::vector<Attribute> outer_attrs, Location locus)
+	  std::vector<Attribute> outer_attrs, Location locus,
+	  std::string outer_filename, std::vector<std::string> module_scope)
     : VisItem (std::move (visibility), std::move (outer_attrs)),
       module_name (module_name), locus (locus), kind (ModuleKind::UNLOADED),
-      inner_attrs (std::vector<Attribute> ()),
-      items (std::vector<std::unique_ptr<Item>> ())
+      outer_filename (outer_filename), inner_attrs (std::vector<Attribute> ()),
+      items (std::vector<std::unique_ptr<Item>> ()),
+      module_scope (std::move (module_scope))
   {}
 
   // Loaded module constructor, with items
@@ -1013,13 +1013,15 @@ public:
 	  std::vector<Attribute> outer_attrs = std::vector<Attribute> ())
     : VisItem (std::move (visibility), std::move (outer_attrs)),
       module_name (name), locus (locus), kind (ModuleKind::LOADED),
-      inner_attrs (std::move (inner_attrs)), items (std::move (items))
+      outer_filename (std::string ()), inner_attrs (std::move (inner_attrs)),
+      items (std::move (items))
   {}
 
   // Copy constructor with vector clone
   Module (Module const &other)
     : VisItem (other), module_name (other.module_name), locus (other.locus),
-      kind (other.kind), inner_attrs (other.inner_attrs)
+      kind (other.kind), inner_attrs (other.inner_attrs),
+      module_scope (other.module_scope)
   {
     // We need to check whether we are copying a loaded module or an unloaded
     // one. In the second case, clear the `items` vector.
@@ -1038,6 +1040,7 @@ public:
     locus = other.locus;
     kind = other.kind;
     inner_attrs = other.inner_attrs;
+    module_scope = other.module_scope;
 
     // Likewise, we need to clear the `items` vector in case the other module is
     // unloaded
@@ -1048,6 +1051,12 @@ public:
 
     return *this;
   }
+
+  // Search for the filename associated with an external module, storing it in
+  // module_file
+  void process_file_path ();
+  // Load the items contained in an external module
+  void load_items ();
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -1071,7 +1080,7 @@ public:
 
   std::string as_string () const override;
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   // Invalid if name is empty, so base stripping on that.
   void mark_for_strip () override { module_name = ""; }
@@ -1118,7 +1127,7 @@ public:
       as_clause_name (std::move (as_clause_name)), locus (locus)
   {}
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -1390,7 +1399,7 @@ public:
   UseDeclaration (UseDeclaration &&other) = default;
   UseDeclaration &operator= (UseDeclaration &&other) = default;
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -1407,11 +1416,6 @@ protected:
   }
 };
 
-// Parameters used in a function - TODO inline?
-/*struct FunctionParams {
-    std::vector<FunctionParam> function_params;
-};*/
-
 class LetStmt;
 
 // Rust function declaration AST node
@@ -1419,23 +1423,11 @@ class Function : public VisItem, public InherentImplItem, public TraitImplItem
 {
   FunctionQualifiers qualifiers;
   Identifier function_name;
-
-  // bool has_generics;
-  // Generics generic_params;
-  std::vector<std::unique_ptr<GenericParam>> generic_params; // inlined
-
-  // bool has_function_params;
-  // FunctionParams function_params;
-  std::vector<FunctionParam> function_params; // inlined
-
-  // bool has_function_return_type;
+  std::vector<std::unique_ptr<GenericParam>> generic_params;
+  std::vector<FunctionParam> function_params;
   std::unique_ptr<Type> return_type;
-
-  // bool has_where_clause;
   WhereClause where_clause;
-
   std::unique_ptr<BlockExpr> function_body;
-
   Location locus;
 
 public:
@@ -1527,9 +1519,7 @@ public:
   Function (Function &&other) = default;
   Function &operator= (Function &&other) = default;
 
-  Location get_locus () const { return locus; }
-
-  Location get_locus_slow () const override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -1562,16 +1552,12 @@ public:
     return function_body;
   }
 
-  FunctionQualifiers get_qualifiers () const { return qualifiers; }
+  const FunctionQualifiers &get_qualifiers () const { return qualifiers; }
 
   Identifier get_function_name () const { return function_name; }
 
   // TODO: is this better? Or is a "vis_block" better?
-  WhereClause &get_where_clause ()
-  {
-    rust_assert (has_where_clause ());
-    return where_clause;
-  }
+  WhereClause &get_where_clause () { return where_clause; }
 
   // TODO: is this better? Or is a "vis_block" better?
   std::unique_ptr<Type> &get_return_type ()
@@ -1678,7 +1664,7 @@ public:
   TypeAlias (TypeAlias &&other) = default;
   TypeAlias &operator= (TypeAlias &&other) = default;
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -1699,11 +1685,7 @@ public:
   }
 
   // TODO: is this better? Or is a "vis_block" better?
-  WhereClause &get_where_clause ()
-  {
-    rust_assert (has_where_clause ());
-    return where_clause;
-  }
+  WhereClause &get_where_clause () { return where_clause; }
 
   // TODO: is this better? Or is a "vis_block" better?
   std::unique_ptr<Type> &get_type_aliased ()
@@ -1751,9 +1733,7 @@ public:
   // Returns whether struct has a where clause.
   bool has_where_clause () const { return !where_clause.is_empty (); }
 
-  Location get_locus () const { return locus; }
-
-  Location get_locus_slow () const final { return get_locus (); };
+  Location get_locus () const override final { return locus; }
 
   // Invalid if name is empty, so base stripping on that.
   void mark_for_strip () override { struct_name = ""; }
@@ -1771,11 +1751,7 @@ public:
   }
 
   // TODO: is this better? Or is a "vis_block" better?
-  WhereClause &get_where_clause ()
-  {
-    rust_assert (has_where_clause ());
-    return where_clause;
-  }
+  WhereClause &get_where_clause () { return where_clause; }
 
   Identifier get_identifier () const { return struct_name; }
 
@@ -1964,15 +1940,6 @@ public:
   std::vector<StructField> &get_fields () { return fields; }
   const std::vector<StructField> &get_fields () const { return fields; }
 
-  void iterate (std::function<bool (StructField &)> cb)
-  {
-    for (auto &field : fields)
-      {
-	if (!cb (field))
-	  return;
-      }
-  }
-
 protected:
   /* Use covariance to implement clone function as returning this object
    * rather than base */
@@ -2099,15 +2066,6 @@ public:
   std::vector<TupleField> &get_fields () { return fields; }
   const std::vector<TupleField> &get_fields () const { return fields; }
 
-  void iterate (std::function<bool (TupleField &)> cb)
-  {
-    for (auto &field : fields)
-      {
-	if (!cb (field))
-	  return;
-      }
-  }
-
 protected:
   /* Use covariance to implement clone function as returning this object
    * rather than base */
@@ -2118,12 +2076,10 @@ protected:
 };
 
 /* An item used in an "enum" tagged union - not abstract: base represents a
- * name-only enum */
-class EnumItem
+ * name-only enum. EnumItems (variants) syntactically allow a Visibility
+ * annotation. */
+class EnumItem : public VisItem
 {
-  // bool has_attrs;
-  std::vector<Attribute> outer_attrs;
-
   Identifier variant_name;
 
   Location locus;
@@ -2131,19 +2087,16 @@ class EnumItem
 public:
   virtual ~EnumItem () {}
 
-  // Returns whether enum item has outer attributes.
-  bool has_outer_attrs () const { return !outer_attrs.empty (); }
-
-  EnumItem (Identifier variant_name, std::vector<Attribute> outer_attrs,
-	    Location locus)
-    : outer_attrs (std::move (outer_attrs)),
+  EnumItem (Identifier variant_name, Visibility vis,
+	    std::vector<Attribute> outer_attrs, Location locus)
+    : VisItem (std::move (vis), std::move (outer_attrs)),
       variant_name (std::move (variant_name)), locus (locus)
   {}
 
   // Unique pointer custom clone function
   std::unique_ptr<EnumItem> clone_enum_item () const
   {
-    return std::unique_ptr<EnumItem> (clone_enum_item_impl ());
+    return std::unique_ptr<EnumItem> (clone_item_impl ());
   }
 
   virtual std::string as_string () const;
@@ -2151,20 +2104,16 @@ public:
   // not pure virtual as not abstract
   virtual void accept_vis (ASTVisitor &vis);
 
+  Location get_locus () const { return locus; }
+
+  Identifier get_identifier () const { return variant_name; }
+
   // Based on idea that name is never empty.
   void mark_for_strip () { variant_name = ""; }
   bool is_marked_for_strip () const { return variant_name.empty (); }
 
-  // TODO: this mutable getter seems really dodgy. Think up better way.
-  std::vector<Attribute> &get_outer_attrs () { return outer_attrs; }
-  const std::vector<Attribute> &get_outer_attrs () const { return outer_attrs; }
-
 protected:
-  // Clone function implementation as (not pure) virtual method
-  virtual EnumItem *clone_enum_item_impl () const
-  {
-    return new EnumItem (*this);
-  }
+  EnumItem *clone_item_impl () const override { return new EnumItem (*this); }
 };
 
 // A tuple item used in an "enum" tagged union
@@ -2177,9 +2126,11 @@ public:
   // Returns whether tuple enum item has tuple fields.
   bool has_tuple_fields () const { return !tuple_fields.empty (); }
 
-  EnumItemTuple (Identifier variant_name, std::vector<TupleField> tuple_fields,
+  EnumItemTuple (Identifier variant_name, Visibility vis,
+		 std::vector<TupleField> tuple_fields,
 		 std::vector<Attribute> outer_attrs, Location locus)
-    : EnumItem (std::move (variant_name), std::move (outer_attrs), locus),
+    : EnumItem (std::move (variant_name), std::move (vis),
+		std::move (outer_attrs), locus),
       tuple_fields (std::move (tuple_fields))
   {}
 
@@ -2196,7 +2147,7 @@ public:
 
 protected:
   // Clone function implementation as (not pure) virtual method
-  EnumItemTuple *clone_enum_item_impl () const override
+  EnumItemTuple *clone_item_impl () const override
   {
     return new EnumItemTuple (*this);
   }
@@ -2212,10 +2163,11 @@ public:
   // Returns whether struct enum item has struct fields.
   bool has_struct_fields () const { return !struct_fields.empty (); }
 
-  EnumItemStruct (Identifier variant_name,
+  EnumItemStruct (Identifier variant_name, Visibility vis,
 		  std::vector<StructField> struct_fields,
 		  std::vector<Attribute> outer_attrs, Location locus)
-    : EnumItem (std::move (variant_name), std::move (outer_attrs), locus),
+    : EnumItem (std::move (variant_name), std::move (vis),
+		std::move (outer_attrs), locus),
       struct_fields (std::move (struct_fields))
   {}
 
@@ -2232,7 +2184,7 @@ public:
 
 protected:
   // Clone function implementation as (not pure) virtual method
-  EnumItemStruct *clone_enum_item_impl () const override
+  EnumItemStruct *clone_item_impl () const override
   {
     return new EnumItemStruct (*this);
   }
@@ -2244,9 +2196,11 @@ class EnumItemDiscriminant : public EnumItem
   std::unique_ptr<Expr> expression;
 
 public:
-  EnumItemDiscriminant (Identifier variant_name, std::unique_ptr<Expr> expr,
+  EnumItemDiscriminant (Identifier variant_name, Visibility vis,
+			std::unique_ptr<Expr> expr,
 			std::vector<Attribute> outer_attrs, Location locus)
-    : EnumItem (std::move (variant_name), std::move (outer_attrs), locus),
+    : EnumItem (std::move (variant_name), std::move (vis),
+		std::move (outer_attrs), locus),
       expression (std::move (expr))
   {}
 
@@ -2283,7 +2237,7 @@ public:
 
 protected:
   // Clone function implementation as (not pure) virtual method
-  EnumItemDiscriminant *clone_enum_item_impl () const override
+  EnumItemDiscriminant *clone_item_impl () const override
   {
     return new EnumItemDiscriminant (*this);
   }
@@ -2369,9 +2323,11 @@ public:
   Enum (Enum &&other) = default;
   Enum &operator= (Enum &&other) = default;
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
+
+  Identifier get_identifier () const { return enum_name; }
 
   // Invalid if name is empty, so base stripping on that.
   void mark_for_strip () override { enum_name = ""; }
@@ -2394,11 +2350,7 @@ public:
   }
 
   // TODO: is this better? Or is a "vis_block" better?
-  WhereClause &get_where_clause ()
-  {
-    rust_assert (has_where_clause ());
-    return where_clause;
-  }
+  WhereClause &get_where_clause () { return where_clause; }
 
 protected:
   /* Use covariance to implement clone function as returning this object
@@ -2473,7 +2425,7 @@ public:
   Union (Union &&other) = default;
   Union &operator= (Union &&other) = default;
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -2485,15 +2437,6 @@ public:
   std::vector<StructField> &get_variants () { return variants; }
   const std::vector<StructField> &get_variants () const { return variants; }
 
-  void iterate (std::function<bool (StructField &)> cb)
-  {
-    for (auto &variant : variants)
-      {
-	if (!cb (variant))
-	  return;
-      }
-  }
-
   std::vector<std::unique_ptr<GenericParam>> &get_generic_params ()
   {
     return generic_params;
@@ -2504,11 +2447,7 @@ public:
   }
 
   // TODO: is this better? Or is a "vis_block" better?
-  WhereClause &get_where_clause ()
-  {
-    rust_assert (has_where_clause ());
-    return where_clause;
-  }
+  WhereClause &get_where_clause () { return where_clause; }
 
   Identifier get_identifier () const { return union_name; }
 
@@ -2583,9 +2522,7 @@ public:
    * as identifier) constant. */
   bool is_unnamed () const { return identifier == "_"; }
 
-  Location get_locus () const { return locus; }
-
-  Location get_locus_slow () const override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -2697,7 +2634,7 @@ public:
   StaticItem (StaticItem &&other) = default;
   StaticItem &operator= (StaticItem &&other) = default;
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -2863,11 +2800,9 @@ public:
   }
 
   // TODO: is this better? Or is a "vis_block" better?
-  WhereClause &get_where_clause ()
-  {
-    rust_assert (has_where_clause ());
-    return where_clause;
-  }
+  WhereClause &get_where_clause () { return where_clause; }
+
+  FunctionQualifiers get_qualifiers () { return qualifiers; }
 };
 
 // Actual trait item function declaration within traits
@@ -3090,14 +3025,12 @@ public:
   }
 
   // TODO: is this better? Or is a "vis_block" better?
-  WhereClause &get_where_clause ()
-  {
-    rust_assert (has_where_clause ());
-    return where_clause;
-  }
+  WhereClause &get_where_clause () { return where_clause; }
 
   SelfParam &get_self_param () { return self_param; }
   const SelfParam &get_self_param () const { return self_param; }
+
+  FunctionQualifiers get_qualifiers () { return qualifiers; }
 };
 
 // Actual trait item method declaration within traits
@@ -3488,7 +3421,7 @@ public:
   Trait (Trait &&other) = default;
   Trait &operator= (Trait &&other) = default;
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -3528,15 +3461,20 @@ public:
     return type_param_bounds;
   }
 
-  WhereClause &get_where_clause ()
-  {
-    rust_assert (has_where_clause ());
-    return where_clause;
-  }
+  WhereClause &get_where_clause () { return where_clause; }
 
   void insert_implict_self (std::unique_ptr<AST::GenericParam> &&param)
   {
-    generic_params.push_back (std::move (param));
+    std::vector<std::unique_ptr<GenericParam>> new_list;
+    new_list.reserve (generic_params.size () + 1);
+
+    new_list.push_back (std::move (param));
+    for (auto &p : generic_params)
+      {
+	new_list.push_back (std::move (p));
+      }
+
+    generic_params = std::move (new_list);
   }
 
 protected:
@@ -3576,7 +3514,7 @@ public:
   // Returns whether impl has inner attributes.
   bool has_inner_attrs () const { return !inner_attrs.empty (); }
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   // Invalid if trait type is null, so base stripping on that.
   void mark_for_strip () override { trait_type = nullptr; }
@@ -3596,11 +3534,7 @@ public:
   }
 
   // TODO: is this better? Or is a "vis_block" better?
-  WhereClause &get_where_clause ()
-  {
-    rust_assert (has_where_clause ());
-    return where_clause;
-  }
+  WhereClause &get_where_clause () { return where_clause; }
 
   // TODO: is this better? Or is a "vis_block" better?
   std::unique_ptr<Type> &get_type ()
@@ -3852,7 +3786,7 @@ public:
 
   virtual std::string as_string () const;
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   virtual void accept_vis (ASTVisitor &vis) = 0;
 
@@ -4004,12 +3938,11 @@ private:
 
   std::unique_ptr<Type> param_type;
 
-  // TODO: should this store location data?
-
   // seemingly new since writing this node
   std::vector<Attribute> outer_attrs;
 
   NodeId node_id;
+  Location locus;
 
 public:
   /* Returns whether the named function parameter has a name (i.e. name is not
@@ -4030,14 +3963,14 @@ public:
   // Creates an error state named function parameter.
   static NamedFunctionParam create_error ()
   {
-    return NamedFunctionParam ("", nullptr, {});
+    return NamedFunctionParam ("", nullptr, {}, Location ());
   }
 
   NamedFunctionParam (std::string name, std::unique_ptr<Type> param_type,
-		      std::vector<Attribute> outer_attrs)
+		      std::vector<Attribute> outer_attrs, Location locus)
     : name (std::move (name)), param_type (std::move (param_type)),
       outer_attrs (std::move (outer_attrs)),
-      node_id (Analysis::Mappings::get ()->get_next_node_id ())
+      node_id (Analysis::Mappings::get ()->get_next_node_id ()), locus (locus)
   {}
 
   // Copy constructor
@@ -4247,11 +4180,7 @@ public:
   }
 
   // TODO: is this better? Or is a "vis_block" better?
-  WhereClause &get_where_clause ()
-  {
-    rust_assert (has_where_clause ());
-    return where_clause;
-  }
+  WhereClause &get_where_clause () { return where_clause; }
 
   // TODO: is this better? Or is a "vis_block" better?
   std::unique_ptr<Type> &get_return_type ()
@@ -4341,7 +4270,7 @@ public:
   ExternBlock (ExternBlock &&other) = default;
   ExternBlock &operator= (ExternBlock &&other) = default;
 
-  Location get_locus () const { return locus; }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -4374,7 +4303,6 @@ protected:
 
 // Replaced with forward decls - defined in "rust-macro.h"
 class MacroItem;
-class MacroInvocationSemi;
 class MacroRulesDefinition;
 } // namespace AST
 } // namespace Rust

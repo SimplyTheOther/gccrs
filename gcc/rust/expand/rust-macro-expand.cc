@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -17,9 +17,11 @@
 // <http://www.gnu.org/licenses/>.
 
 #include "rust-macro-expand.h"
+#include "rust-macro-substitute-ctx.h"
 #include "rust-ast-full.h"
 #include "rust-ast-visitor.h"
 #include "rust-diagnostics.h"
+#include "rust-parse.h"
 
 namespace Rust {
 // Visitor used to expand attributes.
@@ -49,7 +51,7 @@ public:
 	auto &type = field.get_field_type ();
 	type->accept_vis (*this);
 	if (type->is_marked_for_strip ())
-	  rust_error_at (type->get_locus_slow (),
+	  rust_error_at (type->get_locus (),
 			 "cannot strip type in this position");
 
 	// if nothing else happens, increment
@@ -75,7 +77,7 @@ public:
 	auto &type = field.get_field_type ();
 	type->accept_vis (*this);
 	if (type->is_marked_for_strip ())
-	  rust_error_at (type->get_locus_slow (),
+	  rust_error_at (type->get_locus (),
 			 "cannot strip type in this position");
 
 	// if nothing else happens, increment
@@ -101,13 +103,13 @@ public:
 	auto &pattern = param.get_pattern ();
 	pattern->accept_vis (*this);
 	if (pattern->is_marked_for_strip ())
-	  rust_error_at (pattern->get_locus_slow (),
+	  rust_error_at (pattern->get_locus (),
 			 "cannot strip pattern in this position");
 
 	auto &type = param.get_type ();
 	type->accept_vis (*this);
 	if (type->is_marked_for_strip ())
-	  rust_error_at (type->get_locus_slow (),
+	  rust_error_at (type->get_locus (),
 			 "cannot strip type in this position");
 
 	// increment
@@ -124,7 +126,7 @@ public:
       {
 	type->accept_vis (*this);
 	if (type->is_marked_for_strip ())
-	  rust_error_at (type->get_locus_slow (),
+	  rust_error_at (type->get_locus (),
 			 "cannot strip type in this position");
       }
 
@@ -134,7 +136,7 @@ public:
 	auto &type = binding.get_type ();
 	type->accept_vis (*this);
 	if (type->is_marked_for_strip ())
-	  rust_error_at (type->get_locus_slow (),
+	  rust_error_at (type->get_locus (),
 			 "cannot strip type in this position");
       }
   }
@@ -144,8 +146,7 @@ public:
     auto &type = path_type.get_type ();
     type->accept_vis (*this);
     if (type->is_marked_for_strip ())
-      rust_error_at (type->get_locus_slow (),
-		     "cannot strip type in this position");
+      rust_error_at (type->get_locus (), "cannot strip type in this position");
 
     if (path_type.has_as_clause ())
       {
@@ -174,7 +175,7 @@ public:
 	auto &pattern = param.get_pattern ();
 	pattern->accept_vis (*this);
 	if (pattern->is_marked_for_strip ())
-	  rust_error_at (pattern->get_locus_slow (),
+	  rust_error_at (pattern->get_locus (),
 			 "cannot strip pattern in this position");
 
 	if (param.has_type_given ())
@@ -182,7 +183,7 @@ public:
 	    auto &type = param.get_type ();
 	    type->accept_vis (*this);
 	    if (type->is_marked_for_strip ())
-	      rust_error_at (type->get_locus_slow (),
+	      rust_error_at (type->get_locus (),
 			     "cannot strip type in this position");
 	  }
 
@@ -198,7 +199,7 @@ public:
 	auto &type = self_param.get_type ();
 	type->accept_vis (*this);
 	if (type->is_marked_for_strip ())
-	  rust_error_at (type->get_locus_slow (),
+	  rust_error_at (type->get_locus (),
 			 "cannot strip type in this position");
       }
     /* TODO: maybe check for invariants being violated - e.g. both type and
@@ -227,7 +228,7 @@ public:
 	auto &return_type = decl.get_return_type ();
 	return_type->accept_vis (*this);
 	if (return_type->is_marked_for_strip ())
-	  rust_error_at (return_type->get_locus_slow (),
+	  rust_error_at (return_type->get_locus (),
 			 "cannot strip type in this position");
       }
 
@@ -255,7 +256,7 @@ public:
 	auto &return_type = decl.get_return_type ();
 	return_type->accept_vis (*this);
 	if (return_type->is_marked_for_strip ())
-	  rust_error_at (return_type->get_locus_slow (),
+	  rust_error_at (return_type->get_locus (),
 			 "cannot strip type in this position");
       }
 
@@ -309,7 +310,8 @@ public:
   {
     // supposedly does not require - cfg does nothing
   }
-  void visit (AST::MacroInvocationSemi &macro_invoc) override
+
+  void visit (AST::MacroInvocation &macro_invoc) override
   {
     // initial strip test based on outer attrs
     expander.expand_cfg_attrs (macro_invoc.get_outer_attrs ());
@@ -324,6 +326,17 @@ public:
     // I don't think any macro token trees can be stripped in any way
 
     // TODO: maybe have cfg! macro stripping behaviour here?
+
+    if (macro_invoc.has_semicolon ())
+      expander.expand_invoc_semi (macro_invoc);
+    else
+      expander.expand_invoc (macro_invoc);
+
+    // we need to visit the expanded fragments since it may need cfg
+    // expansion
+    // and it may be recursive
+    for (auto &node : macro_invoc.get_fragment ().get_nodes ())
+      node.accept_vis (*this);
   }
 
   void visit (AST::PathInExpression &path) override
@@ -363,7 +376,7 @@ public:
       {
 	type->accept_vis (*this);
 	if (type->is_marked_for_strip ())
-	  rust_error_at (type->get_locus_slow (),
+	  rust_error_at (type->get_locus (),
 			 "cannot strip type in this position");
       }
 
@@ -372,7 +385,7 @@ public:
 	auto &return_type = type_path_function.get_return_type ();
 	return_type->accept_vis (*this);
 	if (return_type->is_marked_for_strip ())
-	  rust_error_at (return_type->get_locus_slow (),
+	  rust_error_at (return_type->get_locus (),
 			 "cannot strip type in this position");
       }
   }
@@ -447,7 +460,7 @@ public:
     auto &borrowed_expr = expr.get_borrowed_expr ();
     borrowed_expr->accept_vis (*this);
     if (borrowed_expr->is_marked_for_strip ())
-      rust_error_at (borrowed_expr->get_locus_slow (),
+      rust_error_at (borrowed_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -467,7 +480,7 @@ public:
     auto &dereferenced_expr = expr.get_dereferenced_expr ();
     dereferenced_expr->accept_vis (*this);
     if (dereferenced_expr->is_marked_for_strip ())
-      rust_error_at (dereferenced_expr->get_locus_slow (),
+      rust_error_at (dereferenced_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -487,7 +500,7 @@ public:
     auto &propagating_expr = expr.get_propagating_expr ();
     propagating_expr->accept_vis (*this);
     if (propagating_expr->is_marked_for_strip ())
-      rust_error_at (propagating_expr->get_locus_slow (),
+      rust_error_at (propagating_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -507,7 +520,7 @@ public:
     auto &negated_expr = expr.get_negated_expr ();
     negated_expr->accept_vis (*this);
     if (negated_expr->is_marked_for_strip ())
-      rust_error_at (negated_expr->get_locus_slow (),
+      rust_error_at (negated_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -525,12 +538,12 @@ public:
 
     // ensure that they are not marked for strip
     if (expr.get_left_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_left_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_left_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes are never allowed "
 		     "before binary op exprs");
     if (expr.get_right_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_right_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_right_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -548,12 +561,12 @@ public:
 
     // ensure that they are not marked for strip
     if (expr.get_left_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_left_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_left_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes are never allowed "
 		     "before binary op exprs");
     if (expr.get_right_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_right_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_right_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -571,12 +584,12 @@ public:
 
     // ensure that they are not marked for strip
     if (expr.get_left_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_left_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_left_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes are never allowed "
 		     "before binary op exprs");
     if (expr.get_right_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_right_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_right_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -592,7 +605,7 @@ public:
 
     // ensure that they are not marked for strip
     if (casted_expr->is_marked_for_strip ())
-      rust_error_at (casted_expr->get_locus_slow (),
+      rust_error_at (casted_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes are never allowed before cast exprs");
 
@@ -600,8 +613,7 @@ public:
     auto &type = expr.get_type_to_cast_to ();
     type->accept_vis (*this);
     if (type->is_marked_for_strip ())
-      rust_error_at (type->get_locus_slow (),
-		     "cannot strip type in this position");
+      rust_error_at (type->get_locus (), "cannot strip type in this position");
   }
   void visit (AST::AssignmentExpr &expr) override
   {
@@ -617,12 +629,12 @@ public:
 
     // ensure that they are not marked for strip
     if (expr.get_left_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_left_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_left_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes are never allowed "
 		     "before binary op exprs");
     if (expr.get_right_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_right_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_right_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -640,12 +652,12 @@ public:
 
     // ensure that they are not marked for strip
     if (expr.get_left_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_left_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_left_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes are never allowed "
 		     "before binary op exprs");
     if (expr.get_right_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_right_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_right_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -674,7 +686,7 @@ public:
     auto &inner_expr = expr.get_expr_in_parens ();
     inner_expr->accept_vis (*this);
     if (inner_expr->is_marked_for_strip ())
-      rust_error_at (inner_expr->get_locus_slow (),
+      rust_error_at (inner_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -695,14 +707,14 @@ public:
     auto &copied_expr = elems.get_elem_to_copy ();
     copied_expr->accept_vis (*this);
     if (copied_expr->is_marked_for_strip ())
-      rust_error_at (copied_expr->get_locus_slow (),
+      rust_error_at (copied_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
     auto &copy_count = elems.get_num_copies ();
     copy_count->accept_vis (*this);
     if (copy_count->is_marked_for_strip ())
-      rust_error_at (copy_count->get_locus_slow (),
+      rust_error_at (copy_count->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -748,14 +760,14 @@ public:
     auto &array_expr = expr.get_array_expr ();
     array_expr->accept_vis (*this);
     if (array_expr->is_marked_for_strip ())
-      rust_error_at (array_expr->get_locus_slow (),
+      rust_error_at (array_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
     auto &index_expr = expr.get_index_expr ();
     index_expr->accept_vis (*this);
     if (index_expr->is_marked_for_strip ())
-      rust_error_at (index_expr->get_locus_slow (),
+      rust_error_at (index_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -801,7 +813,7 @@ public:
     auto &tuple_expr = expr.get_tuple_expr ();
     tuple_expr->accept_vis (*this);
     if (tuple_expr->is_marked_for_strip ())
-      rust_error_at (tuple_expr->get_locus_slow (),
+      rust_error_at (tuple_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -842,7 +854,7 @@ public:
     auto &value = field.get_value ();
     value->accept_vis (*this);
     if (value->is_marked_for_strip ())
-      rust_error_at (value->get_locus_slow (),
+      rust_error_at (value->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -853,7 +865,7 @@ public:
     auto &value = field.get_value ();
     value->accept_vis (*this);
     if (value->is_marked_for_strip ())
-      rust_error_at (value->get_locus_slow (),
+      rust_error_at (value->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -900,7 +912,7 @@ public:
 	auto &base_struct_expr = expr.get_struct_base ().get_base_struct ();
 	base_struct_expr->accept_vis (*this);
 	if (base_struct_expr->is_marked_for_strip ())
-	  rust_error_at (base_struct_expr->get_locus_slow (),
+	  rust_error_at (base_struct_expr->get_locus (),
 			 "cannot strip expression in this position - outer "
 			 "attributes not allowed");
       }
@@ -937,145 +949,9 @@ public:
     auto &base_struct_expr = expr.get_struct_base ().get_base_struct ();
     base_struct_expr->accept_vis (*this);
     if (base_struct_expr->is_marked_for_strip ())
-      rust_error_at (base_struct_expr->get_locus_slow (),
+      rust_error_at (base_struct_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
-  }
-  void visit (AST::StructExprTuple &expr) override
-  {
-    // initial strip test based on outer attrs
-    expander.expand_cfg_attrs (expr.get_outer_attrs ());
-    if (expander.fails_cfg_with_expand (expr.get_outer_attrs ()))
-      {
-	expr.mark_for_strip ();
-	return;
-      }
-
-    /* strip test based on inner attrs - spec says these are inner
-     * attributes, not outer attributes of inner expr */
-    expander.expand_cfg_attrs (expr.get_inner_attrs ());
-    if (expander.fails_cfg_with_expand (expr.get_inner_attrs ()))
-      {
-	expr.mark_for_strip ();
-	return;
-      }
-
-    // strip sub-exprs of path
-    auto &struct_name = expr.get_struct_name ();
-    visit (struct_name);
-    if (struct_name.is_marked_for_strip ())
-      rust_error_at (struct_name.get_locus (),
-		     "cannot strip path in this position");
-
-    /* spec says outer attributes are specifically allowed for elements
-     * of tuple-style struct expressions, so full stripping possible */
-    expand_pointer_allow_strip (expr.get_elems ());
-  }
-  void visit (AST::StructExprUnit &expr) override
-  {
-    // initial strip test based on outer attrs
-    expander.expand_cfg_attrs (expr.get_outer_attrs ());
-    if (expander.fails_cfg_with_expand (expr.get_outer_attrs ()))
-      {
-	expr.mark_for_strip ();
-	return;
-      }
-
-    // strip sub-exprs of path
-    auto &struct_name = expr.get_struct_name ();
-    visit (struct_name);
-    if (struct_name.is_marked_for_strip ())
-      rust_error_at (struct_name.get_locus (),
-		     "cannot strip path in this position");
-  }
-  void visit (AST::EnumExprFieldIdentifier &) override
-  {
-    // as no attrs (at moment, at least), no stripping possible
-  }
-  void visit (AST::EnumExprFieldIdentifierValue &field) override
-  {
-    /* as no attrs possible (at moment, at least), only sub-expression
-     * stripping is possible */
-    auto &value = field.get_value ();
-    value->accept_vis (*this);
-    if (value->is_marked_for_strip ())
-      rust_error_at (value->get_locus_slow (),
-		     "cannot strip expression in this position - outer "
-		     "attributes not allowed");
-  }
-  void visit (AST::EnumExprFieldIndexValue &field) override
-  {
-    /* as no attrs possible (at moment, at least), only sub-expression
-     * stripping is possible */
-    auto &value = field.get_value ();
-    value->accept_vis (*this);
-    if (value->is_marked_for_strip ())
-      rust_error_at (value->get_locus_slow (),
-		     "cannot strip expression in this position - outer "
-		     "attributes not allowed");
-  }
-  void visit (AST::EnumExprStruct &expr) override
-  {
-    // initial strip test based on outer attrs
-    expander.expand_cfg_attrs (expr.get_outer_attrs ());
-    if (expander.fails_cfg_with_expand (expr.get_outer_attrs ()))
-      {
-	expr.mark_for_strip ();
-	return;
-      }
-
-    // supposedly spec doesn't allow inner attributes in enum exprs
-
-    // strip sub-exprs of path
-    auto &enum_path = expr.get_enum_variant_path ();
-    visit (enum_path);
-    if (enum_path.is_marked_for_strip ())
-      rust_error_at (enum_path.get_locus (),
-		     "cannot strip path in this position");
-
-    /* spec does not specify whether expressions are allowed to be
-     * stripped at top level of expression fields, but I wouldn't think
-     * that they would be, so operating under the assumption that only
-     * sub-expressions can be stripped. */
-    for (auto &field : expr.get_fields ())
-      {
-	field->accept_vis (*this);
-	// shouldn't strip in this
-      }
-  }
-  void visit (AST::EnumExprTuple &expr) override
-  {
-    // initial strip test based on outer attrs
-    expander.expand_cfg_attrs (expr.get_outer_attrs ());
-    if (expander.fails_cfg_with_expand (expr.get_outer_attrs ()))
-      {
-	expr.mark_for_strip ();
-	return;
-      }
-
-    // supposedly spec doesn't allow inner attributes in enum exprs
-
-    // strip sub-exprs of path
-    auto &enum_path = expr.get_enum_variant_path ();
-    visit (enum_path);
-    if (enum_path.is_marked_for_strip ())
-      rust_error_at (enum_path.get_locus (),
-		     "cannot strip path in this position");
-
-    /* spec says outer attributes are specifically allowed for elements
-     * of tuple-style enum expressions, so full stripping possible */
-    expand_pointer_allow_strip (expr.get_elems ());
-  }
-  void visit (AST::EnumExprFieldless &expr) override
-  {
-    // can't be stripped as no attrs
-
-    // strip sub-exprs of path
-    auto &enum_path = expr.get_enum_variant_path ();
-    visit (enum_path);
-    if (enum_path.is_marked_for_strip ())
-      rust_error_at (enum_path.get_locus (),
-		     "cannot strip path in this position");
   }
   void visit (AST::CallExpr &expr) override
   {
@@ -1093,7 +969,7 @@ public:
     auto &function = expr.get_function_expr ();
     function->accept_vis (*this);
     if (function->is_marked_for_strip ())
-      rust_error_at (function->get_locus_slow (),
+      rust_error_at (function->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1117,7 +993,7 @@ public:
     auto &receiver = expr.get_receiver_expr ();
     receiver->accept_vis (*this);
     if (receiver->is_marked_for_strip ())
-      rust_error_at (receiver->get_locus_slow (),
+      rust_error_at (receiver->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1145,7 +1021,7 @@ public:
     auto &receiver = expr.get_receiver_expr ();
     receiver->accept_vis (*this);
     if (receiver->is_marked_for_strip ())
-      rust_error_at (receiver->get_locus_slow (),
+      rust_error_at (receiver->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1167,17 +1043,21 @@ public:
     auto &definition_expr = expr.get_definition_expr ();
     definition_expr->accept_vis (*this);
     if (definition_expr->is_marked_for_strip ())
-      rust_error_at (definition_expr->get_locus_slow (),
+      rust_error_at (definition_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
+
   void visit (AST::BlockExpr &expr) override
   {
+    expander.push_context (MacroExpander::BLOCK);
+
     // initial strip test based on outer attrs
     expander.expand_cfg_attrs (expr.get_outer_attrs ());
     if (expander.fails_cfg_with_expand (expr.get_outer_attrs ()))
       {
 	expr.mark_for_strip ();
+	expander.pop_context ();
 	return;
       }
 
@@ -1187,6 +1067,7 @@ public:
     if (expander.fails_cfg_with_expand (expr.get_inner_attrs ()))
       {
 	expr.mark_for_strip ();
+	expander.pop_context ();
 	return;
       }
 
@@ -1203,7 +1084,9 @@ public:
 	if (tail_expr->is_marked_for_strip ())
 	  expr.strip_tail_expr ();
       }
+    expander.pop_context ();
   }
+
   void visit (AST::ClosureExprInnerTyped &expr) override
   {
     // initial strip test based on outer attrs
@@ -1222,14 +1105,13 @@ public:
     auto &type = expr.get_return_type ();
     type->accept_vis (*this);
     if (type->is_marked_for_strip ())
-      rust_error_at (type->get_locus_slow (),
-		     "cannot strip type in this position");
+      rust_error_at (type->get_locus (), "cannot strip type in this position");
 
     // can't strip expression itself, but can strip sub-expressions
     auto &definition_block = expr.get_definition_block ();
     definition_block->accept_vis (*this);
     if (definition_block->is_marked_for_strip ())
-      rust_error_at (definition_block->get_locus_slow (),
+      rust_error_at (definition_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1263,7 +1145,7 @@ public:
 	break_expr->accept_vis (*this);
 
 	if (break_expr->is_marked_for_strip ())
-	  rust_error_at (break_expr->get_locus_slow (),
+	  rust_error_at (break_expr->get_locus (),
 			 "cannot strip expression in this position - outer "
 			 "attributes not allowed");
       }
@@ -1282,12 +1164,12 @@ public:
 
     // ensure that they are not marked for strip
     if (expr.get_from_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_from_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_from_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes are never allowed "
 		     "before range exprs");
     if (expr.get_to_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_to_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_to_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1303,7 +1185,7 @@ public:
     from_expr->accept_vis (*this);
 
     if (from_expr->is_marked_for_strip ())
-      rust_error_at (from_expr->get_locus_slow (),
+      rust_error_at (from_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes are never allowed before range exprs");
   }
@@ -1319,7 +1201,7 @@ public:
     to_expr->accept_vis (*this);
 
     if (to_expr->is_marked_for_strip ())
-      rust_error_at (to_expr->get_locus_slow (),
+      rust_error_at (to_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1341,12 +1223,12 @@ public:
 
     // ensure that they are not marked for strip
     if (expr.get_from_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_from_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_from_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes are never allowed "
 		     "before range exprs");
     if (expr.get_to_expr ()->is_marked_for_strip ())
-      rust_error_at (expr.get_to_expr ()->get_locus_slow (),
+      rust_error_at (expr.get_to_expr ()->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1362,7 +1244,7 @@ public:
     to_expr->accept_vis (*this);
 
     if (to_expr->is_marked_for_strip ())
-      rust_error_at (to_expr->get_locus_slow (),
+      rust_error_at (to_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1386,7 +1268,7 @@ public:
 	returned_expr->accept_vis (*this);
 
 	if (returned_expr->is_marked_for_strip ())
-	  rust_error_at (returned_expr->get_locus_slow (),
+	  rust_error_at (returned_expr->get_locus (),
 			 "cannot strip expression in this position - outer "
 			 "attributes not allowed");
       }
@@ -1410,7 +1292,7 @@ public:
     auto &block_expr = expr.get_block_expr ();
     block_expr->accept_vis (*this);
     if (block_expr->is_marked_for_strip ())
-      rust_error_at (block_expr->get_locus_slow (),
+      rust_error_at (block_expr->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1428,7 +1310,7 @@ public:
     auto &loop_block = expr.get_loop_block ();
     loop_block->accept_vis (*this);
     if (loop_block->is_marked_for_strip ())
-      rust_error_at (loop_block->get_locus_slow (),
+      rust_error_at (loop_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1446,7 +1328,7 @@ public:
     auto &predicate_expr = expr.get_predicate_expr ();
     predicate_expr->accept_vis (*this);
     if (predicate_expr->is_marked_for_strip ())
-      rust_error_at (predicate_expr->get_locus_slow (),
+      rust_error_at (predicate_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1454,7 +1336,7 @@ public:
     auto &loop_block = expr.get_loop_block ();
     loop_block->accept_vis (*this);
     if (loop_block->is_marked_for_strip ())
-      rust_error_at (loop_block->get_locus_slow (),
+      rust_error_at (loop_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1472,7 +1354,7 @@ public:
       {
 	pattern->accept_vis (*this);
 	if (pattern->is_marked_for_strip ())
-	  rust_error_at (pattern->get_locus_slow (),
+	  rust_error_at (pattern->get_locus (),
 			 "cannot strip pattern in this position");
       }
 
@@ -1480,7 +1362,7 @@ public:
     auto &scrutinee_expr = expr.get_scrutinee_expr ();
     scrutinee_expr->accept_vis (*this);
     if (scrutinee_expr->is_marked_for_strip ())
-      rust_error_at (scrutinee_expr->get_locus_slow (),
+      rust_error_at (scrutinee_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1488,7 +1370,7 @@ public:
     auto &loop_block = expr.get_loop_block ();
     loop_block->accept_vis (*this);
     if (loop_block->is_marked_for_strip ())
-      rust_error_at (loop_block->get_locus_slow (),
+      rust_error_at (loop_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1506,14 +1388,14 @@ public:
     auto &pattern = expr.get_pattern ();
     pattern->accept_vis (*this);
     if (pattern->is_marked_for_strip ())
-      rust_error_at (pattern->get_locus_slow (),
+      rust_error_at (pattern->get_locus (),
 		     "cannot strip pattern in this position");
 
     // can't strip scrutinee expr itself, but can strip sub-expressions
     auto &iterator_expr = expr.get_iterator_expr ();
     iterator_expr->accept_vis (*this);
     if (iterator_expr->is_marked_for_strip ())
-      rust_error_at (iterator_expr->get_locus_slow (),
+      rust_error_at (iterator_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1521,7 +1403,7 @@ public:
     auto &loop_block = expr.get_loop_block ();
     loop_block->accept_vis (*this);
     if (loop_block->is_marked_for_strip ())
-      rust_error_at (loop_block->get_locus_slow (),
+      rust_error_at (loop_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1542,7 +1424,7 @@ public:
     auto &condition_expr = expr.get_condition_expr ();
     condition_expr->accept_vis (*this);
     if (condition_expr->is_marked_for_strip ())
-      rust_error_at (condition_expr->get_locus_slow (),
+      rust_error_at (condition_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1550,7 +1432,7 @@ public:
     auto &if_block = expr.get_if_block ();
     if_block->accept_vis (*this);
     if (if_block->is_marked_for_strip ())
-      rust_error_at (if_block->get_locus_slow (),
+      rust_error_at (if_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1568,7 +1450,7 @@ public:
     auto &condition_expr = expr.get_condition_expr ();
     condition_expr->accept_vis (*this);
     if (condition_expr->is_marked_for_strip ())
-      rust_error_at (condition_expr->get_locus_slow (),
+      rust_error_at (condition_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1576,7 +1458,7 @@ public:
     auto &if_block = expr.get_if_block ();
     if_block->accept_vis (*this);
     if (if_block->is_marked_for_strip ())
-      rust_error_at (if_block->get_locus_slow (),
+      rust_error_at (if_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1584,7 +1466,7 @@ public:
     auto &else_block = expr.get_else_block ();
     else_block->accept_vis (*this);
     if (else_block->is_marked_for_strip ())
-      rust_error_at (else_block->get_locus_slow (),
+      rust_error_at (else_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1602,7 +1484,7 @@ public:
     auto &condition_expr = expr.get_condition_expr ();
     condition_expr->accept_vis (*this);
     if (condition_expr->is_marked_for_strip ())
-      rust_error_at (condition_expr->get_locus_slow (),
+      rust_error_at (condition_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1610,7 +1492,7 @@ public:
     auto &if_block = expr.get_if_block ();
     if_block->accept_vis (*this);
     if (if_block->is_marked_for_strip ())
-      rust_error_at (if_block->get_locus_slow (),
+      rust_error_at (if_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1618,7 +1500,7 @@ public:
     auto &conseq_if_expr = expr.get_conseq_if_expr ();
     conseq_if_expr->accept_vis (*this);
     if (conseq_if_expr->is_marked_for_strip ())
-      rust_error_at (conseq_if_expr->get_locus_slow (),
+      rust_error_at (conseq_if_expr->get_locus (),
 		     "cannot strip consequent if expression in this "
 		     "position - outer attributes not allowed");
   }
@@ -1636,7 +1518,7 @@ public:
     auto &condition_expr = expr.get_condition_expr ();
     condition_expr->accept_vis (*this);
     if (condition_expr->is_marked_for_strip ())
-      rust_error_at (condition_expr->get_locus_slow (),
+      rust_error_at (condition_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1644,7 +1526,7 @@ public:
     auto &if_block = expr.get_if_block ();
     if_block->accept_vis (*this);
     if (if_block->is_marked_for_strip ())
-      rust_error_at (if_block->get_locus_slow (),
+      rust_error_at (if_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1652,7 +1534,7 @@ public:
     auto &conseq_if_let_expr = expr.get_conseq_if_let_expr ();
     conseq_if_let_expr->accept_vis (*this);
     if (conseq_if_let_expr->is_marked_for_strip ())
-      rust_error_at (conseq_if_let_expr->get_locus_slow (),
+      rust_error_at (conseq_if_let_expr->get_locus (),
 		     "cannot strip consequent if let expression in this "
 		     "position - outer attributes not "
 		     "allowed");
@@ -1671,7 +1553,7 @@ public:
       {
 	pattern->accept_vis (*this);
 	if (pattern->is_marked_for_strip ())
-	  rust_error_at (pattern->get_locus_slow (),
+	  rust_error_at (pattern->get_locus (),
 			 "cannot strip pattern in this position");
       }
 
@@ -1679,7 +1561,7 @@ public:
     auto &value_expr = expr.get_value_expr ();
     value_expr->accept_vis (*this);
     if (value_expr->is_marked_for_strip ())
-      rust_error_at (value_expr->get_locus_slow (),
+      rust_error_at (value_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1687,7 +1569,7 @@ public:
     auto &if_block = expr.get_if_block ();
     if_block->accept_vis (*this);
     if (if_block->is_marked_for_strip ())
-      rust_error_at (if_block->get_locus_slow (),
+      rust_error_at (if_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1705,7 +1587,7 @@ public:
       {
 	pattern->accept_vis (*this);
 	if (pattern->is_marked_for_strip ())
-	  rust_error_at (pattern->get_locus_slow (),
+	  rust_error_at (pattern->get_locus (),
 			 "cannot strip pattern in this position");
       }
 
@@ -1713,7 +1595,7 @@ public:
     auto &value_expr = expr.get_value_expr ();
     value_expr->accept_vis (*this);
     if (value_expr->is_marked_for_strip ())
-      rust_error_at (value_expr->get_locus_slow (),
+      rust_error_at (value_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1721,7 +1603,7 @@ public:
     auto &if_block = expr.get_if_block ();
     if_block->accept_vis (*this);
     if (if_block->is_marked_for_strip ())
-      rust_error_at (if_block->get_locus_slow (),
+      rust_error_at (if_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1729,7 +1611,7 @@ public:
     auto &else_block = expr.get_else_block ();
     else_block->accept_vis (*this);
     if (else_block->is_marked_for_strip ())
-      rust_error_at (else_block->get_locus_slow (),
+      rust_error_at (else_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1747,7 +1629,7 @@ public:
       {
 	pattern->accept_vis (*this);
 	if (pattern->is_marked_for_strip ())
-	  rust_error_at (pattern->get_locus_slow (),
+	  rust_error_at (pattern->get_locus (),
 			 "cannot strip pattern in this position");
       }
 
@@ -1755,7 +1637,7 @@ public:
     auto &value_expr = expr.get_value_expr ();
     value_expr->accept_vis (*this);
     if (value_expr->is_marked_for_strip ())
-      rust_error_at (value_expr->get_locus_slow (),
+      rust_error_at (value_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1763,7 +1645,7 @@ public:
     auto &if_block = expr.get_if_block ();
     if_block->accept_vis (*this);
     if (if_block->is_marked_for_strip ())
-      rust_error_at (if_block->get_locus_slow (),
+      rust_error_at (if_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1771,7 +1653,7 @@ public:
     auto &conseq_if_expr = expr.get_conseq_if_expr ();
     conseq_if_expr->accept_vis (*this);
     if (conseq_if_expr->is_marked_for_strip ())
-      rust_error_at (conseq_if_expr->get_locus_slow (),
+      rust_error_at (conseq_if_expr->get_locus (),
 		     "cannot strip consequent if expression in this "
 		     "position - outer attributes not allowed");
   }
@@ -1789,7 +1671,7 @@ public:
       {
 	pattern->accept_vis (*this);
 	if (pattern->is_marked_for_strip ())
-	  rust_error_at (pattern->get_locus_slow (),
+	  rust_error_at (pattern->get_locus (),
 			 "cannot strip pattern in this position");
       }
 
@@ -1797,7 +1679,7 @@ public:
     auto &value_expr = expr.get_value_expr ();
     value_expr->accept_vis (*this);
     if (value_expr->is_marked_for_strip ())
-      rust_error_at (value_expr->get_locus_slow (),
+      rust_error_at (value_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1805,7 +1687,7 @@ public:
     auto &if_block = expr.get_if_block ();
     if_block->accept_vis (*this);
     if (if_block->is_marked_for_strip ())
-      rust_error_at (if_block->get_locus_slow (),
+      rust_error_at (if_block->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1813,7 +1695,7 @@ public:
     auto &conseq_if_let_expr = expr.get_conseq_if_let_expr ();
     conseq_if_let_expr->accept_vis (*this);
     if (conseq_if_let_expr->is_marked_for_strip ())
-      rust_error_at (conseq_if_let_expr->get_locus_slow (),
+      rust_error_at (conseq_if_let_expr->get_locus (),
 		     "cannot strip consequent if let expression in this "
 		     "position - outer attributes not "
 		     "allowed");
@@ -1840,7 +1722,7 @@ public:
     auto &scrutinee_expr = expr.get_scrutinee_expr ();
     scrutinee_expr->accept_vis (*this);
     if (scrutinee_expr->is_marked_for_strip ())
-      rust_error_at (scrutinee_expr->get_locus_slow (),
+      rust_error_at (scrutinee_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
 
@@ -1864,7 +1746,7 @@ public:
 	  {
 	    pattern->accept_vis (*this);
 	    if (pattern->is_marked_for_strip ())
-	      rust_error_at (pattern->get_locus_slow (),
+	      rust_error_at (pattern->get_locus (),
 			     "cannot strip pattern in this position");
 	  }
 
@@ -1877,7 +1759,7 @@ public:
 	    auto &guard_expr = match_arm.get_guard_expr ();
 	    guard_expr->accept_vis (*this);
 	    if (guard_expr->is_marked_for_strip ())
-	      rust_error_at (guard_expr->get_locus_slow (),
+	      rust_error_at (guard_expr->get_locus (),
 			     "cannot strip expression in this position - outer "
 			     "attributes not allowed");
 	  }
@@ -1886,7 +1768,7 @@ public:
 	auto &case_expr = match_case.get_expr ();
 	case_expr->accept_vis (*this);
 	if (case_expr->is_marked_for_strip ())
-	  rust_error_at (case_expr->get_locus_slow (),
+	  rust_error_at (case_expr->get_locus (),
 			 "cannot strip expression in this position - outer "
 			 "attributes not allowed");
 
@@ -1909,7 +1791,7 @@ public:
     auto &awaited_expr = expr.get_awaited_expr ();
     awaited_expr->accept_vis (*this);
     if (awaited_expr->is_marked_for_strip ())
-      rust_error_at (awaited_expr->get_locus_slow (),
+      rust_error_at (awaited_expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1927,7 +1809,7 @@ public:
     auto &block_expr = expr.get_block_expr ();
     block_expr->accept_vis (*this);
     if (block_expr->is_marked_for_strip ())
-      rust_error_at (block_expr->get_locus_slow (),
+      rust_error_at (block_expr->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -1948,7 +1830,7 @@ public:
 	auto &type = param.get_type ();
 	type->accept_vis (*this);
 	if (type->is_marked_for_strip ())
-	  rust_error_at (type->get_locus_slow (),
+	  rust_error_at (type->get_locus (),
 			 "cannot strip type in this position");
       }
   }
@@ -1963,8 +1845,7 @@ public:
     auto &type = item.get_type ();
     type->accept_vis (*this);
     if (type->is_marked_for_strip ())
-      rust_error_at (type->get_locus_slow (),
-		     "cannot strip type in this position");
+      rust_error_at (type->get_locus (), "cannot strip type in this position");
 
     // don't strip directly, only components of bounds
     for (auto &bound : item.get_type_param_bounds ())
@@ -1998,7 +1879,7 @@ public:
 	auto &return_type = method.get_return_type ();
 	return_type->accept_vis (*this);
 	if (return_type->is_marked_for_strip ())
-	  rust_error_at (return_type->get_locus_slow (),
+	  rust_error_at (return_type->get_locus (),
 			 "cannot strip type in this position");
       }
 
@@ -2011,7 +1892,7 @@ public:
     auto &block_expr = method.get_definition ();
     block_expr->accept_vis (*this);
     if (block_expr->is_marked_for_strip ())
-      rust_error_at (block_expr->get_locus_slow (),
+      rust_error_at (block_expr->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -2035,6 +1916,15 @@ public:
 	    module.mark_for_strip ();
 	    return;
 	  }
+      }
+
+    // Parse the module's items if they haven't been expanded and the file
+    // should be parsed (i.e isn't hidden behind an untrue or impossible cfg
+    // directive)
+    if (!module.is_marked_for_strip ()
+	&& module.get_kind () == AST::Module::ModuleKind::UNLOADED)
+      {
+	module.load_items ();
       }
 
     // strip items if required
@@ -2095,7 +1985,7 @@ public:
 	auto &return_type = function.get_return_type ();
 	return_type->accept_vis (*this);
 	if (return_type->is_marked_for_strip ())
-	  rust_error_at (return_type->get_locus_slow (),
+	  rust_error_at (return_type->get_locus (),
 			 "cannot strip type in this position");
       }
 
@@ -2108,7 +1998,7 @@ public:
     auto &block_expr = function.get_definition ();
     block_expr->accept_vis (*this);
     if (block_expr->is_marked_for_strip ())
-      rust_error_at (block_expr->get_locus_slow (),
+      rust_error_at (block_expr->get_locus (),
 		     "cannot strip block expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -2132,8 +2022,7 @@ public:
     auto &type = type_alias.get_type_aliased ();
     type->accept_vis (*this);
     if (type->is_marked_for_strip ())
-      rust_error_at (type->get_locus_slow (),
-		     "cannot strip type in this position");
+      rust_error_at (type->get_locus (), "cannot strip type in this position");
   }
   void visit (AST::StructStruct &struct_item) override
   {
@@ -2231,7 +2120,7 @@ public:
     auto &expr = item.get_expr ();
     expr->accept_vis (*this);
     if (expr->is_marked_for_strip ())
-      rust_error_at (expr->get_locus_slow (),
+      rust_error_at (expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -2291,8 +2180,7 @@ public:
     auto &type = const_item.get_type ();
     type->accept_vis (*this);
     if (type->is_marked_for_strip ())
-      rust_error_at (type->get_locus_slow (),
-		     "cannot strip type in this position");
+      rust_error_at (type->get_locus (), "cannot strip type in this position");
 
     /* strip any internal sub-expressions - expression itself isn't
      * allowed to have external attributes in this position so can't be
@@ -2300,7 +2188,7 @@ public:
     auto &expr = const_item.get_expr ();
     expr->accept_vis (*this);
     if (expr->is_marked_for_strip ())
-      rust_error_at (expr->get_locus_slow (),
+      rust_error_at (expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -2318,8 +2206,7 @@ public:
     auto &type = static_item.get_type ();
     type->accept_vis (*this);
     if (type->is_marked_for_strip ())
-      rust_error_at (type->get_locus_slow (),
-		     "cannot strip type in this position");
+      rust_error_at (type->get_locus (), "cannot strip type in this position");
 
     /* strip any internal sub-expressions - expression itself isn't
      * allowed to have external attributes in this position so can't be
@@ -2327,7 +2214,7 @@ public:
     auto &expr = static_item.get_expr ();
     expr->accept_vis (*this);
     if (expr->is_marked_for_strip ())
-      rust_error_at (expr->get_locus_slow (),
+      rust_error_at (expr->get_locus (),
 		     "cannot strip expression in this position - outer "
 		     "attributes not allowed");
   }
@@ -2351,7 +2238,7 @@ public:
 	auto &block = item.get_definition ();
 	block->accept_vis (*this);
 	if (block->is_marked_for_strip ())
-	  rust_error_at (block->get_locus_slow (),
+	  rust_error_at (block->get_locus (),
 			 "cannot strip block expression in this "
 			 "position - outer attributes not allowed");
       }
@@ -2376,7 +2263,7 @@ public:
 	auto &block = item.get_definition ();
 	block->accept_vis (*this);
 	if (block->is_marked_for_strip ())
-	  rust_error_at (block->get_locus_slow (),
+	  rust_error_at (block->get_locus (),
 			 "cannot strip block expression in this "
 			 "position - outer attributes not allowed");
       }
@@ -2395,8 +2282,7 @@ public:
     auto &type = item.get_type ();
     type->accept_vis (*this);
     if (type->is_marked_for_strip ())
-      rust_error_at (type->get_locus_slow (),
-		     "cannot strip type in this position");
+      rust_error_at (type->get_locus (), "cannot strip type in this position");
 
     /* strip any internal sub-expressions - expression itself isn't
      * allowed to have external attributes in this position so can't be
@@ -2406,7 +2292,7 @@ public:
 	auto &expr = item.get_expr ();
 	expr->accept_vis (*this);
 	if (expr->is_marked_for_strip ())
-	  rust_error_at (expr->get_locus_slow (),
+	  rust_error_at (expr->get_locus (),
 			 "cannot strip expression in this position - outer "
 			 "attributes not allowed");
       }
@@ -2488,8 +2374,7 @@ public:
     auto &type = impl.get_type ();
     type->accept_vis (*this);
     if (type->is_marked_for_strip ())
-      rust_error_at (type->get_locus_slow (),
-		     "cannot strip type in this position");
+      rust_error_at (type->get_locus (), "cannot strip type in this position");
 
     if (impl.has_where_clause ())
       expand_where_clause (impl.get_where_clause ());
@@ -2522,8 +2407,7 @@ public:
     auto &type = impl.get_type ();
     type->accept_vis (*this);
     if (type->is_marked_for_strip ())
-      rust_error_at (type->get_locus_slow (),
-		     "cannot strip type in this position");
+      rust_error_at (type->get_locus (), "cannot strip type in this position");
 
     auto &trait_path = impl.get_trait_path ();
     visit (trait_path);
@@ -2550,8 +2434,7 @@ public:
     auto &type = item.get_type ();
     type->accept_vis (*this);
     if (type->is_marked_for_strip ())
-      rust_error_at (type->get_locus_slow (),
-		     "cannot strip type in this position");
+      rust_error_at (type->get_locus (), "cannot strip type in this position");
   }
   void visit (AST::ExternalFunctionItem &item) override
   {
@@ -2585,7 +2468,7 @@ public:
 	auto &type = param.get_type ();
 	type->accept_vis (*this);
 	if (type->is_marked_for_strip ())
-	  rust_error_at (type->get_locus_slow (),
+	  rust_error_at (type->get_locus (),
 			 "cannot strip type in this position");
 
 	// increment if nothing else happens
@@ -2603,7 +2486,7 @@ public:
 	auto &return_type = item.get_return_type ();
 	return_type->accept_vis (*this);
 	if (return_type->is_marked_for_strip ())
-	  rust_error_at (return_type->get_locus_slow (),
+	  rust_error_at (return_type->get_locus (),
 			 "cannot strip type in this position");
       }
 
@@ -2647,21 +2530,15 @@ public:
       }
 
     // I don't think any macro rules can be stripped in any way
-  }
-  void visit (AST::MacroInvocation &macro_invoc) override
-  {
-    // initial strip test based on outer attrs
-    expander.expand_cfg_attrs (macro_invoc.get_outer_attrs ());
-    if (expander.fails_cfg_with_expand (macro_invoc.get_outer_attrs ()))
-      {
-	macro_invoc.mark_for_strip ();
-	return;
-      }
 
-    // I don't think any macro token trees can be stripped in any way
-
-    // TODO: maybe have stripping behaviour for the cfg! macro here?
+    auto path = Resolver::CanonicalPath::new_seg (rules_def.get_node_id (),
+						  rules_def.get_rule_name ());
+    expander.resolver->get_macro_scope ().insert (path,
+						  rules_def.get_node_id (),
+						  rules_def.get_locus ());
+    expander.mappings->insert_macro_def (&rules_def);
   }
+
   void visit (AST::MetaItemPath &) override {}
   void visit (AST::MetaItemSeq &) override {}
   void visit (AST::MetaWord &) override {}
@@ -2682,7 +2559,7 @@ public:
     auto &sub_pattern = pattern.get_pattern_to_bind ();
     sub_pattern->accept_vis (*this);
     if (sub_pattern->is_marked_for_strip ())
-      rust_error_at (sub_pattern->get_locus_slow (),
+      rust_error_at (sub_pattern->get_locus (),
 		     "cannot strip pattern in this position");
   }
   void visit (AST::WildcardPattern &) override
@@ -2720,7 +2597,7 @@ public:
     auto &sub_pattern = pattern.get_referenced_pattern ();
     sub_pattern->accept_vis (*this);
     if (sub_pattern->is_marked_for_strip ())
-      rust_error_at (sub_pattern->get_locus_slow (),
+      rust_error_at (sub_pattern->get_locus (),
 		     "cannot strip pattern in this position");
   }
   void visit (AST::StructPatternFieldTuplePat &field) override
@@ -2737,7 +2614,7 @@ public:
     auto &sub_pattern = field.get_index_pattern ();
     sub_pattern->accept_vis (*this);
     if (sub_pattern->is_marked_for_strip ())
-      rust_error_at (sub_pattern->get_locus_slow (),
+      rust_error_at (sub_pattern->get_locus (),
 		     "cannot strip pattern in this position");
   }
   void visit (AST::StructPatternFieldIdentPat &field) override
@@ -2754,7 +2631,7 @@ public:
     auto &sub_pattern = field.get_ident_pattern ();
     sub_pattern->accept_vis (*this);
     if (sub_pattern->is_marked_for_strip ())
-      rust_error_at (sub_pattern->get_locus_slow (),
+      rust_error_at (sub_pattern->get_locus (),
 		     "cannot strip pattern in this position");
   }
   void visit (AST::StructPatternFieldIdent &field) override
@@ -2801,7 +2678,7 @@ public:
 	pattern->accept_vis (*this);
 
 	if (pattern->is_marked_for_strip ())
-	  rust_error_at (pattern->get_locus_slow (),
+	  rust_error_at (pattern->get_locus (),
 			 "cannot strip pattern in this position");
 	// TODO: quit stripping now? or keep going?
       }
@@ -2814,7 +2691,7 @@ public:
 	lower_pattern->accept_vis (*this);
 
 	if (lower_pattern->is_marked_for_strip ())
-	  rust_error_at (lower_pattern->get_locus_slow (),
+	  rust_error_at (lower_pattern->get_locus (),
 			 "cannot strip pattern in this position");
 	// TODO: quit stripping now? or keep going?
       }
@@ -2823,7 +2700,7 @@ public:
 	upper_pattern->accept_vis (*this);
 
 	if (upper_pattern->is_marked_for_strip ())
-	  rust_error_at (upper_pattern->get_locus_slow (),
+	  rust_error_at (upper_pattern->get_locus (),
 			 "cannot strip pattern in this position");
 	// TODO: quit stripping now? or keep going?
       }
@@ -2847,7 +2724,7 @@ public:
 	pattern->accept_vis (*this);
 
 	if (pattern->is_marked_for_strip ())
-	  rust_error_at (pattern->get_locus_slow (),
+	  rust_error_at (pattern->get_locus (),
 			 "cannot strip pattern in this position");
 	// TODO: quit stripping now? or keep going?
       }
@@ -2860,7 +2737,7 @@ public:
 	lower_pattern->accept_vis (*this);
 
 	if (lower_pattern->is_marked_for_strip ())
-	  rust_error_at (lower_pattern->get_locus_slow (),
+	  rust_error_at (lower_pattern->get_locus (),
 			 "cannot strip pattern in this position");
 	// TODO: quit stripping now? or keep going?
       }
@@ -2869,7 +2746,7 @@ public:
 	upper_pattern->accept_vis (*this);
 
 	if (upper_pattern->is_marked_for_strip ())
-	  rust_error_at (upper_pattern->get_locus_slow (),
+	  rust_error_at (upper_pattern->get_locus (),
 			 "cannot strip pattern in this position");
 	// TODO: quit stripping now? or keep going?
       }
@@ -2887,7 +2764,7 @@ public:
     pattern_in_parens->accept_vis (*this);
 
     if (pattern_in_parens->is_marked_for_strip ())
-      rust_error_at (pattern_in_parens->get_locus_slow (),
+      rust_error_at (pattern_in_parens->get_locus (),
 		     "cannot strip pattern in this position");
   }
   void visit (AST::SlicePattern &pattern) override
@@ -2898,7 +2775,7 @@ public:
 	item->accept_vis (*this);
 
 	if (item->is_marked_for_strip ())
-	  rust_error_at (item->get_locus_slow (),
+	  rust_error_at (item->get_locus (),
 			 "cannot strip pattern in this position");
 	// TODO: quit stripping now? or keep going?
       }
@@ -2922,7 +2799,7 @@ public:
     auto &pattern = stmt.get_pattern ();
     pattern->accept_vis (*this);
     if (pattern->is_marked_for_strip ())
-      rust_error_at (pattern->get_locus_slow (),
+      rust_error_at (pattern->get_locus (),
 		     "cannot strip pattern in this position");
 
     // similar for type
@@ -2931,7 +2808,7 @@ public:
 	auto &type = stmt.get_type ();
 	type->accept_vis (*this);
 	if (type->is_marked_for_strip ())
-	  rust_error_at (type->get_locus_slow (),
+	  rust_error_at (type->get_locus (),
 			 "cannot strip type in this position");
       }
 
@@ -2943,7 +2820,7 @@ public:
 	auto &init_expr = stmt.get_init_expr ();
 	init_expr->accept_vis (*this);
 	if (init_expr->is_marked_for_strip ())
-	  rust_error_at (init_expr->get_locus_slow (),
+	  rust_error_at (init_expr->get_locus (),
 			 "cannot strip expression in this position - outer "
 			 "attributes not allowed");
       }
@@ -3012,7 +2889,7 @@ public:
     auto &inner_type = type.get_type_in_parens ();
     inner_type->accept_vis (*this);
     if (inner_type->is_marked_for_strip ())
-      rust_error_at (inner_type->get_locus_slow (),
+      rust_error_at (inner_type->get_locus (),
 		     "cannot strip type in this position");
   }
   void visit (AST::ImplTraitTypeOneBound &type) override
@@ -3033,7 +2910,7 @@ public:
       {
 	elem_type->accept_vis (*this);
 	if (elem_type->is_marked_for_strip ())
-	  rust_error_at (elem_type->get_locus_slow (),
+	  rust_error_at (elem_type->get_locus (),
 			 "cannot strip type in this position");
       }
   }
@@ -3047,7 +2924,7 @@ public:
     auto &pointed_type = type.get_type_pointed_to ();
     pointed_type->accept_vis (*this);
     if (pointed_type->is_marked_for_strip ())
-      rust_error_at (pointed_type->get_locus_slow (),
+      rust_error_at (pointed_type->get_locus (),
 		     "cannot strip type in this position");
   }
   void visit (AST::ReferenceType &type) override
@@ -3056,7 +2933,7 @@ public:
     auto &referenced_type = type.get_type_referenced ();
     referenced_type->accept_vis (*this);
     if (referenced_type->is_marked_for_strip ())
-      rust_error_at (referenced_type->get_locus_slow (),
+      rust_error_at (referenced_type->get_locus (),
 		     "cannot strip type in this position");
   }
   void visit (AST::ArrayType &type) override
@@ -3065,14 +2942,14 @@ public:
     auto &base_type = type.get_elem_type ();
     base_type->accept_vis (*this);
     if (base_type->is_marked_for_strip ())
-      rust_error_at (base_type->get_locus_slow (),
+      rust_error_at (base_type->get_locus (),
 		     "cannot strip type in this position");
 
     // same for expression
     auto &size_expr = type.get_size_expr ();
     size_expr->accept_vis (*this);
     if (size_expr->is_marked_for_strip ())
-      rust_error_at (size_expr->get_locus_slow (),
+      rust_error_at (size_expr->get_locus (),
 		     "cannot strip expression in this position");
   }
   void visit (AST::SliceType &type) override
@@ -3081,7 +2958,7 @@ public:
     auto &elem_type = type.get_elem_type ();
     elem_type->accept_vis (*this);
     if (elem_type->is_marked_for_strip ())
-      rust_error_at (elem_type->get_locus_slow (),
+      rust_error_at (elem_type->get_locus (),
 		     "cannot strip type in this position");
   }
   void visit (AST::InferredType &) override
@@ -3109,7 +2986,7 @@ public:
 	auto &type = param.get_type ();
 	type->accept_vis (*this);
 	if (type->is_marked_for_strip ())
-	  rust_error_at (type->get_locus_slow (),
+	  rust_error_at (type->get_locus (),
 			 "cannot strip type in this position");
 
 	// increment if nothing else happens
@@ -3124,7 +3001,7 @@ public:
 	auto &return_type = type.get_return_type ();
 	return_type->accept_vis (*this);
 	if (return_type->is_marked_for_strip ())
-	  rust_error_at (return_type->get_locus_slow (),
+	  rust_error_at (return_type->get_locus (),
 			 "cannot strip type in this position");
       }
 
@@ -3149,7 +3026,7 @@ MacroExpander::parse_macro_to_meta_item (AST::MacroInvocData &invoc)
     }
   else
     {
-      std::vector<std::unique_ptr<AST::MetaItemInner> > meta_items (
+      std::vector<std::unique_ptr<AST::MetaItemInner>> meta_items (
 	std::move (converted_input->get_items ()));
       invoc.set_meta_item_output (std::move (meta_items));
     }
@@ -3176,10 +3053,11 @@ MacroExpander::expand_cfg_macro (AST::MacroInvocData &invoc)
     return AST::Literal ("false", AST::Literal::BOOL, CORETYPE_BOOL);
 }
 
-#if 0
 AST::ASTFragment
-MacroExpander::expand_decl_macro (AST::MacroInvocData &invoc,
-				  AST::MacroRulesDefinition &rules_def)
+MacroExpander::expand_decl_macro (Location invoc_locus,
+				  AST::MacroInvocData &invoc,
+				  AST::MacroRulesDefinition &rules_def,
+				  bool semicolon)
 {
   // ensure that both invocation and rules are in a valid state
   rust_assert (!invoc.is_marked_for_strip ());
@@ -3239,49 +3117,139 @@ MacroExpander::expand_decl_macro (AST::MacroInvocData &invoc,
    * TokenTree). This will prevent re-conversion of Tokens between each type
    * all the time, while still allowing the heterogenous storage of token trees.
    */
+
+  AST::DelimTokenTree &invoc_token_tree = invoc.get_delim_tok_tree ();
+
+  // find matching arm
+  AST::MacroRule *matched_rule = nullptr;
+  std::map<std::string, std::vector<MatchedFragment>> matched_fragments;
+  for (auto &rule : rules_def.get_rules ())
+    {
+      sub_stack.push ();
+      bool did_match_rule = try_match_rule (rule, invoc_token_tree);
+      matched_fragments = sub_stack.pop ();
+
+      if (did_match_rule)
+	{
+	  for (auto &kv : matched_fragments)
+	    rust_debug ("[fragment]: %s (%ld)", kv.first.c_str (),
+			kv.second.size ());
+
+	  matched_rule = &rule;
+	  break;
+	}
+    }
+
+  if (matched_rule == nullptr)
+    {
+      RichLocation r (invoc_locus);
+      r.add_range (rules_def.get_locus ());
+      rust_error_at (r, "Failed to match any rule within macro");
+      return AST::ASTFragment::create_empty ();
+    }
+
+  return transcribe_rule (*matched_rule, invoc_token_tree, matched_fragments,
+			  semicolon, peek_context ());
 }
-#endif
 
 void
-MacroExpander::expand_invoc (std::unique_ptr<AST::MacroInvocation> &invoc)
+MacroExpander::expand_invoc (AST::MacroInvocation &invoc)
 {
-  /* if current expansion depth > recursion limit, create an error (maybe fatal
-   * error) and return */
+  if (depth_exceeds_recursion_limit ())
+    {
+      rust_error_at (invoc.get_locus (), "reached recursion limit");
+      return;
+    }
 
-  /* switch on type of macro:
-      - '!' syntax macro (inner switch)
-	  - procedural macro - "A token-based function-like macro"
-	  - 'macro_rules' (by example/pattern-match) macro? or not? "an
-     AST-based function-like macro"
-	  - else is unreachable
-      - attribute syntax macro (inner switch)
-	  - procedural macro attribute syntax - "A token-based attribute macro"
-	  - legacy macro attribute syntax? - "an AST-based attribute macro"
-	  - non-macro attribute: mark known
-	  - else is unreachable
-      - derive macro (inner switch)
-	  - derive or legacy derive - "token-based" vs "AST-based"
-	  - else is unreachable
-      - derive container macro - unreachable*/
+  AST::MacroInvocData &invoc_data = invoc.get_invoc_data ();
 
-#if 0
-  // macro_rules macro test code
-  auto rule_def = find_rules_def(invoc->get_path());
-  if (rule_def != nullptr) {
-    ASTFrag expanded = expand_decl_macro(invoc, rule_def);
-    /* could make this a data structure containing vectors of exprs, patterns and types (for regular),
-     * and then stmts and items (for semi). Except what about having an expr, then a type? Hmm. Might
-     * have to do the "unified base type" thing OR just have a simulated union, and then have AST frag
-     * be a vector of these simulated unions. */
+  // ??
+  // switch on type of macro:
+  //  - '!' syntax macro (inner switch)
+  //      - procedural macro - "A token-based function-like macro"
+  //      - 'macro_rules' (by example/pattern-match) macro? or not? "an
+  // AST-based function-like macro"
+  //      - else is unreachable
+  //  - attribute syntax macro (inner switch)
+  //  - procedural macro attribute syntax - "A token-based attribute
+  // macro"
+  //      - legacy macro attribute syntax? - "an AST-based attribute macro"
+  //      - non-macro attribute: mark known
+  //      - else is unreachable
+  //  - derive macro (inner switch)
+  //      - derive or legacy derive - "token-based" vs "AST-based"
+  //      - else is unreachable
+  //  - derive container macro - unreachable
 
-    // how would errors be signalled? null fragment? something else?
-    // what about error vs just not having stuff in rules definition yet?
+  // lookup the rules for this macro
+  NodeId resolved_node = UNKNOWN_NODEID;
+  bool found = resolver->get_macro_scope ().lookup (
+    Resolver::CanonicalPath::new_seg (invoc.get_pattern_node_id (),
+				      invoc_data.get_path ().as_string ()),
+    &resolved_node);
+  if (!found)
+    {
+      rust_error_at (invoc.get_locus (), "unknown macro");
+      return;
+    }
 
-    /* replace macro invocation with ast frag. actually, don't have any context here. maybe attach ast
-     * frag to macro invocation, and then have a method above get it? Or just return the ast frag from
-     * this method. */
-  }
-#endif
+  // lookup the rules
+  AST::MacroRulesDefinition *rules_def = nullptr;
+  bool ok = mappings->lookup_macro_def (resolved_node, &rules_def);
+  rust_assert (ok);
+
+  auto fragment = AST::ASTFragment::create_empty ();
+
+  if (rules_def->is_builtin ())
+    fragment
+      = rules_def->get_builtin_transcriber () (invoc.get_locus (), invoc_data);
+  else
+    fragment
+      = expand_decl_macro (invoc.get_locus (), invoc_data, *rules_def, false);
+
+  // lets attach this fragment to the invocation
+  invoc.set_fragment (std::move (fragment));
+}
+
+void
+MacroExpander::expand_invoc_semi (AST::MacroInvocation &invoc)
+{
+  if (depth_exceeds_recursion_limit ())
+    {
+      rust_error_at (invoc.get_locus (), "reached recursion limit");
+      return;
+    }
+
+  AST::MacroInvocData &invoc_data = invoc.get_invoc_data ();
+
+  // lookup the rules for this macro
+  NodeId resolved_node = UNKNOWN_NODEID;
+  bool found = resolver->get_macro_scope ().lookup (
+    Resolver::CanonicalPath::new_seg (invoc.get_macro_node_id (),
+				      invoc_data.get_path ().as_string ()),
+    &resolved_node);
+  if (!found)
+    {
+      rust_error_at (invoc.get_locus (), "unknown macro");
+      return;
+    }
+
+  // lookup the rules
+  AST::MacroRulesDefinition *rules_def = nullptr;
+  bool ok = mappings->lookup_macro_def (resolved_node, &rules_def);
+  rust_assert (ok);
+
+  auto fragment = AST::ASTFragment::create_empty ();
+
+  if (rules_def->is_builtin ())
+    fragment
+      = rules_def->get_builtin_transcriber () (invoc.get_locus (), invoc_data);
+  else
+    fragment
+      = expand_decl_macro (invoc.get_locus (), invoc_data, *rules_def, true);
+
+  // lets attach this fragment to the invocation
+  invoc.set_fragment (std::move (fragment));
 }
 
 /* Determines whether any cfg predicate is false and hence item with attributes
@@ -3383,6 +3351,9 @@ MacroExpander::expand_cfg_attrs (AST::AttrVec &attrs)
 void
 MacroExpander::expand_crate ()
 {
+  NodeId scope_node_id = crate.get_node_id ();
+  resolver->get_macro_scope ().push (scope_node_id);
+
   /* fill macro/decorator map from init list? not sure where init list comes
    * from? */
 
@@ -3400,6 +3371,8 @@ MacroExpander::expand_crate ()
     }
   // expand module attributes?
 
+  push_context (ITEM);
+
   // expand attributes recursively and strip items if required
   AttrVisitor attr_visitor (*this);
   auto &items = crate.items;
@@ -3416,6 +3389,8 @@ MacroExpander::expand_crate ()
 	++it;
     }
 
+  pop_context ();
+
   // TODO: should recursive attribute and macro expansion be done in the same
   // transversal? Or in separate ones like currently?
 
@@ -3424,5 +3399,520 @@ MacroExpander::expand_crate ()
   // post-process
 
   // extract exported macros?
+}
+
+bool
+MacroExpander::depth_exceeds_recursion_limit () const
+{
+  return expansion_depth >= cfg.recursion_limit;
+}
+
+bool
+MacroExpander::try_match_rule (AST::MacroRule &match_rule,
+			       AST::DelimTokenTree &invoc_token_tree)
+{
+  MacroInvocLexer lex (invoc_token_tree.to_token_stream ());
+  Parser<MacroInvocLexer> parser (std::move (lex));
+
+  AST::MacroMatcher &matcher = match_rule.get_matcher ();
+
+  expansion_depth++;
+  if (!match_matcher (parser, matcher))
+    {
+      expansion_depth--;
+      return false;
+    }
+  expansion_depth--;
+
+  bool used_all_input_tokens = parser.skip_token (END_OF_FILE);
+  return used_all_input_tokens;
+}
+
+bool
+MacroExpander::match_fragment (Parser<MacroInvocLexer> &parser,
+			       AST::MacroMatchFragment &fragment)
+{
+  switch (fragment.get_frag_spec ())
+    {
+    case AST::MacroFragSpec::EXPR:
+      parser.parse_expr ();
+      break;
+
+    case AST::MacroFragSpec::BLOCK:
+      parser.parse_block_expr ();
+      break;
+
+    case AST::MacroFragSpec::IDENT:
+      parser.parse_identifier_pattern ();
+      break;
+
+    case AST::MacroFragSpec::LITERAL:
+      parser.parse_literal_expr ();
+      break;
+
+    case AST::MacroFragSpec::ITEM:
+      parser.parse_item (false);
+      break;
+
+    case AST::MacroFragSpec::TY:
+      parser.parse_type ();
+      break;
+
+    case AST::MacroFragSpec::PAT:
+      parser.parse_pattern ();
+      break;
+
+    case AST::MacroFragSpec::PATH:
+      parser.parse_path_in_expression ();
+      break;
+
+    case AST::MacroFragSpec::VIS:
+      parser.parse_visibility ();
+      break;
+
+    case AST::MacroFragSpec::STMT:
+      parser.parse_stmt ();
+      break;
+
+    case AST::MacroFragSpec::LIFETIME:
+      parser.parse_lifetime_params ();
+      break;
+
+      // is meta attributes?
+    case AST::MacroFragSpec::META:
+      // parser.parse_inner_attribute ?
+      // parser.parse_outer_attribute ?
+      // parser.parse_attribute_body ?
+      // parser.parse_doc_comment ?
+      gcc_unreachable ();
+      break;
+
+      // what is TT?
+    case AST::MacroFragSpec::TT:
+      // parser.parse_token_tree() ?
+      gcc_unreachable ();
+      break;
+
+      // i guess we just ignore invalid and just error out
+    case AST::MacroFragSpec::INVALID:
+      return false;
+    }
+
+  // it matches if the parser did not produce errors trying to parse that type
+  // of item
+  return !parser.has_errors ();
+}
+
+bool
+MacroExpander::match_matcher (Parser<MacroInvocLexer> &parser,
+			      AST::MacroMatcher &matcher)
+{
+  if (depth_exceeds_recursion_limit ())
+    {
+      rust_error_at (matcher.get_match_locus (), "reached recursion limit");
+      return false;
+    }
+
+  auto delimiter = parser.peek_current_token ();
+
+  // this is used so we can check that we delimit the stream correctly.
+  switch (delimiter->get_id ())
+    {
+      case LEFT_PAREN: {
+	if (!parser.skip_token (LEFT_PAREN))
+	  return false;
+      }
+      break;
+
+      case LEFT_SQUARE: {
+	if (!parser.skip_token (LEFT_SQUARE))
+	  return false;
+      }
+      break;
+
+      case LEFT_CURLY: {
+	if (!parser.skip_token (LEFT_CURLY))
+	  return false;
+      }
+      break;
+    default:
+      gcc_unreachable ();
+    }
+
+  const MacroInvocLexer &source = parser.get_token_source ();
+
+  for (auto &match : matcher.get_matches ())
+    {
+      size_t offs_begin = source.get_offs ();
+
+      switch (match->get_macro_match_type ())
+	{
+	  case AST::MacroMatch::MacroMatchType::Fragment: {
+	    AST::MacroMatchFragment *fragment
+	      = static_cast<AST::MacroMatchFragment *> (match.get ());
+	    if (!match_fragment (parser, *fragment))
+	      return false;
+
+	    // matched fragment get the offset in the token stream
+	    size_t offs_end = source.get_offs ();
+	    sub_stack.insert_fragment (
+	      MatchedFragment (fragment->get_ident (), offs_begin, offs_end));
+	  }
+	  break;
+
+	  case AST::MacroMatch::MacroMatchType::Tok: {
+	    AST::Token *tok = static_cast<AST::Token *> (match.get ());
+	    if (!match_token (parser, *tok))
+	      return false;
+	  }
+	  break;
+
+	  case AST::MacroMatch::MacroMatchType::Repetition: {
+	    AST::MacroMatchRepetition *rep
+	      = static_cast<AST::MacroMatchRepetition *> (match.get ());
+	    if (!match_repetition (parser, *rep))
+	      return false;
+	  }
+	  break;
+
+	  case AST::MacroMatch::MacroMatchType::Matcher: {
+	    AST::MacroMatcher *m
+	      = static_cast<AST::MacroMatcher *> (match.get ());
+	    expansion_depth++;
+	    if (!match_matcher (parser, *m))
+	      {
+		expansion_depth--;
+		return false;
+	      }
+	    expansion_depth--;
+	  }
+	  break;
+	}
+    }
+
+  switch (delimiter->get_id ())
+    {
+      case LEFT_PAREN: {
+	if (!parser.skip_token (RIGHT_PAREN))
+	  return false;
+      }
+      break;
+
+      case LEFT_SQUARE: {
+	if (!parser.skip_token (RIGHT_SQUARE))
+	  return false;
+      }
+      break;
+
+      case LEFT_CURLY: {
+	if (!parser.skip_token (RIGHT_CURLY))
+	  return false;
+      }
+      break;
+    default:
+      gcc_unreachable ();
+    }
+
+  return true;
+}
+
+bool
+MacroExpander::match_token (Parser<MacroInvocLexer> &parser, AST::Token &token)
+{
+  // FIXME this needs to actually match the content and the type
+  return parser.skip_token (token.get_id ());
+}
+
+bool
+MacroExpander::match_n_matches (Parser<MacroInvocLexer> &parser,
+				AST::MacroMatchRepetition &rep,
+				size_t &match_amount, size_t lo_bound,
+				size_t hi_bound)
+{
+  match_amount = 0;
+  auto &matches = rep.get_matches ();
+
+  const MacroInvocLexer &source = parser.get_token_source ();
+  while (true)
+    {
+      // If the current token is a closing macro delimiter, break away.
+      // TODO: Is this correct?
+      auto t_id = parser.peek_current_token ()->get_id ();
+      if (t_id == RIGHT_PAREN || t_id == RIGHT_SQUARE || t_id == RIGHT_CURLY)
+	break;
+
+      // Skip parsing a separator on the first match, otherwise consume it.
+      // If it isn't present, this is an error
+      if (rep.has_sep () && match_amount > 0)
+	if (!match_token (parser, *rep.get_sep ()))
+	  break;
+
+      bool valid_current_match = false;
+      for (auto &match : matches)
+	{
+	  size_t offs_begin = source.get_offs ();
+	  switch (match->get_macro_match_type ())
+	    {
+	      case AST::MacroMatch::MacroMatchType::Fragment: {
+		AST::MacroMatchFragment *fragment
+		  = static_cast<AST::MacroMatchFragment *> (match.get ());
+		valid_current_match = match_fragment (parser, *fragment);
+
+		// matched fragment get the offset in the token stream
+		size_t offs_end = source.get_offs ();
+		sub_stack.insert_fragment (
+		  MatchedFragment (fragment->get_ident (), offs_begin,
+				   offs_end));
+	      }
+	      break;
+
+	      case AST::MacroMatch::MacroMatchType::Tok: {
+		AST::Token *tok = static_cast<AST::Token *> (match.get ());
+		valid_current_match = match_token (parser, *tok);
+	      }
+	      break;
+
+	      case AST::MacroMatch::MacroMatchType::Repetition: {
+		AST::MacroMatchRepetition *rep
+		  = static_cast<AST::MacroMatchRepetition *> (match.get ());
+		valid_current_match = match_repetition (parser, *rep);
+	      }
+	      break;
+
+	      case AST::MacroMatch::MacroMatchType::Matcher: {
+		AST::MacroMatcher *m
+		  = static_cast<AST::MacroMatcher *> (match.get ());
+		valid_current_match = match_matcher (parser, *m);
+	      }
+	      break;
+	    }
+	}
+      // If we've encountered an error once, stop trying to match more
+      // repetitions
+      if (!valid_current_match)
+	break;
+
+      match_amount++;
+
+      // Break early if we notice there's too many expressions already
+      if (hi_bound && match_amount > hi_bound)
+	break;
+    }
+
+  // Check if the amount of matches we got is valid: Is it more than the lower
+  // bound and less than the higher bound?
+  bool did_meet_lo_bound = match_amount >= lo_bound;
+  bool did_meet_hi_bound = hi_bound ? match_amount <= hi_bound : true;
+
+  return did_meet_lo_bound && did_meet_hi_bound;
+}
+
+bool
+MacroExpander::match_repetition (Parser<MacroInvocLexer> &parser,
+				 AST::MacroMatchRepetition &rep)
+{
+  size_t match_amount = 0;
+  bool res = false;
+
+  std::string lo_str;
+  std::string hi_str;
+  switch (rep.get_op ())
+    {
+    case AST::MacroMatchRepetition::MacroRepOp::ANY:
+      lo_str = "0";
+      hi_str = "+inf";
+      res = match_n_matches (parser, rep, match_amount);
+      break;
+    case AST::MacroMatchRepetition::MacroRepOp::ONE_OR_MORE:
+      lo_str = "1";
+      hi_str = "+inf";
+      res = match_n_matches (parser, rep, match_amount, 1);
+      break;
+    case AST::MacroMatchRepetition::MacroRepOp::ZERO_OR_ONE:
+      lo_str = "0";
+      hi_str = "1";
+      res = match_n_matches (parser, rep, match_amount, 0, 1);
+      break;
+    default:
+      gcc_unreachable ();
+    }
+
+  if (!res)
+    rust_error_at (rep.get_match_locus (),
+		   "invalid amount of matches for macro invocation. Expected "
+		   "between %s and %s, got %lu",
+		   lo_str.c_str (), hi_str.c_str (), match_amount);
+
+  rust_debug_loc (rep.get_match_locus (), "%s matched %lu times",
+		  res ? "successfully" : "unsuccessfully", match_amount);
+
+  // We can now set the amount to each fragment we matched in the substack
+  auto &stack_map = sub_stack.peek ();
+  for (auto &match : rep.get_matches ())
+    {
+      if (match->get_macro_match_type ()
+	  == AST::MacroMatch::MacroMatchType::Fragment)
+	{
+	  auto fragment = static_cast<AST::MacroMatchFragment *> (match.get ());
+	  auto it = stack_map.find (fragment->get_ident ());
+
+	  // If we can't find the fragment, but the result was valid, then
+	  // it's a zero-matched fragment and we can insert it
+	  if (it == stack_map.end ())
+	    {
+	      sub_stack.insert_fragment (
+		MatchedFragment::zero (fragment->get_ident ()));
+	    }
+	  else
+	    {
+	      // We can just set the repetition amount on the first match
+	      // FIXME: Make this more ergonomic and similar to what we fetch
+	      // in `substitute_repetition`
+	      it->second[0].set_match_amount (match_amount);
+	    }
+	}
+    }
+
+  return res;
+}
+
+AST::ASTFragment
+MacroExpander::transcribe_rule (
+  AST::MacroRule &match_rule, AST::DelimTokenTree &invoc_token_tree,
+  std::map<std::string, std::vector<MatchedFragment>> &matched_fragments,
+  bool semicolon, ContextType ctx)
+{
+  // we can manipulate the token tree to substitute the dollar identifiers so
+  // that when we call parse its already substituted for us
+  AST::MacroTranscriber &transcriber = match_rule.get_transcriber ();
+  AST::DelimTokenTree &transcribe_tree = transcriber.get_token_tree ();
+
+  auto invoc_stream = invoc_token_tree.to_token_stream ();
+  auto macro_rule_tokens = transcribe_tree.to_token_stream ();
+
+  auto substitute_context
+    = SubstituteCtx (invoc_stream, macro_rule_tokens, matched_fragments);
+  std::vector<std::unique_ptr<AST::Token>> substituted_tokens
+    = substitute_context.substitute_tokens ();
+
+  // // handy for debugging
+  // for (auto &tok : substituted_tokens)
+  //   {
+  //     rust_debug ("tok: [%s]", tok->as_string ().c_str ());
+  //   }
+
+  // parse it to an ASTFragment
+  MacroInvocLexer lex (std::move (substituted_tokens));
+  Parser<MacroInvocLexer> parser (std::move (lex));
+
+  // this is used so we can check that we delimit the stream correctly.
+  switch (transcribe_tree.get_delim_type ())
+    {
+    case AST::DelimType::PARENS:
+      rust_assert (parser.skip_token (LEFT_PAREN));
+      break;
+
+    case AST::DelimType::CURLY:
+      rust_assert (parser.skip_token (LEFT_CURLY));
+      break;
+
+    case AST::DelimType::SQUARE:
+      rust_assert (parser.skip_token (LEFT_SQUARE));
+      break;
+    }
+
+  // see https://github.com/Rust-GCC/gccrs/issues/22
+  // TL;DR:
+  //   - Treat all macro invocations with parentheses, (), or square brackets,
+  //   [], as expressions.
+  //   - If the macro invocation has curly brackets, {}, it may be parsed as a
+  //   statement depending on the context.
+  //   - If the macro invocation has a semicolon at the end, it must be parsed
+  //   as a statement (either via ExpressionStatement or
+  //   MacroInvocationWithSemi)
+
+  // parse the item
+  std::vector<AST::SingleASTNode> nodes;
+  switch (invoc_token_tree.get_delim_type ())
+    {
+    case AST::DelimType::PARENS:
+      case AST::DelimType::SQUARE: {
+	switch (ctx)
+	  {
+	    case ContextType::ITEM: {
+	      auto item = parser.parse_item (true);
+	      if (item != nullptr && !parser.has_errors ())
+		{
+		  rust_debug ("HELLO WORLD: [%s]", item->as_string ().c_str ());
+		  nodes.push_back (std::move (item));
+		}
+	    }
+	    break;
+
+	    case ContextType::BLOCK: {
+	      auto expr = parser.parse_expr ();
+	      if (expr != nullptr && !parser.has_errors ())
+		nodes.push_back (std::move (expr));
+	    }
+	    break;
+	  }
+      }
+      break;
+
+      case AST::DelimType::CURLY: {
+	switch (ctx)
+	  {
+	    case ContextType::ITEM: {
+	      auto item = parser.parse_item (true);
+	      if (item != nullptr && !parser.has_errors ())
+		nodes.push_back (std::move (item));
+	    }
+	    break;
+
+	    case ContextType::BLOCK: {
+	      auto stmt = parser.parse_stmt ();
+	      if (stmt != nullptr && !parser.has_errors ())
+		nodes.push_back (std::move (stmt));
+	    }
+	    break;
+	  }
+      }
+      break;
+    }
+
+  // emit any errors
+  if (parser.has_errors ())
+    {
+      for (auto &err : parser.get_errors ())
+	{
+	  rust_error_at (err.locus, "%s", err.message.c_str ());
+	}
+      return AST::ASTFragment::create_empty ();
+    }
+
+  // are all the tokens used?
+  bool did_delimit = false;
+  switch (transcribe_tree.get_delim_type ())
+    {
+    case AST::DelimType::PARENS:
+      did_delimit = parser.skip_token (RIGHT_PAREN);
+      break;
+    case AST::DelimType::SQUARE:
+      did_delimit = parser.skip_token (RIGHT_SQUARE);
+      break;
+    case AST::DelimType::CURLY:
+      did_delimit = parser.skip_token (RIGHT_CURLY);
+      break;
+    }
+
+  bool reached_end_of_stream = did_delimit && parser.skip_token (END_OF_FILE);
+  if (!reached_end_of_stream)
+    {
+      const_TokenPtr current_token = parser.peek_current_token ();
+      rust_error_at (current_token->get_locus (),
+		     "tokens here and after are unparsed");
+    }
+
+  return AST::ASTFragment (std::move (nodes));
 }
 } // namespace Rust

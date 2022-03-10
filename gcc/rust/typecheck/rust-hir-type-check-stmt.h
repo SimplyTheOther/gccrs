@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -23,6 +23,7 @@
 #include "rust-hir-full.h"
 #include "rust-hir-type-check-type.h"
 #include "rust-hir-type-check-expr.h"
+#include "rust-hir-type-check-enumitem.h"
 
 namespace Rust {
 namespace Resolver {
@@ -55,9 +56,20 @@ public:
       = TyTy::TupleType::get_unit_type (stmt.get_mappings ().get_hirid ());
   }
 
+  void visit (HIR::ConstantItem &constant) override
+  {
+    TyTy::BaseType *type = TypeCheckType::Resolve (constant.get_type ());
+    TyTy::BaseType *expr_type
+      = TypeCheckExpr::Resolve (constant.get_expr (), false);
+
+    infered = type->unify (expr_type);
+    context->insert_type (constant.get_mappings (), infered);
+  }
+
   void visit (HIR::LetStmt &stmt) override
   {
-    infered = new TyTy::TupleType (stmt.get_mappings ().get_hirid ());
+    infered
+      = TyTy::TupleType::get_unit_type (stmt.get_mappings ().get_hirid ());
 
     TyTy::BaseType *init_expr_ty = nullptr;
     if (stmt.has_init_expr ())
@@ -84,7 +96,7 @@ public:
 	if (unified_ty->get_kind () == TyTy::TypeKind::ERROR)
 	  return;
 
-	context->insert_type (stmt.get_mappings (), unified_ty);
+	context->insert_type (stmt.get_mappings (), specified_ty);
       }
     else
       {
@@ -104,7 +116,8 @@ public:
 	    context->insert_type (
 	      stmt.get_mappings (),
 	      new TyTy::InferType (stmt.get_mappings ().get_hirid (),
-				   TyTy::InferType::InferTypeKind::GENERAL));
+				   TyTy::InferType::InferTypeKind::GENERAL,
+				   stmt.get_locus ()));
 	  }
       }
 
@@ -142,28 +155,102 @@ public:
       }
 
     std::vector<TyTy::StructFieldType *> fields;
-
     size_t idx = 0;
-    struct_decl.iterate ([&] (HIR::TupleField &field) mutable -> bool {
-      TyTy::BaseType *field_type
-	= TypeCheckType::Resolve (field.get_field_type ().get ());
-      TyTy::StructFieldType *ty_field
-	= new TyTy::StructFieldType (field.get_mappings ().get_hirid (),
-				     std::to_string (idx), field_type);
-      fields.push_back (ty_field);
-      context->insert_type (field.get_mappings (), ty_field->get_field_type ());
-      idx++;
-      return true;
-    });
+    for (auto &field : struct_decl.get_fields ())
+      {
+	TyTy::BaseType *field_type
+	  = TypeCheckType::Resolve (field.get_field_type ().get ());
+	TyTy::StructFieldType *ty_field
+	  = new TyTy::StructFieldType (field.get_mappings ().get_hirid (),
+				       std::to_string (idx), field_type);
+	fields.push_back (ty_field);
+	context->insert_type (field.get_mappings (),
+			      ty_field->get_field_type ());
+	idx++;
+      }
+
+    // get the path
+    const CanonicalPath *canonical_path = nullptr;
+    bool ok = mappings->lookup_canonical_path (
+      struct_decl.get_mappings ().get_crate_num (),
+      struct_decl.get_mappings ().get_nodeid (), &canonical_path);
+    rust_assert (ok);
+    RustIdent ident{*canonical_path, struct_decl.get_locus ()};
+
+    // there is only a single variant
+    std::vector<TyTy::VariantDef *> variants;
+    variants.push_back (
+      new TyTy::VariantDef (struct_decl.get_mappings ().get_hirid (),
+			    struct_decl.get_identifier (), ident,
+			    TyTy::VariantDef::VariantType::TUPLE, nullptr,
+			    std::move (fields)));
 
     TyTy::BaseType *type
       = new TyTy::ADTType (struct_decl.get_mappings ().get_hirid (),
 			   mappings->get_next_hir_id (),
-			   struct_decl.get_identifier (),
+			   struct_decl.get_identifier (), ident,
 			   TyTy::ADTType::ADTKind::TUPLE_STRUCT,
-			   std::move (fields), std::move (substitutions));
+			   std::move (variants), std::move (substitutions));
 
     context->insert_type (struct_decl.get_mappings (), type);
+    infered = type;
+  }
+
+  void visit (HIR::Enum &enum_decl) override
+  {
+    std::vector<TyTy::SubstitutionParamMapping> substitutions;
+    if (enum_decl.has_generics ())
+      {
+	for (auto &generic_param : enum_decl.get_generic_params ())
+	  {
+	    switch (generic_param.get ()->get_kind ())
+	      {
+	      case HIR::GenericParam::GenericKind::LIFETIME:
+		// Skipping Lifetime completely until better handling.
+		break;
+
+		case HIR::GenericParam::GenericKind::TYPE: {
+		  auto param_type
+		    = TypeResolveGenericParam::Resolve (generic_param.get ());
+		  context->insert_type (generic_param->get_mappings (),
+					param_type);
+
+		  substitutions.push_back (TyTy::SubstitutionParamMapping (
+		    static_cast<HIR::TypeParam &> (*generic_param),
+		    param_type));
+		}
+		break;
+	      }
+	  }
+      }
+
+    std::vector<TyTy::VariantDef *> variants;
+    int64_t discriminant_value = 0;
+    for (auto &variant : enum_decl.get_variants ())
+      {
+	TyTy::VariantDef *field_type
+	  = TypeCheckEnumItem::Resolve (variant.get (), discriminant_value);
+
+	discriminant_value++;
+	variants.push_back (field_type);
+      }
+
+    // get the path
+    const CanonicalPath *canonical_path = nullptr;
+    bool ok = mappings->lookup_canonical_path (
+      enum_decl.get_mappings ().get_crate_num (),
+      enum_decl.get_mappings ().get_nodeid (), &canonical_path);
+    rust_assert (ok);
+    RustIdent ident{*canonical_path, enum_decl.get_locus ()};
+
+    TyTy::BaseType *type
+      = new TyTy::ADTType (enum_decl.get_mappings ().get_hirid (),
+			   mappings->get_next_hir_id (),
+			   enum_decl.get_identifier (), ident,
+			   TyTy::ADTType::ADTKind::ENUM, std::move (variants),
+			   std::move (substitutions));
+
+    context->insert_type (enum_decl.get_mappings (), type);
     infered = type;
   }
 
@@ -196,23 +283,40 @@ public:
       }
 
     std::vector<TyTy::StructFieldType *> fields;
-    struct_decl.iterate ([&] (HIR::StructField &field) mutable -> bool {
-      TyTy::BaseType *field_type
-	= TypeCheckType::Resolve (field.get_field_type ().get ());
-      TyTy::StructFieldType *ty_field
-	= new TyTy::StructFieldType (field.get_mappings ().get_hirid (),
-				     field.get_field_name (), field_type);
-      fields.push_back (ty_field);
-      context->insert_type (field.get_mappings (), ty_field->get_field_type ());
-      return true;
-    });
+    for (auto &field : struct_decl.get_fields ())
+      {
+	TyTy::BaseType *field_type
+	  = TypeCheckType::Resolve (field.get_field_type ().get ());
+	TyTy::StructFieldType *ty_field
+	  = new TyTy::StructFieldType (field.get_mappings ().get_hirid (),
+				       field.get_field_name (), field_type);
+	fields.push_back (ty_field);
+	context->insert_type (field.get_mappings (),
+			      ty_field->get_field_type ());
+      }
+
+    // get the path
+    const CanonicalPath *canonical_path = nullptr;
+    bool ok = mappings->lookup_canonical_path (
+      struct_decl.get_mappings ().get_crate_num (),
+      struct_decl.get_mappings ().get_nodeid (), &canonical_path);
+    rust_assert (ok);
+    RustIdent ident{*canonical_path, struct_decl.get_locus ()};
+
+    // there is only a single variant
+    std::vector<TyTy::VariantDef *> variants;
+    variants.push_back (
+      new TyTy::VariantDef (struct_decl.get_mappings ().get_hirid (),
+			    struct_decl.get_identifier (), ident,
+			    TyTy::VariantDef::VariantType::STRUCT, nullptr,
+			    std::move (fields)));
 
     TyTy::BaseType *type
       = new TyTy::ADTType (struct_decl.get_mappings ().get_hirid (),
 			   mappings->get_next_hir_id (),
-			   struct_decl.get_identifier (),
+			   struct_decl.get_identifier (), ident,
 			   TyTy::ADTType::ADTKind::STRUCT_STRUCT,
-			   std::move (fields), std::move (substitutions));
+			   std::move (variants), std::move (substitutions));
 
     context->insert_type (struct_decl.get_mappings (), type);
     infered = type;
@@ -246,23 +350,39 @@ public:
 	  }
       }
 
-    std::vector<TyTy::StructFieldType *> variants;
-    union_decl.iterate ([&] (HIR::StructField &variant) mutable -> bool {
-      TyTy::BaseType *variant_type
-	= TypeCheckType::Resolve (variant.get_field_type ().get ());
-      TyTy::StructFieldType *ty_variant
-	= new TyTy::StructFieldType (variant.get_mappings ().get_hirid (),
-				     variant.get_field_name (), variant_type);
-      variants.push_back (ty_variant);
-      context->insert_type (variant.get_mappings (),
-			    ty_variant->get_field_type ());
-      return true;
-    });
+    std::vector<TyTy::StructFieldType *> fields;
+    for (auto &variant : union_decl.get_variants ())
+      {
+	TyTy::BaseType *variant_type
+	  = TypeCheckType::Resolve (variant.get_field_type ().get ());
+	TyTy::StructFieldType *ty_variant
+	  = new TyTy::StructFieldType (variant.get_mappings ().get_hirid (),
+				       variant.get_field_name (), variant_type);
+	fields.push_back (ty_variant);
+	context->insert_type (variant.get_mappings (),
+			      ty_variant->get_field_type ());
+      }
+
+    // get the path
+    const CanonicalPath *canonical_path = nullptr;
+    bool ok = mappings->lookup_canonical_path (
+      union_decl.get_mappings ().get_crate_num (),
+      union_decl.get_mappings ().get_nodeid (), &canonical_path);
+    rust_assert (ok);
+    RustIdent ident{*canonical_path, union_decl.get_locus ()};
+
+    // there is only a single variant
+    std::vector<TyTy::VariantDef *> variants;
+    variants.push_back (
+      new TyTy::VariantDef (union_decl.get_mappings ().get_hirid (),
+			    union_decl.get_identifier (), ident,
+			    TyTy::VariantDef::VariantType::STRUCT, nullptr,
+			    std::move (fields)));
 
     TyTy::BaseType *type
       = new TyTy::ADTType (union_decl.get_mappings ().get_hirid (),
 			   mappings->get_next_hir_id (),
-			   union_decl.get_identifier (),
+			   union_decl.get_identifier (), ident,
 			   TyTy::ADTType::ADTKind::UNION, std::move (variants),
 			   std::move (substitutions));
 
@@ -300,7 +420,8 @@ public:
 
     TyTy::BaseType *ret_type = nullptr;
     if (!function.has_function_return_type ())
-      ret_type = new TyTy::TupleType (function.get_mappings ().get_hirid ());
+      ret_type = TyTy::TupleType::get_unit_type (
+	function.get_mappings ().get_hirid ());
     else
       {
 	auto resolved
@@ -329,16 +450,26 @@ public:
 	context->insert_type (param.get_mappings (), param_tyty);
       }
 
+    // get the path
+    const CanonicalPath *canonical_path = nullptr;
+    bool ok = mappings->lookup_canonical_path (
+      function.get_mappings ().get_crate_num (),
+      function.get_mappings ().get_nodeid (), &canonical_path);
+    rust_assert (ok);
+
+    RustIdent ident{*canonical_path, function.get_locus ()};
     auto fnType = new TyTy::FnType (function.get_mappings ().get_hirid (),
 				    function.get_mappings ().get_defid (),
-				    function.get_function_name (), false,
-				    std::move (params), ret_type,
+				    function.get_function_name (), ident,
+				    TyTy::FnType::FNTYPE_DEFAULT_FLAGS,
+				    ABI::RUST, std::move (params), ret_type,
 				    std::move (substitutions));
     context->insert_type (function.get_mappings (), fnType);
 
     TyTy::FnType *resolved_fn_type = fnType;
     auto expected_ret_tyty = resolved_fn_type->get_return_type ();
-    context->push_return_type (expected_ret_tyty);
+    context->push_return_type (TypeCheckContextItem (&function),
+			       expected_ret_tyty);
 
     auto block_expr_ty
       = TypeCheckExpr::Resolve (function.get_definition ().get (), false);

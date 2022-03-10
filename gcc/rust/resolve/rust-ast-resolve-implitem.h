@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -33,20 +33,38 @@ class ResolveToplevelImplItem : public ResolverBase
 public:
   static void go (AST::InherentImplItem *item, const CanonicalPath &prefix)
   {
+    if (item->is_marked_for_strip ())
+      return;
+
     ResolveToplevelImplItem resolver (prefix);
     item->accept_vis (resolver);
   }
 
   static void go (AST::TraitImplItem *item, const CanonicalPath &prefix)
   {
+    if (item->is_marked_for_strip ())
+      return;
+
     ResolveToplevelImplItem resolver (prefix);
     item->accept_vis (resolver);
   }
 
+  void visit (AST::MacroInvocation &invoc) override
+  {
+    if (!invoc.has_semicolon ())
+      return;
+
+    AST::ASTFragment &fragment = invoc.get_fragment ();
+    for (auto &node : fragment.get_nodes ())
+      node.accept_vis (*this);
+  }
+
   void visit (AST::TypeAlias &type) override
   {
-    auto path = prefix.append (
-      CanonicalPath::new_seg (type.get_node_id (), type.get_new_type_name ()));
+    auto decl
+      = CanonicalPath::new_seg (type.get_node_id (), type.get_new_type_name ());
+    auto path = prefix.append (decl);
+
     resolver->get_type_scope ().insert (
       path, type.get_node_id (), type.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -54,15 +72,13 @@ public:
 	r.add_range (locus);
 	rust_error_at (r, "redefined multiple times");
       });
-    resolver->insert_new_definition (type.get_node_id (),
-				     Definition{type.get_node_id (),
-						type.get_node_id ()});
   }
 
   void visit (AST::ConstantItem &constant) override
   {
-    auto path
-      = prefix.append (ResolveConstantItemToCanonicalPath::resolve (constant));
+    auto decl = ResolveConstantItemToCanonicalPath::resolve (constant);
+    auto path = prefix.append (decl);
+
     resolver->get_name_scope ().insert (
       path, constant.get_node_id (), constant.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -77,8 +93,9 @@ public:
 
   void visit (AST::Function &function) override
   {
-    auto path
-      = prefix.append (ResolveFunctionItemToCanonicalPath::resolve (function));
+    auto decl = ResolveFunctionItemToCanonicalPath::resolve (function);
+    auto path = prefix.append (decl);
+
     resolver->get_name_scope ().insert (
       path, function.get_node_id (), function.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -93,8 +110,9 @@ public:
 
   void visit (AST::Method &method) override
   {
-    auto path
-      = prefix.append (ResolveMethodItemToCanonicalPath::resolve (method));
+    auto decl = ResolveMethodItemToCanonicalPath::resolve (method);
+    auto path = prefix.append (decl);
+
     resolver->get_name_scope ().insert (
       path, method.get_node_id (), method.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -111,7 +129,7 @@ private:
   ResolveToplevelImplItem (const CanonicalPath &prefix)
     : ResolverBase (UNKNOWN_NODEID), prefix (prefix)
   {
-    rust_assert (!prefix.is_error ());
+    rust_assert (!prefix.is_empty ());
   }
 
   const CanonicalPath &prefix;
@@ -122,17 +140,29 @@ class ResolveTopLevelTraitItems : public ResolverBase
   using Rust::Resolver::ResolverBase::visit;
 
 public:
-  static void go (AST::TraitItem *item,
-		  const CanonicalPath &prefix = CanonicalPath::create_empty ())
+  static void go (AST::TraitItem *item, const CanonicalPath &prefix,
+		  const CanonicalPath &canonical_prefix)
   {
-    ResolveTopLevelTraitItems resolver (prefix);
+    ResolveTopLevelTraitItems resolver (prefix, canonical_prefix);
     item->accept_vis (resolver);
   };
 
+  void visit (AST::MacroInvocation &invoc) override
+  {
+    if (!invoc.has_semicolon ())
+      return;
+
+    AST::ASTFragment &fragment = invoc.get_fragment ();
+    for (auto &node : fragment.get_nodes ())
+      node.accept_vis (*this);
+  }
+
   void visit (AST::TraitItemFunc &function) override
   {
-    auto path = prefix.append (
-      ResolveTraitItemFunctionToCanonicalPath::resolve (function));
+    auto decl = ResolveTraitItemFunctionToCanonicalPath::resolve (function);
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
     resolver->get_name_scope ().insert (
       path, function.get_node_id (), function.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -143,12 +173,17 @@ public:
     resolver->insert_new_definition (function.get_node_id (),
 				     Definition{function.get_node_id (),
 						function.get_node_id ()});
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     function.get_node_id (), cpath);
   }
 
   void visit (AST::TraitItemMethod &method) override
   {
-    auto path
-      = prefix.append (ResolveTraitItemMethodToCanonicalPath::resolve (method));
+    auto decl = ResolveTraitItemMethodToCanonicalPath::resolve (method);
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
     resolver->get_name_scope ().insert (
       path, method.get_node_id (), method.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -159,12 +194,17 @@ public:
     resolver->insert_new_definition (method.get_node_id (),
 				     Definition{method.get_node_id (),
 						method.get_node_id ()});
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     method.get_node_id (), cpath);
   }
 
   void visit (AST::TraitItemConst &constant) override
   {
-    auto path = prefix.append (
-      ResolveTraitItemConstToCanonicalPath::resolve (constant));
+    auto decl = ResolveTraitItemConstToCanonicalPath::resolve (constant);
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
     resolver->get_name_scope ().insert (
       path, constant.get_node_id (), constant.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -175,30 +215,38 @@ public:
     resolver->insert_new_definition (constant.get_node_id (),
 				     Definition{constant.get_node_id (),
 						constant.get_node_id ()});
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     constant.get_node_id (), cpath);
   }
 
   void visit (AST::TraitItemType &type) override
   {
-    auto path
-      = prefix.append (ResolveTraitItemTypeToCanonicalPath::resolve (type));
-    resolver->get_name_scope ().insert (
+    auto decl = ResolveTraitItemTypeToCanonicalPath::resolve (type);
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
+    resolver->get_type_scope ().insert (
       path, type.get_node_id (), type.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
 	RichLocation r (type.get_locus ());
 	r.add_range (locus);
 	rust_error_at (r, "redefined multiple times");
       });
-    resolver->insert_new_definition (type.get_node_id (),
-				     Definition{type.get_node_id (),
-						type.get_node_id ()});
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     type.get_node_id (), cpath);
   }
 
 private:
-  ResolveTopLevelTraitItems (const CanonicalPath &prefix)
-    : ResolverBase (UNKNOWN_NODEID), prefix (prefix)
+  ResolveTopLevelTraitItems (const CanonicalPath &prefix,
+			     const CanonicalPath &canonical_prefix)
+    : ResolverBase (UNKNOWN_NODEID), prefix (prefix),
+      canonical_prefix (canonical_prefix)
   {}
 
   const CanonicalPath &prefix;
+  const CanonicalPath &canonical_prefix;
 };
 
 class ResolveToplevelExternItem : public ResolverBase
@@ -206,18 +254,28 @@ class ResolveToplevelExternItem : public ResolverBase
   using Rust::Resolver::ResolverBase::visit;
 
 public:
-  static void go (AST::ExternalItem *item,
-		  const CanonicalPath &prefix = CanonicalPath::create_empty ())
+  static void go (AST::ExternalItem *item, const CanonicalPath &prefix)
   {
     ResolveToplevelExternItem resolver (prefix);
     item->accept_vis (resolver);
   };
 
+  void visit (AST::MacroInvocation &invoc) override
+  {
+    if (!invoc.has_semicolon ())
+      return;
+
+    AST::ASTFragment &fragment = invoc.get_fragment ();
+    for (auto &node : fragment.get_nodes ())
+      node.accept_vis (*this);
+  }
+
   void visit (AST::ExternalFunctionItem &function) override
   {
-    auto path
-      = prefix.append (CanonicalPath::new_seg (function.get_node_id (),
-					       function.get_identifier ()));
+    auto decl = CanonicalPath::new_seg (function.get_node_id (),
+					function.get_identifier ());
+    auto path = prefix.append (decl);
+
     resolver->get_name_scope ().insert (
       path, function.get_node_id (), function.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -232,8 +290,10 @@ public:
 
   void visit (AST::ExternalStaticItem &item) override
   {
-    auto path = prefix.append (
-      CanonicalPath::new_seg (item.get_node_id (), item.get_identifier ()));
+    auto decl
+      = CanonicalPath::new_seg (item.get_node_id (), item.get_identifier ());
+    auto path = prefix.append (decl);
+
     resolver->get_name_scope ().insert (
       path, item.get_node_id (), item.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {

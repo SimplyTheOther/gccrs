@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -269,6 +269,11 @@ public:
   PathExprSegment &get_root_seg () { return segments.at (0); }
 
   PathExprSegment get_final_segment () const { return segments.back (); }
+
+  PatternType get_pattern_type () const override final
+  {
+    return PatternType::PATH;
+  }
 };
 
 /* HIR node representing a path-in-expression pattern (path that allows generic
@@ -315,10 +320,11 @@ public:
     return convert_to_simple_path (has_opening_scope_resolution);
   }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRExpressionVisitor &vis) override;
+  void accept_vis (HIRPatternVisitor &vis) override;
 
   bool opening_scope_resolution () { return has_opening_scope_resolution; }
 
@@ -329,6 +335,11 @@ public:
 
     return get_final_segment ().get_segment ().as_string ().compare ("self")
 	   == 0;
+  }
+
+  Analysis::NodeMapping get_pattern_mappings () const override final
+  {
+    return get_mappings ();
   }
 
 protected:
@@ -416,11 +427,16 @@ public:
   Location get_locus () const { return locus; }
 
   // not pure virtual as class not abstract
-  virtual void accept_vis (HIRVisitor &vis);
+  virtual void accept_vis (HIRFullVisitor &vis);
 
   const Analysis::NodeMapping &get_mappings () const { return mappings; }
 
   const PathIdentSegment &get_ident_segment () const { return ident_segment; }
+
+  bool is_generic_segment () const
+  {
+    return get_type () == SegmentType::GENERIC;
+  }
 };
 
 // Segment used in type path with generic args
@@ -460,7 +476,7 @@ public:
 
   std::string as_string () const override;
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
 
   GenericArgs &get_generic_args () { return generic_args; }
 
@@ -588,7 +604,7 @@ public:
 
   bool is_ident_only () const override { return false; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
 
   virtual SegmentType get_type () const override final
   {
@@ -691,7 +707,8 @@ public:
 
   Location get_locus () const { return locus; }
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
 
   size_t get_num_segments () const { return segments.size (); }
 
@@ -709,26 +726,26 @@ public:
 struct QualifiedPathType
 {
 private:
-  std::unique_ptr<Type> type_to_invoke_on;
-
-  // bool has_as_clause;
-  TypePath trait_path;
-
+  std::unique_ptr<Type> type;
+  std::unique_ptr<TypePath> trait;
   Location locus;
+  Analysis::NodeMapping mappings;
 
 public:
   // Constructor
-  QualifiedPathType (std::unique_ptr<Type> invoke_on_type,
-		     Location locus = Location (),
-		     TypePath trait_path = TypePath::create_error ())
-    : type_to_invoke_on (std::move (invoke_on_type)),
-      trait_path (std::move (trait_path)), locus (locus)
+  QualifiedPathType (Analysis::NodeMapping mappings, std::unique_ptr<Type> type,
+		     std::unique_ptr<TypePath> trait, Location locus)
+    : type (std::move (type)), trait (std::move (trait)), locus (locus),
+      mappings (mappings)
   {}
 
   // Copy constructor uses custom deep copy for Type to preserve polymorphism
   QualifiedPathType (QualifiedPathType const &other)
-    : type_to_invoke_on (other.type_to_invoke_on->clone_type ()),
-      trait_path (other.trait_path), locus (other.locus)
+    : type (other.type->clone_type ()),
+      trait (other.has_as_clause () ? std::unique_ptr<HIR::TypePath> (
+	       new HIR::TypePath (*other.trait))
+				    : nullptr),
+      locus (other.locus), mappings (other.mappings)
   {}
 
   // default destructor
@@ -737,9 +754,14 @@ public:
   // overload assignment operator to use custom clone method
   QualifiedPathType &operator= (QualifiedPathType const &other)
   {
-    type_to_invoke_on = other.type_to_invoke_on->clone_type ();
-    trait_path = other.trait_path;
+    type = other.type->clone_type ();
     locus = other.locus;
+    mappings = other.mappings;
+    trait
+      = other.has_as_clause ()
+	  ? std::unique_ptr<HIR::TypePath> (new HIR::TypePath (*other.trait))
+	  : nullptr;
+
     return *this;
   }
 
@@ -748,20 +770,42 @@ public:
   QualifiedPathType &operator= (QualifiedPathType &&other) = default;
 
   // Returns whether the qualified path type has a rebind as clause.
-  bool has_as_clause () const { return !trait_path.is_error (); }
-
-  // Returns whether the qualified path type is in an error state.
-  bool is_error () const { return type_to_invoke_on == nullptr; }
-
-  // Creates an error state qualified path type.
-  static QualifiedPathType create_error ()
-  {
-    return QualifiedPathType (nullptr);
-  }
+  bool has_as_clause () const { return trait != nullptr; }
 
   std::string as_string () const;
 
   Location get_locus () const { return locus; }
+
+  Analysis::NodeMapping get_mappings () const { return mappings; }
+
+  std::unique_ptr<Type> &get_type () { return type; }
+
+  std::unique_ptr<TypePath> &get_trait ()
+  {
+    rust_assert (has_as_clause ());
+    return trait;
+  }
+
+  bool trait_has_generic_args () const
+  {
+    rust_assert (has_as_clause ());
+    bool is_generic_seg = trait->get_final_segment ()->get_type ()
+			  == TypePathSegment::SegmentType::GENERIC;
+    if (!is_generic_seg)
+      return false;
+
+    TypePathSegmentGeneric *seg = static_cast<TypePathSegmentGeneric *> (
+      trait->get_final_segment ().get ());
+    return seg->has_generic_args ();
+  }
+
+  GenericArgs &get_trait_generic_args ()
+  {
+    rust_assert (trait_has_generic_args ());
+    TypePathSegmentGeneric *seg = static_cast<TypePathSegmentGeneric *> (
+      trait->get_final_segment ().get ());
+    return seg->get_generic_args ();
+  }
 };
 
 /* HIR node representing a qualified path-in-expression pattern (path that
@@ -785,24 +829,20 @@ public:
       path_type (std::move (qual_path_type)), locus (locus)
   {}
 
-  /* TODO: maybe make a shortcut constructor that has QualifiedPathType elements
-   * as params */
+  Location get_locus () const override final { return locus; }
 
-  // Returns whether qualified path in expression is in an error state.
-  bool is_error () const { return path_type.is_error (); }
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRExpressionVisitor &vis) override;
+  void accept_vis (HIRPatternVisitor &vis) override;
 
-  // Creates an error qualified path in expression.
-  static QualifiedPathInExpression create_error ()
+  QualifiedPathType &get_path_type () { return path_type; }
+
+  Location get_locus () { return locus; }
+
+  Analysis::NodeMapping get_pattern_mappings () const override final
   {
-    return QualifiedPathInExpression (Analysis::NodeMapping::get_error (),
-				      QualifiedPathType::create_error (),
-				      std::vector<PathExprSegment> ());
+    return get_mappings ();
   }
-
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const override { return get_locus (); }
-
-  void accept_vis (HIRVisitor &vis) override;
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -825,6 +865,7 @@ protected:
 class QualifiedPathInType : public TypeNoBounds
 {
   QualifiedPathType path_type;
+  std::unique_ptr<TypePathSegment> associated_segment;
   std::vector<std::unique_ptr<TypePathSegment> > segments;
   Location locus;
 
@@ -846,9 +887,11 @@ protected:
 public:
   QualifiedPathInType (
     Analysis::NodeMapping mappings, QualifiedPathType qual_path_type,
+    std::unique_ptr<TypePathSegment> associated_segment,
     std::vector<std::unique_ptr<TypePathSegment> > path_segments,
     Location locus = Location ())
     : TypeNoBounds (mappings), path_type (std::move (qual_path_type)),
+      associated_segment (std::move (associated_segment)),
       segments (std::move (path_segments)), locus (locus)
   {}
 
@@ -888,7 +931,22 @@ public:
 
   std::string as_string () const override;
 
-  void accept_vis (HIRVisitor &vis) override;
+  void accept_vis (HIRFullVisitor &vis) override;
+  void accept_vis (HIRTypeVisitor &vis) override;
+
+  QualifiedPathType &get_path_type () { return path_type; }
+
+  std::unique_ptr<TypePathSegment> &get_associated_segment ()
+  {
+    return associated_segment;
+  }
+
+  std::vector<std::unique_ptr<TypePathSegment> > &get_segments ()
+  {
+    return segments;
+  }
+
+  Location get_locus () { return locus; }
 };
 } // namespace HIR
 } // namespace Rust

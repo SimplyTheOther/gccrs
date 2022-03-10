@@ -1,5 +1,5 @@
 # Makefile fragment for building GCC for the Renesas RX target.
-# Copyright (C) 2008-2021 Free Software Foundation, Inc.
+# Copyright (C) 2008-2022 Free Software Foundation, Inc.
 # Contributed by Red Hat.
 #
 # This file is part of GCC.
@@ -36,6 +36,6 @@ MULTILIB_MATCHES    = nofpu=mnofpu  nofpu=mcpu?rx200  nofpu=mcpu?rx100
 MULTILIB_EXCEPTIONS =
 MULTILIB_EXTRA_OPTS = 
 
-rx-rust.o: $(srcdir)/config/rx/rx-rust.c \
+rx-rust.o: $(srcdir)/config/rx/rx-rust.cc \
   $(CONFIG_H) $(SYSTEM_H) coretypes.h $(TM_H) $(TREE_H) $(C_COMMON_H)
 	$(COMPILER) -c $(ALL_COMPILERFLAGS) $(ALL_CPPFLAGS) $(INCLUDES) $<

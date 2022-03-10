@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -143,6 +143,17 @@ public:
   }
 
   virtual void visit (ArrayType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
+    RichLocation r (ref_locus);
+    r.add_range (base_locus);
+    rust_error_at (r, "invalid cast [%s] to [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
+  virtual void visit (SliceType &type) override
   {
     Location ref_locus = mappings->lookup_location (type.get_ref ());
     Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
@@ -307,6 +318,39 @@ public:
 		   type.as_string ().c_str ());
   }
 
+  virtual void visit (ProjectionType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
+    RichLocation r (ref_locus);
+    r.add_range (base_locus);
+    rust_error_at (r, "invalid cast [%s] to [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
+  virtual void visit (DynamicObjectType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
+    RichLocation r (ref_locus);
+    r.add_range (base_locus);
+    rust_error_at (r, "invalid cast [%s] to [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
+  virtual void visit (ClosureType &type) override
+  {
+    Location ref_locus = mappings->lookup_location (type.get_ref ());
+    Location base_locus = mappings->lookup_location (get_base ()->get_ref ());
+    RichLocation r (ref_locus);
+    r.add_range (base_locus);
+    rust_error_at (r, "invalid cast [%s] to [%s]",
+		   get_base ()->as_string ().c_str (),
+		   type.as_string ().c_str ());
+  }
+
 protected:
   BaseCastRules (BaseType *base)
     : mappings (Analysis::Mappings::get ()),
@@ -411,7 +455,7 @@ public:
   void visit (FloatType &type) override
   {
     bool is_valid
-      = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL)
+      = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::INTEGRAL)
 	|| (base->get_infer_kind () == TyTy::InferType::InferTypeKind::FLOAT);
     if (is_valid)
       {
@@ -423,6 +467,19 @@ public:
   }
 
   void visit (ArrayType &type) override
+  {
+    bool is_valid
+      = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
+    if (is_valid)
+      {
+	resolved = type.clone ();
+	return;
+      }
+
+    BaseCastRules::visit (type);
+  }
+
+  void visit (SliceType &type) override
   {
     bool is_valid
       = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
@@ -543,6 +600,32 @@ public:
   }
 
   void visit (ParamType &type) override
+  {
+    bool is_valid
+      = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
+    if (is_valid)
+      {
+	resolved = type.clone ();
+	return;
+      }
+
+    BaseCastRules::visit (type);
+  }
+
+  void visit (DynamicObjectType &type) override
+  {
+    bool is_valid
+      = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
+    if (is_valid)
+      {
+	resolved = type.clone ();
+	return;
+      }
+
+    BaseCastRules::visit (type);
+  }
+
+  void visit (ClosureType &type) override
   {
     bool is_valid
       = (base->get_infer_kind () == TyTy::InferType::InferTypeKind::GENERAL);
@@ -714,6 +797,21 @@ private:
   FnPtr *base;
 };
 
+class ClosureCastRules : public BaseCastRules
+{
+  using Rust::TyTy::BaseCastRules::visit;
+
+public:
+  ClosureCastRules (ClosureType *base) : BaseCastRules (base), base (base) {}
+
+  // TODO
+
+private:
+  BaseType *get_base () override { return base; }
+
+  ClosureType *base;
+};
+
 class ArrayCastRules : public BaseCastRules
 {
   using Rust::TyTy::BaseCastRules::visit;
@@ -732,25 +830,45 @@ public:
 	return;
       }
 
-    auto backend = rust_get_backend ();
-
-    // need to check the base types and capacity
-    if (!backend->const_values_equal (type.get_capacity (),
-				      base->get_capacity ()))
-      {
-	BaseCastRules::visit (type);
-	return;
-      }
-
     resolved
       = new ArrayType (type.get_ref (), type.get_ty_ref (),
-		       type.get_capacity (), TyVar (base_resolved->get_ref ()));
+		       type.get_ident ().locus, type.get_capacity_expr (),
+		       TyVar (base_resolved->get_ref ()));
   }
 
 private:
   BaseType *get_base () override { return base; }
 
   ArrayType *base;
+};
+
+class SliceCastRules : public BaseCastRules
+{
+  using Rust::TyTy::BaseCastRules::visit;
+
+public:
+  SliceCastRules (SliceType *base) : BaseCastRules (base), base (base) {}
+
+  void visit (SliceType &type) override
+  {
+    // check base type
+    auto base_resolved
+      = base->get_element_type ()->unify (type.get_element_type ());
+    if (base_resolved == nullptr)
+      {
+	BaseCastRules::visit (type);
+	return;
+      }
+
+    resolved = new SliceType (type.get_ref (), type.get_ty_ref (),
+			      type.get_ident ().locus,
+			      TyVar (base_resolved->get_ref ()));
+  }
+
+private:
+  BaseType *get_base () override { return base; }
+
+  SliceType *base;
 };
 
 class BoolCastRules : public BaseCastRules
@@ -778,6 +896,12 @@ public:
 	break;
       }
   }
+
+  /* bools can be cast to any integer type (but not floats or chars).  */
+  void visit (IntType &type) override { resolved = type.clone (); }
+  void visit (UintType &type) override { resolved = type.clone (); }
+  void visit (USizeType &type) override { resolved = type.clone (); }
+  void visit (ISizeType &type) override { resolved = type.clone (); }
 
 private:
   BaseType *get_base () override { return base; }
@@ -913,29 +1037,47 @@ public:
 
   void visit (ADTType &type) override
   {
+    if (base->get_adt_kind () != type.get_adt_kind ())
+      {
+	BaseCastRules::visit (type);
+	return;
+      }
+
     if (base->get_identifier ().compare (type.get_identifier ()) != 0)
       {
 	BaseCastRules::visit (type);
 	return;
       }
 
-    if (base->num_fields () != type.num_fields ())
+    if (base->number_of_variants () != type.number_of_variants ())
       {
 	BaseCastRules::visit (type);
 	return;
       }
 
-    for (size_t i = 0; i < type.num_fields (); ++i)
+    for (size_t i = 0; i < type.number_of_variants (); ++i)
       {
-	TyTy::StructFieldType *base_field = base->get_field (i);
-	TyTy::StructFieldType *other_field = type.get_field (i);
+	TyTy::VariantDef *a = base->get_variants ().at (i);
+	TyTy::VariantDef *b = type.get_variants ().at (i);
 
-	TyTy::BaseType *this_field_ty = base_field->get_field_type ();
-	TyTy::BaseType *other_field_ty = other_field->get_field_type ();
+	if (a->num_fields () != b->num_fields ())
+	  {
+	    BaseCastRules::visit (type);
+	    return;
+	  }
 
-	BaseType *unified_ty = this_field_ty->unify (other_field_ty);
-	if (unified_ty->get_kind () == TyTy::TypeKind::ERROR)
-	  return;
+	for (size_t j = 0; j < a->num_fields (); j++)
+	  {
+	    TyTy::StructFieldType *base_field = a->get_field_at_index (i);
+	    TyTy::StructFieldType *other_field = b->get_field_at_index (i);
+
+	    TyTy::BaseType *this_field_ty = base_field->get_field_type ();
+	    TyTy::BaseType *other_field_ty = other_field->get_field_type ();
+
+	    BaseType *unified_ty = this_field_ty->unify (other_field_ty);
+	    if (unified_ty->get_kind () == TyTy::TypeKind::ERROR)
+	      return;
+	  }
       }
 
     resolved = type.clone ();
@@ -975,8 +1117,8 @@ public:
 	fields.push_back (TyVar (unified_ty->get_ref ()));
       }
 
-    resolved
-      = new TyTy::TupleType (type.get_ref (), type.get_ty_ref (), fields);
+    resolved = new TyTy::TupleType (type.get_ref (), type.get_ty_ref (),
+				    type.get_ident ().locus, fields);
   }
 
 private:
@@ -1077,6 +1219,12 @@ public:
   }
 
   void visit (CharType &type) override { resolved = type.clone (); }
+
+  /* chars can be cast to any integer type (but not floats or bools).  */
+  void visit (IntType &type) override { resolved = type.clone (); }
+  void visit (UintType &type) override { resolved = type.clone (); }
+  void visit (USizeType &type) override { resolved = type.clone (); }
+  void visit (ISizeType &type) override { resolved = type.clone (); }
 
 private:
   BaseType *get_base () override { return base; }
@@ -1248,6 +1396,20 @@ private:
   BaseType *get_base () override { return base; }
 
   PlaceholderType *base;
+};
+
+class DynamicCastRules : public BaseCastRules
+{
+  using Rust::TyTy::BaseCastRules::visit;
+
+public:
+  DynamicCastRules (DynamicObjectType *base) : BaseCastRules (base), base (base)
+  {}
+
+private:
+  BaseType *get_base () override { return base; }
+
+  DynamicObjectType *base;
 };
 
 } // namespace TyTy

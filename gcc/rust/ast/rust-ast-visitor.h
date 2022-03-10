@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -52,7 +52,6 @@ public:
   // virtual void visit(TraitItem& trait_item) = 0;
   // virtual void visit(InherentImplItem& inherent_impl_item) = 0;
   // virtual void visit(TraitImplItem& trait_impl_item) = 0;
-  virtual void visit (MacroInvocationSemi &macro) = 0;
 
   // rust-path.h
   virtual void visit (PathInExpression &path) = 0;
@@ -93,15 +92,6 @@ public:
   virtual void visit (StructExprFieldIndexValue &field) = 0;
   virtual void visit (StructExprStructFields &expr) = 0;
   virtual void visit (StructExprStructBase &expr) = 0;
-  virtual void visit (StructExprTuple &expr) = 0;
-  virtual void visit (StructExprUnit &expr) = 0;
-  // virtual void visit(EnumExprField& field) = 0;
-  virtual void visit (EnumExprFieldIdentifier &field) = 0;
-  virtual void visit (EnumExprFieldIdentifierValue &field) = 0;
-  virtual void visit (EnumExprFieldIndexValue &field) = 0;
-  virtual void visit (EnumExprStruct &expr) = 0;
-  virtual void visit (EnumExprTuple &expr) = 0;
-  virtual void visit (EnumExprFieldless &expr) = 0;
   virtual void visit (CallExpr &expr) = 0;
   virtual void visit (MethodCallExpr &expr) = 0;
   virtual void visit (FieldAccessExpr &expr) = 0;

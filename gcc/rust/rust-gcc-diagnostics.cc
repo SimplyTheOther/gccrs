@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -22,6 +22,16 @@
 #include "rust-diagnostics.h"
 
 #include "options.h"
+
+void
+rust_be_internal_error_at (const Location location, const std::string &errmsg)
+{
+  std::string loc_str = Linemap::location_to_string (location);
+  if (loc_str.empty ())
+    internal_error ("%s", errmsg.c_str ());
+  else
+    internal_error ("at %s, %s", loc_str.c_str (), errmsg.c_str ());
+}
 
 void
 rust_be_error_at (const Location location, const std::string &errmsg)
@@ -53,9 +63,10 @@ rust_be_inform (const Location location, const std::string &infomsg)
 }
 
 void
-rust_be_error_at (const RichLocation location, const std::string &errmsg)
+rust_be_error_at (const RichLocation &location, const std::string &errmsg)
 {
-  rich_location gcc_loc = location.get ();
+  /* TODO: 'error_at' would like a non-'const' 'rich_location *'.  */
+  rich_location &gcc_loc = const_cast<rich_location &> (location.get ());
   error_at (&gcc_loc, "%s", errmsg.c_str ());
 }
 

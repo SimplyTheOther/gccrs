@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -26,12 +26,10 @@
 namespace Rust {
 namespace Compile {
 
-class CompileStmt : public HIRCompileBase
+class CompileStmt : public HIRCompileBase, public HIR::HIRStmtVisitor
 {
-  using Rust::Compile::HIRCompileBase::visit;
-
 public:
-  static Bexpression *Compile (HIR::Stmt *stmt, Context *ctx)
+  static tree Compile (HIR::Stmt *stmt, Context *ctx)
   {
     CompileStmt compiler (ctx);
     stmt->accept_vis (compiler);
@@ -58,6 +56,7 @@ public:
     if (!ctx->get_tyctx ()->lookup_type (stmt.get_mappings ().get_hirid (),
 					 &ty))
       {
+	// FIXME this should be an assertion instead
 	rust_fatal_error (stmt.get_locus (),
 			  "failed to lookup variable declaration type");
 	return;
@@ -66,21 +65,40 @@ public:
     Bvariable *var = nullptr;
     if (!ctx->lookup_var_decl (stmt.get_mappings ().get_hirid (), &var))
       {
+	// FIXME this should be an assertion instead and use error mark node
 	rust_fatal_error (stmt.get_locus (),
 			  "failed to lookup compiled variable declaration");
 	return;
       }
 
-    Bexpression *init = CompileExpr::Compile (stmt.get_init_expr (), ctx);
+    tree init = CompileExpr::Compile (stmt.get_init_expr (), ctx);
+    // FIXME use error_mark_node, check that CompileExpr returns error_mark_node
+    // on failure and make this an assertion
     if (init == nullptr)
       return;
+
+    TyTy::BaseType *actual = nullptr;
+    bool ok = ctx->get_tyctx ()->lookup_type (
+      stmt.get_init_expr ()->get_mappings ().get_hirid (), &actual);
+    rust_assert (ok);
+    tree stmt_type = TyTyResolveCompile::compile (ctx, ty);
+
+    Location lvalue_locus = stmt.get_pattern ()->get_locus ();
+    Location rvalue_locus = stmt.get_init_expr ()->get_locus ();
+    TyTy::BaseType *expected = ty;
+    init = coercion_site (init, actual, expected, lvalue_locus, rvalue_locus);
 
     auto fnctx = ctx->peek_fn ();
     if (ty->is_unit ())
       {
-	Bstatement *expr_stmt
-	  = ctx->get_backend ()->expression_statement (fnctx.fndecl, init);
-	ctx->add_statement (expr_stmt);
+	ctx->add_statement (init);
+
+	auto unit_type_init_expr
+	  = ctx->get_backend ()->constructor_expression (stmt_type, false, {},
+							 -1, rvalue_locus);
+	auto s = ctx->get_backend ()->init_statement (fnctx.fndecl, var,
+						      unit_type_init_expr);
+	ctx->add_statement (s);
       }
     else
       {
@@ -89,10 +107,34 @@ public:
       }
   }
 
+  // Empty visit for unused Stmt HIR nodes.
+  void visit (HIR::TupleStruct &) override {}
+  void visit (HIR::EnumItem &) override {}
+  void visit (HIR::EnumItemTuple &) override {}
+  void visit (HIR::EnumItemStruct &) override {}
+  void visit (HIR::EnumItemDiscriminant &) override {}
+  void visit (HIR::TypePathSegmentFunction &) override {}
+  void visit (HIR::TypePath &) override {}
+  void visit (HIR::QualifiedPathInType &) override {}
+  void visit (HIR::Module &) override {}
+  void visit (HIR::ExternCrate &) override {}
+  void visit (HIR::UseDeclaration &) override {}
+  void visit (HIR::Function &) override {}
+  void visit (HIR::TypeAlias &) override {}
+  void visit (HIR::StructStruct &) override {}
+  void visit (HIR::Enum &) override {}
+  void visit (HIR::Union &) override {}
+  void visit (HIR::ConstantItem &) override {}
+  void visit (HIR::StaticItem &) override {}
+  void visit (HIR::Trait &) override {}
+  void visit (HIR::ImplBlock &) override {}
+  void visit (HIR::ExternBlock &) override {}
+  void visit (HIR::EmptyStmt &) override {}
+
 private:
   CompileStmt (Context *ctx) : HIRCompileBase (ctx), translated (nullptr) {}
 
-  Bexpression *translated;
+  tree translated;
 };
 
 } // namespace Compile

@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -33,13 +33,12 @@ namespace AST {
 class PathIdentSegment
 {
   std::string segment_name;
-
-  // TODO: should this have location info stored?
+  Location locus;
 
   // only allow identifiers, "super", "self", "Self", "crate", or "$crate"
 public:
-  PathIdentSegment (std::string segment_name)
-    : segment_name (std::move (segment_name))
+  PathIdentSegment (std::string segment_name, Location locus)
+    : segment_name (std::move (segment_name)), locus (locus)
   {}
 
   /* TODO: insert check in constructor for this? Or is this a semantic error
@@ -49,7 +48,10 @@ public:
    * not entirely sure */
 
   // Creates an error PathIdentSegment.
-  static PathIdentSegment create_error () { return PathIdentSegment (""); }
+  static PathIdentSegment create_error ()
+  {
+    return PathIdentSegment ("", Location ());
+  }
 
   // Returns whether PathIdentSegment is in an error state.
   bool is_error () const { return segment_name.empty (); }
@@ -221,7 +223,7 @@ public:
   bool has_generic_args () const { return generic_args.has_generic_args (); }
 
   // Constructor for segment (from IdentSegment and GenericArgs)
-  PathExprSegment (PathIdentSegment segment_name, Location locus = Location (),
+  PathExprSegment (PathIdentSegment segment_name, Location locus,
 		   GenericArgs generic_args = GenericArgs::create_empty ())
     : segment_name (std::move (segment_name)),
       generic_args (std::move (generic_args)), locus (locus),
@@ -237,7 +239,7 @@ public:
 		   = std::vector<std::unique_ptr<Type> > (),
 		   std::vector<GenericArgsBinding> binding_args
 		   = std::vector<GenericArgsBinding> ())
-    : segment_name (PathIdentSegment (std::move (segment_name))),
+    : segment_name (PathIdentSegment (std::move (segment_name), locus)),
       generic_args (GenericArgs (std::move (lifetime_args),
 				 std::move (type_args),
 				 std::move (binding_args))),
@@ -250,7 +252,7 @@ public:
   // Creates an error-state path expression segment.
   static PathExprSegment create_error ()
   {
-    return PathExprSegment (PathIdentSegment::create_error ());
+    return PathExprSegment (PathIdentSegment::create_error (), Location ());
   }
 
   std::string as_string () const;
@@ -303,15 +305,6 @@ public:
   // TODO: this seems kinda dodgy
   std::vector<PathExprSegment> &get_segments () { return segments; }
   const std::vector<PathExprSegment> &get_segments () const { return segments; }
-
-  void iterate_path_segments (std::function<bool (PathExprSegment &)> cb)
-  {
-    for (auto it = segments.begin (); it != segments.end (); it++)
-      {
-	if (!cb (*it))
-	  return;
-      }
-  }
 };
 
 /* AST node representing a path-in-expression pattern (path that allows generic
@@ -357,8 +350,7 @@ public:
     return convert_to_simple_path (has_opening_scope_resolution);
   }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -380,6 +372,8 @@ public:
   {
     outer_attrs = std::move (new_attrs);
   }
+
+  NodeId get_pattern_node_id () const override final { return get_node_id (); }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -439,7 +433,7 @@ public:
 
   TypePathSegment (std::string segment_name,
 		   bool has_separating_scope_resolution, Location locus)
-    : ident_segment (PathIdentSegment (std::move (segment_name))),
+    : ident_segment (PathIdentSegment (std::move (segment_name), locus)),
       locus (locus),
       has_separating_scope_resolution (has_separating_scope_resolution),
       node_id (Analysis::Mappings::get ()->get_next_node_id ())
@@ -538,11 +532,13 @@ private:
   // FIXME: think of better way to mark as invalid than taking up storage
   bool is_invalid;
 
-  // TODO: should this have location info?
+  Location locus;
 
 protected:
   // Constructor only used to create invalid type path functions.
-  TypePathFunction (bool is_invalid) : is_invalid (is_invalid) {}
+  TypePathFunction (bool is_invalid, Location locus)
+    : is_invalid (is_invalid), locus (locus)
+  {}
 
 public:
   // Returns whether the return type of the function has been specified.
@@ -555,13 +551,16 @@ public:
   bool is_error () const { return is_invalid; }
 
   // Creates an error state function.
-  static TypePathFunction create_error () { return TypePathFunction (true); }
+  static TypePathFunction create_error ()
+  {
+    return TypePathFunction (true, Location ());
+  }
 
   // Constructor
-  TypePathFunction (std::vector<std::unique_ptr<Type> > inputs,
+  TypePathFunction (std::vector<std::unique_ptr<Type> > inputs, Location locus,
 		    std::unique_ptr<Type> type = nullptr)
     : inputs (std::move (inputs)), return_type (std::move (type)),
-      is_invalid (false)
+      is_invalid (false), locus (locus)
   {}
 
   // Copy constructor with clone
@@ -740,8 +739,7 @@ public:
   // Creates a trait bound with a clone of this type path as its only element.
   TraitBound *to_trait_bound (bool in_parens) const override;
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -756,26 +754,15 @@ public:
   }
 
   size_t get_num_segments () const { return segments.size (); }
-
-  void iterate_segments (std::function<bool (TypePathSegment *)> cb)
-  {
-    for (auto it = segments.begin (); it != segments.end (); it++)
-      {
-	if (!cb ((*it).get ()))
-	  return;
-      }
-  }
 };
 
 struct QualifiedPathType
 {
 private:
   std::unique_ptr<Type> type_to_invoke_on;
-
-  // bool has_as_clause;
   TypePath trait_path;
-
   Location locus;
+  NodeId node_id;
 
 public:
   // Constructor
@@ -783,13 +770,15 @@ public:
 		     Location locus = Location (),
 		     TypePath trait_path = TypePath::create_error ())
     : type_to_invoke_on (std::move (invoke_on_type)),
-      trait_path (std::move (trait_path)), locus (locus)
+      trait_path (std::move (trait_path)), locus (locus),
+      node_id (Analysis::Mappings::get ()->get_next_node_id ())
   {}
 
   // Copy constructor uses custom deep copy for Type to preserve polymorphism
   QualifiedPathType (QualifiedPathType const &other)
     : trait_path (other.trait_path), locus (other.locus)
   {
+    node_id = other.node_id;
     // guard to prevent null dereference
     if (other.type_to_invoke_on != nullptr)
       type_to_invoke_on = other.type_to_invoke_on->clone_type ();
@@ -801,6 +790,7 @@ public:
   // overload assignment operator to use custom clone method
   QualifiedPathType &operator= (QualifiedPathType const &other)
   {
+    node_id = other.node_id;
     trait_path = other.trait_path;
     locus = other.locus;
 
@@ -846,6 +836,8 @@ public:
     rust_assert (has_as_clause ());
     return trait_path;
   }
+
+  NodeId get_node_id () const { return node_id; }
 };
 
 /* AST node representing a qualified path-in-expression pattern (path that
@@ -855,6 +847,7 @@ class QualifiedPathInExpression : public PathPattern, public PathExpr
   std::vector<Attribute> outer_attrs;
   QualifiedPathType path_type;
   Location locus;
+  NodeId _node_id;
 
 public:
   std::string as_string () const override;
@@ -864,7 +857,8 @@ public:
 			     std::vector<Attribute> outer_attrs, Location locus)
     : PathPattern (std::move (path_segments)),
       outer_attrs (std::move (outer_attrs)),
-      path_type (std::move (qual_path_type)), locus (locus)
+      path_type (std::move (qual_path_type)), locus (locus),
+      _node_id (Analysis::Mappings::get ()->get_next_node_id ())
   {}
 
   /* TODO: maybe make a shortcut constructor that has QualifiedPathType elements
@@ -880,8 +874,7 @@ public:
 				      {}, Location ());
   }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -906,6 +899,10 @@ public:
   {
     outer_attrs = std::move (new_attrs);
   }
+
+  NodeId get_node_id () const override { return _node_id; }
+
+  NodeId get_pattern_node_id () const override final { return get_node_id (); }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -935,6 +932,7 @@ protected:
 class QualifiedPathInType : public TypeNoBounds
 {
   QualifiedPathType path_type;
+  std::unique_ptr<TypePathSegment> associated_segment;
   std::vector<std::unique_ptr<TypePathSegment> > segments;
   Location locus;
 
@@ -949,9 +947,11 @@ protected:
 public:
   QualifiedPathInType (
     QualifiedPathType qual_path_type,
+    std::unique_ptr<TypePathSegment> associated_segment,
     std::vector<std::unique_ptr<TypePathSegment> > path_segments,
-    Location locus = Location ())
+    Location locus)
     : path_type (std::move (qual_path_type)),
+      associated_segment (std::move (associated_segment)),
       segments (std::move (path_segments)), locus (locus)
   {}
 
@@ -991,8 +991,8 @@ public:
   static QualifiedPathInType create_error ()
   {
     return QualifiedPathInType (
-      QualifiedPathType::create_error (),
-      std::vector<std::unique_ptr<TypePathSegment> > ());
+      QualifiedPathType::create_error (), nullptr,
+      std::vector<std::unique_ptr<TypePathSegment> > (), Location ());
   }
 
   std::string as_string () const override;
@@ -1006,6 +1006,11 @@ public:
     return path_type;
   }
 
+  std::unique_ptr<TypePathSegment> &get_associated_segment ()
+  {
+    return associated_segment;
+  }
+
   // TODO: this seems kinda dodgy
   std::vector<std::unique_ptr<TypePathSegment> > &get_segments ()
   {
@@ -1016,8 +1021,7 @@ public:
     return segments;
   }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 };
 } // namespace AST
 } // namespace Rust

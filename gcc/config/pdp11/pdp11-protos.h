@@ -1,5 +1,5 @@
 /* Definitions of target machine for GNU compiler, for the pdp-11
-   Copyright (C) 2000-2021 Free Software Foundation, Inc.
+   Copyright (C) 2000-2022 Free Software Foundation, Inc.
    Contributed by Michael K. Gschwind (mike@vlsivie.tuwien.ac.at).
 
 This file is part of GCC.
@@ -56,5 +56,5 @@ extern void pdp11_output_labelref (FILE *, const char *);
 extern void pdp11_output_def (FILE *, const char *, const char *);
 extern void pdp11_output_addr_vec_elt (FILE *, int);
 
-/* Routines implemented in pdp11-rust.c  */
+/* Routines implemented in pdp11-rust.cc  */
 extern void pdp11_rust_target_cpu_info (void);

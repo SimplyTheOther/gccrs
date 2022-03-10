@@ -1,5 +1,5 @@
 /* d-tree.h -- Definitions and declarations for code generation.
-   Copyright (C) 2006-2021 Free Software Foundation, Inc.
+   Copyright (C) 2006-2022 Free Software Foundation, Inc.
 
 GCC is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -31,6 +31,8 @@ class TypeInfoDeclaration;
 class VarDeclaration;
 class Expression;
 class ClassReferenceExp;
+class IndexExp;
+class SliceExp;
 class Module;
 class Statement;
 class Type;
@@ -45,7 +47,6 @@ typedef Array <Expression *> Expressions;
 
 /* Usage of TREE_LANG_FLAG_?:
    0: METHOD_CALL_EXPR
-   1: CALL_EXPR_ARGS_ORDERED (in CALL_EXPR).
 
    Usage of TYPE_LANG_FLAG_?:
    0: TYPE_SHARED
@@ -59,7 +60,13 @@ typedef Array <Expression *> Expressions;
    Usage of DECL_LANG_FLAG_?:
    0: LABEL_VARIABLE_CASE (in LABEL_DECL).
       DECL_BUILT_IN_CTFE (in FUNCTION_DECL).
-   1: DECL_IN_UNITTEST_CONDITION_P (in FUNCTION_DECL).  */
+   1: DECL_IN_UNITTEST_CONDITION_P (in FUNCTION_DECL).
+   2: DECL_INSTANTIATED (in FUNCTION_DECL, VAR_DECL).  */
+
+/* Language-specific tree checkers.  */
+
+#define VAR_OR_FUNCTION_DECL_CHECK(NODE) \
+  TREE_CHECK2 (NODE, VAR_DECL, FUNCTION_DECL)
 
 /* The kinds of scopes we recognize.  */
 
@@ -343,11 +350,6 @@ lang_tree_node
 #define METHOD_CALL_EXPR(NODE) \
   (TREE_LANG_FLAG_0 (NODE))
 
-/* True if all arguments in a call expression should be evaluated in the
-   order they are given (left to right).  */
-#define CALL_EXPR_ARGS_ORDERED(NODE) \
-  (TREE_LANG_FLAG_1 (CALL_EXPR_CHECK (NODE)))
-
 /* True if the type was declared 'shared'.  */
 #define TYPE_SHARED(NODE) \
   (TYPE_LANG_FLAG_0 (NODE))
@@ -388,6 +390,10 @@ lang_tree_node
 #define DECL_IN_UNITTEST_CONDITION_P(NODE) \
   (DECL_LANG_FLAG_1 (FUNCTION_DECL_CHECK (NODE)))
 
+/* True if the decl comes from a template instance.  */
+#define DECL_INSTANTIATED(NODE) \
+  (DECL_LANG_FLAG_1 (VAR_OR_FUNCTION_DECL_CHECK (NODE)))
+
 enum d_tree_index
 {
   DTI_VTABLE_ENTRY_TYPE,
@@ -418,6 +424,7 @@ enum d_tree_index
 
   DTI_ARRAY_TYPE,
   DTI_NULL_ARRAY,
+  DTI_BOTTOM_TYPE,
 
   DTI_MAX
 };
@@ -453,6 +460,8 @@ extern GTY(()) tree d_global_trees[DTI_MAX];
 #define array_type_node			d_global_trees[DTI_ARRAY_TYPE]
 /* Null initializer for dynamic arrays.  */
 #define null_array_node			d_global_trees[DTI_NULL_ARRAY]
+/* The bottom type, referred to as `noreturn` in code.  */
+#define noreturn_type_node		d_global_trees[DTI_BOTTOM_TYPE]
 
 /* A prefix for internal variables, which are not user-visible.  */
 #if !defined (NO_DOT_IN_LABEL)
@@ -492,6 +501,7 @@ extern const attribute_spec d_langhook_common_attribute_table[];
 extern Type *build_frontend_type (tree);
 
 extern tree d_builtin_function (tree);
+extern tree d_builtin_function_ext_scope (tree);
 extern void d_init_builtins (void);
 extern void d_register_builtin_type (tree, const char *);
 extern void d_build_builtins_module (Module *);
@@ -564,15 +574,17 @@ extern tree build_array_set (tree, tree, tree);
 extern tree build_array_from_val (Type *, tree);
 extern tree build_array_from_exprs (Type *, Expressions *, bool);
 extern tree void_okay_p (tree);
+extern tree build_assert_call (const Loc &, libcall_fn, tree = NULL_TREE);
 extern tree build_array_bounds_call (const Loc &);
-extern tree build_bounds_condition (const Loc &, tree, tree, bool);
+extern tree build_bounds_index_condition (IndexExp *, tree, tree);
+extern tree build_bounds_slice_condition (SliceExp *, tree, tree, tree);
 extern bool array_bounds_check (void);
+extern bool checkaction_trap_p (void);
 extern tree bind_expr (tree, tree);
 extern TypeFunction *get_function_type (Type *);
 extern bool call_by_alias_p (FuncDeclaration *, FuncDeclaration *);
 extern tree d_build_call_expr (FuncDeclaration *, tree, Expressions *);
 extern tree d_build_call (TypeFunction *, tree, tree, Expressions *);
-extern tree d_assert_call (const Loc &, libcall_fn, tree = NULL_TREE);
 extern tree build_float_modulus (tree, tree, tree);
 extern tree build_vthis_function (tree, tree);
 extern tree error_no_frame_access (Dsymbol *);
@@ -587,6 +599,7 @@ extern bool decl_with_nonnull_addr_p (const_tree);
 extern tree d_truthvalue_conversion (tree);
 extern tree d_convert (tree, tree);
 extern tree convert_expr (tree, Type *, Type *);
+extern tree convert_for_rvalue (tree, Type *, Type *);
 extern tree convert_for_assignment (tree, Type *, Type *);
 extern tree convert_for_argument (tree, Parameter *);
 extern tree convert_for_condition (tree, Type *);
@@ -601,7 +614,6 @@ extern void add_import_paths (const char *, const char *, bool);
 
 /* In d-lang.cc.  */
 extern void d_add_builtin_module (Module *);
-extern void d_add_entrypoint_module (Module *, Module *);
 extern d_tree_node_structure_enum d_tree_node_structure (lang_tree_node *);
 extern struct lang_type *build_lang_type (Type *);
 extern struct lang_decl *build_lang_decl (Declaration *);
@@ -621,7 +633,6 @@ extern void d_finish_decl (tree);
 extern tree make_thunk (FuncDeclaration *, int);
 extern tree start_function (FuncDeclaration *);
 extern void finish_function (tree);
-extern void mark_needed (tree);
 extern tree get_vtable_decl (ClassDeclaration *);
 extern tree build_new_class_expr (ClassReferenceExp *);
 extern tree aggregate_initializer_decl (AggregateDeclaration *);
@@ -631,8 +642,7 @@ extern tree enum_initializer_decl (EnumDeclaration *);
 extern tree build_artificial_decl (tree, tree, const char * = NULL);
 extern tree create_field_decl (tree, const char *, int, int);
 extern void build_type_decl (tree, Dsymbol *);
-extern void d_comdat_linkage (tree);
-extern void d_linkonce_linkage (tree);
+extern void set_linkage_for_decl (tree);
 
 /* In expr.cc.  */
 extern tree build_expr (Expression *, bool = false, bool = false);
@@ -662,6 +672,7 @@ extern tree layout_classinfo (ClassDeclaration *);
 extern unsigned base_vtable_offset (ClassDeclaration *, BaseClass *);
 extern tree get_typeinfo_decl (TypeInfoDeclaration *);
 extern tree get_classinfo_decl (ClassDeclaration *);
+extern void check_typeinfo_type (const Loc &, Scope *);
 extern tree build_typeinfo (const Loc &, Type *);
 extern void create_typeinfo (Type *, Module *);
 extern void create_tinfo_types (Module *);

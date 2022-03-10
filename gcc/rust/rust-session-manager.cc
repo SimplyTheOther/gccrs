@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -17,43 +17,26 @@
 // <http://www.gnu.org/licenses/>.
 // #include "rust-session-manager.h"
 
-#include <fstream>
-#include <sstream>
 #include "rust-session-manager.h"
 #include "rust-diagnostics.h"
-#include "diagnostic.h"
-#include "input.h"
-
-#include "target.h"
-#include "tm.h"
-#include "memmodel.h"
-#include "tm_p.h"
-
-//#include "rust-target.h"
-/*TODO This isn't (currently?) necessary, but if '#include'd after '#include
-   "target.h"', causes: In file included from
-   [...]/gcc/rust/rust-session-manager.cc:31:
-    [...]/gcc/rust/rust-target.h:23: error: "DEFHOOK" redefined [-Werror]
-       23 | #define DEFHOOK(NAME, DOC, TYPE, PARAMS, INIT) TYPE (*NAME) PARAMS;
-	  |
-    In file included from [...]/gcc/rust/rust-session-manager.cc:27:
-    [...]/gcc/target.h:272: note: this is the location of the previous
-   definition 272 | #define DEFHOOK(NAME, DOC, TYPE, PARAMS, INIT) TYPE (* NAME)
-   PARAMS;
-	  |
-*/
-
 #include "rust-lex.h"
 #include "rust-parse.h"
 #include "rust-macro-expand.h"
 #include "rust-ast-resolve.h"
 #include "rust-ast-lower.h"
 #include "rust-hir-type-check.h"
-#include "rust-lint-scan-deadcode.h"
 #include "rust-tycheck-dump.h"
-#include "rust-ast-resolve-unused.h"
-#include "rust-hir-const-fold.h"
 #include "rust-compile.h"
+#include "rust-cfg-parser.h"
+#include "rust-lint-scan-deadcode.h"
+#include "rust-lint-unused-var.h"
+
+#include "diagnostic.h"
+#include "input.h"
+#include "rust-target.h"
+
+extern bool
+saw_errors (void);
 
 extern Linemap *
 rust_get_linemap ();
@@ -70,9 +53,7 @@ const char *kHIRDumpFile = "gccrs.hir.dump";
 const char *kHIRTypeResolutionDumpFile = "gccrs.type-resolution.dump";
 const char *kTargetOptionsDumpFile = "gccrs.target-options.dump";
 
-// FIME in the imports/visibility milestone - this needs to be command line
-// option
-const std::string kDefaultCrateName = "TestCrate";
+const std::string kDefaultCrateName = "example";
 
 // Implicitly enable a target_feature (and recursively enable dependencies).
 void
@@ -156,117 +137,117 @@ Session::enable_features ()
 
   /*
   if (target == "x86" || target == "x86_64") {
-      if (TARGET_ISA_AES) {
+      if (TARGET_AES) {
 	  // enable aes, implicitly enable sse2
 	  implicitly_enable_feature("aes");
       }
 
-      if (TARGET_ISA_AVX) {
+      if (TARGET_AVX) {
 	  // enable avx, implicitly enable sse4.2
 	  implicitly_enable_feature("sse4.2");
       }
 
-      if (TARGET_ISA_AVX2) {
+      if (TARGET_AVX2) {
 	  // enable avx2, implicitly enable avx
 	  implicitly_enable_feature("avx");
       }
 
-      if (TARGET_ISA_BMI) {
+      if (TARGET_BMI) {
 	  // enable bmi1
 	  implicitly_enable_feature("bmi1");
       }
 
-      if (TARGET_ISA_BMI2) {
+      if (TARGET_BMI2) {
 	  // enable bmi2
 	  implicitly_enable_feature("bmi2");
       }
 
-      if (TARGET_ISA_FMA) {
+      if (TARGET_FMA) {
 	  // enable fma, implicitly enable avx
 	  implicitly_enable_feature("fma");
       }
 
-      if (TARGET_ISA_FXSR) {
+      if (TARGET_FXSR) {
 	  // enable fxsr
 	  implicitly_enable_feature("fxsr");
       }
 
-      if (TARGET_ISA_LZCNT) {
+      if (TARGET_LZCNT) {
 	  // enable lzcnt
 	  implicitly_enable_feature("lzcnt");
       }
 
-      if (TARGET_ISA_VPCLMULQDQ) {
+      if (TARGET_VPCLMULQDQ) {
 	  // enable pclmulqdq, implicitly enable sse2
 	  implicitly_enable_feature("pclmulqdq");
       }
 
-      if (TARGET_ISA_POPCNT) {
+      if (TARGET_POPCNT) {
 	  // enable popcnt
 	  implicitly_enable_feature("popcnt");
       }
 
-      if (TARGET_ISA_RDRND) {
+      if (TARGET_RDRND) {
 	  // enable rdrand
 	  implicitly_enable_feature("rdrand");
       }
 
-      if (TARGET_ISA_RDSEED) {
+      if (TARGET_RDSEED) {
 	  // enable rdseed
 	  implicitly_enable_feature("rdseed");
       }
 
-      if (TARGET_ISA_SHA) {
+      if (TARGET_SHA) {
 	  // enable sha, implicitly enable sse2
 	  implicitly_enable_feature("sha");
       }
 
-      if (TARGET_ISA_SSE) {
+      if (TARGET_SSE) {
 	  // enable sse
 	  implicitly_enable_feature("sse");
       }
 
-      if (TARGET_ISA_SSE2) {
+      if (TARGET_SSE2) {
 	  // enable sse2, implicitly enable sse
 	  implicitly_enable_feature("sse2");
       }
 
-      if (TARGET_ISA_SSE3) {
+      if (TARGET_SSE3) {
 	  // enable sse3, implicitly enable sse2
 	  implicitly_enable_feature("sse3");
       }
 
-      if (TARGET_ISA_SSE4_1) {
+      if (TARGET_SSE4_1) {
 	  // enable sse4.1, implicitly enable sse3
 	  implicitly_enable_feature("sse4.1");
       }
 
-      if (TARGET_ISA_SSE4_2) {
+      if (TARGET_SSE4_2) {
 	  // enable sse4.2, implicitly enable sse4.1
 	  implicitly_enable_feature("sse4.2");
       }
 
-      if (TARGET_ISA_SSSE3) {
+      if (TARGET_SSSE3) {
 	  // enable ssse3, implicitly enable sse3
 	  implicitly_enable_feature("ssse3");
       }
 
-      if (TARGET_ISA_XSAVE) {
+      if (TARGET_XSAVE) {
 	  // enable xsave
 	  implicitly_enable_feature("xsave");
       }
 
-      if (TARGET_ISA_XSAVEC) {
+      if (TARGET_XSAVEC) {
 	  // enable xsavec
 	  implicitly_enable_feature("xsavec");
       }
 
-      if (TARGET_ISA_XSAVEOPT) {
+      if (TARGET_XSAVEOPT) {
 	  // enable xsaveopt
 	  implicitly_enable_feature("xsaveopt");
       }
 
-      if (TARGET_ISA_XSAVES) {
+      if (TARGET_XSAVES) {
 	  // enable xsaves
 	  implicitly_enable_feature("xsaves");
       }
@@ -330,8 +311,8 @@ Session::init ()
   // setup backend to GCC GIMPLE
   backend = rust_get_backend ();
 
-  // the constant folder uses gcc
-  ConstFold::Context::init (backend);
+  // set the default crate name
+  options.set_crate_name (kDefaultCrateName);
 }
 
 /* Initialise default options. Actually called before handle_option, unlike init
@@ -356,9 +337,19 @@ Session::handle_option (
     case OPT_I:
       // TODO: add search path
       break;
+
     case OPT_L:
       // TODO: add library link path or something
       break;
+
+    case OPT_frust_crate_:
+      // set the crate name
+      if (arg != nullptr)
+	ret = options.set_crate_name (arg);
+      else
+	ret = false;
+      break;
+
     case OPT_frust_dump_:
       // enable dump and return whether this was successful
       if (arg != nullptr)
@@ -370,17 +361,51 @@ Session::handle_option (
 	  ret = false;
 	}
       break;
-    // no option handling for -o
+
+    case OPT_frust_mangling_:
+      Compile::Mangler::set_mangling (flag_rust_mangling);
+      break;
+
+      case OPT_frust_cfg_: {
+	auto string_arg = std::string (arg);
+	ret = handle_cfg_option (string_arg);
+	break;
+      }
+
     default:
-      // return 1 to indicate option is valid
       break;
     }
 
   return ret;
 }
 
-/* Enables a certain dump depending on the name passed in. Returns true if name
- * is valid, false otherwise. */
+bool
+Session::handle_cfg_option (std::string &input)
+{
+  std::string key;
+  std::string value;
+
+  // Refactor this if needed
+  if (!parse_cfg_option (input, key, value))
+    {
+      rust_error_at (
+	Location (),
+	"invalid argument to %<-frust-cfg%>: Accepted formats are "
+	"%<-frust-cfg=key%> or %<-frust-cfg=key=\"value\"%> (quoted)");
+      return false;
+    }
+
+  if (value.empty ())
+    // rustc does not seem to error on dup key
+    options.target_data.insert_key (key);
+  else
+    options.target_data.insert_key_value_pair (key, value);
+
+  return true;
+}
+
+/* Enables a certain dump depending on the name passed in. Returns true if
+ * name is valid, false otherwise. */
 bool
 Session::enable_dump (std::string arg)
 {
@@ -449,7 +474,7 @@ void
 Session::parse_files (int num_files, const char **files)
 {
   auto mappings = Analysis::Mappings::get ();
-  CrateNum crate_num = mappings->setup_crate_mappings (kDefaultCrateName);
+  CrateNum crate_num = mappings->setup_crate_mappings (options.crate_name);
   mappings->set_current_crate (crate_num);
 
   for (int i = 0; i < num_files; i++)
@@ -509,8 +534,8 @@ Session::parse_file (const char *filename)
    * line into crate root)
    *  - injection (some lint checks or dummy, register builtin macros, crate
    * injection)
-   *  - expansion (expands all macros, maybe build test harness, AST validation,
-   * maybe macro crate)
+   *  - expansion (expands all macros, maybe build test harness, AST
+   * validation, maybe macro crate)
    *  - resolution (name resolution, type resolution, maybe feature checking,
    * maybe buffered lints)
    *  TODO not done */
@@ -574,27 +599,18 @@ Session::parse_file (const char *filename)
   if (saw_errors ())
     return;
 
-  // scan dead code
-  Analysis::ScanDeadcode::Scan (hir);
-
-  if (saw_errors ())
-    return;
-
-  // scan unused has to be done after type resolution since methods are resolved
-  // at that point
-  Resolver::ScanUnused::Scan ();
-
-  if (saw_errors ())
-    return;
-
-  // do compile
+  // do compile to gcc generic
   Compile::Context ctx (backend);
   Compile::CompileCrate::Compile (hir, &ctx);
 
-  if (saw_errors ())
-    return;
+  // we can't do static analysis if there are errors to worry about
+  if (!saw_errors ())
+    {
+      Analysis::ScanDeadcode::Scan (hir);
+      Analysis::UnusedVariables::Lint (ctx);
+    }
 
-  // pass to GCC
+  // pass to GCC middle-end
   ctx.write_to_backend ();
 }
 
@@ -615,11 +631,11 @@ Session::debug_dump_load_crates (Parser<Lexer> &parser)
 
   /* TODO: search through inner attrs and see whether any of those attr paths
    * contain "no_core", "no_std", "compiler_builtins". If so/not, save certain
-   * crate names. In these names, insert items at beginning of crate items. This
-   * is crate injection. Also, inject prelude use decl at beginning (first name
-   * is assumed to be prelude - prelude is a use decl automatically generated to
-   * enable using Option and Copy without qualifying it or importing it via
-   * 'use' manually) */
+   * crate names. In these names, insert items at beginning of crate items.
+   * This is crate injection. Also, inject prelude use decl at beginning
+   * (first name is assumed to be prelude - prelude is a use decl
+   * automatically generated to enable using Option and Copy without
+   * qualifying it or importing it via 'use' manually) */
 
   std::vector<std::string> crate_names;
   for (const auto &item : crate.items)
@@ -672,8 +688,8 @@ Session::injection (AST::Crate &crate)
 
   // register builtin macros
   /* In rustc, builtin macros are divided into 3 categories depending on use -
-   * "bang" macros, "attr" macros, and "derive" macros. I think the meanings of
-   * these categories should be fairly obvious to anyone who has used rust.
+   * "bang" macros, "attr" macros, and "derive" macros. I think the meanings
+   * of these categories should be fairly obvious to anyone who has used rust.
    * Builtin macro list by category: Bang
    *      - asm
    *      - assert
@@ -716,8 +732,8 @@ Session::injection (AST::Crate &crate)
    * rustc also has a "quote" macro that is defined differently and is
    * supposedly not stable so eh. */
   /* TODO: actually implement injection of these macros. In particular, derive
-   * macros, cfg, and test should be prioritised since they seem to be used the
-   * most. */
+   * macros, cfg, and test should be prioritised since they seem to be used
+   * the most. */
 
   // crate injection
   std::vector<std::string> names;
@@ -781,11 +797,11 @@ Session::injection (AST::Crate &crate)
   crate.items.insert (crate.items.begin (), std::move (use_decl));
 
   /* TODO: potentially add checking attribute crate type? I can't figure out
-   * what this does currently comment says "Unconditionally collect crate types
-   * from attributes to make them used", which presumably refers to checking the
-   * linkage info by "crate_type". It also seems to ensure that an invalid crate
-   * type is not specified, so maybe just do that. Valid crate types: bin lib
-   * dylib staticlib cdylib rlib proc-macro */
+   * what this does currently comment says "Unconditionally collect crate
+   * types from attributes to make them used", which presumably refers to
+   * checking the linkage info by "crate_type". It also seems to ensure that
+   * an invalid crate type is not specified, so maybe just do that. Valid
+   * crate types: bin lib dylib staticlib cdylib rlib proc-macro */
 
   rust_debug ("finished injection");
 }
@@ -795,8 +811,8 @@ Session::expansion (AST::Crate &crate)
 {
   rust_debug ("started expansion");
 
-  /* rustc has a modification to windows PATH temporarily here, which may end up
-   * being required */
+  /* rustc has a modification to windows PATH temporarily here, which may end
+   * up being required */
 
   // create macro expansion config?
   // if not, would at least have to configure recursion_limit
@@ -1013,10 +1029,10 @@ TargetOptions::enable_implicit_feature_reqs (std::string feature)
  * [types/values] or absolute paths)
  *  - HIR lower (convert modified AST to simpler HIR [both expressions and
  * module tree])
- *  - resolve type aliases (replace any usages of type aliases with actual type
- * [except associated types])
- *  - resolve bind (iterate HIR tree and set binding annotations on all concrete
- * types [avoids path lookups later])
+ *  - resolve type aliases (replace any usages of type aliases with actual
+ * type [except associated types])
+ *  - resolve bind (iterate HIR tree and set binding annotations on all
+ * concrete types [avoids path lookups later])
  *  - resolve HIR markings (generate "markings" [e.g. for Copy/Send/Sync/...]
  * for all types
  *  - sort impls (small pass - sort impls into groups)
@@ -1036,8 +1052,8 @@ TargetOptions::enable_implicit_feature_reqs (std::string feature)
  * function calls)
  *  - expand HIR reborrows (apply reborrow rules [taking '&mut *v' instead of
  * 'v'])
- *  - expand HIR erasedtype (replace all erased types 'impl Trait' with the true
- * type)
+ *  - expand HIR erasedtype (replace all erased types 'impl Trait' with the
+ * true type)
  *  - typecheck expressions (validate - double check that previous passes
  * haven't broke type system rules)
  *  - lower MIR (convert HIR exprs into a control-flow graph [MIR])
@@ -1048,15 +1064,16 @@ TargetOptions::enable_implicit_feature_reqs (std::string feature)
  *  - MIR optimise (perform various simple optimisations on the MIR - constant
  * propagation, dead code elimination, borrow elimination, some inlining)
  *  - MIR validate PO (re-validate the MIR)
- *  - MIR validate full (optionally: perform expensive state-tracking validation
- * on MIR)
- *  - trans enumerate (enumerate all items needed for code generation, primarily
- * types used for generics)
- *  - trans auto impls (create magic trait impls as enumerated in previous pass)
+ *  - MIR validate full (optionally: perform expensive state-tracking
+ * validation on MIR)
+ *  - trans enumerate (enumerate all items needed for code generation,
+ * primarily types used for generics)
+ *  - trans auto impls (create magic trait impls as enumerated in previous
+ * pass)
  *  - trans monomorph (generate monomorphised copies of all functions [with
  * generics replaced with real types])
- *  - MIR optimise inline (run optimisation again, this time with full type info
- * [primarily for inlining])
+ *  - MIR optimise inline (run optimisation again, this time with full type
+ * info [primarily for inlining])
  *  - HIR serialise (write out HIR dump [module tree and generic/inline MIR])
  *  - trans codegen (generate final output file: emit C source file and call C
  * compiler) */
@@ -1064,8 +1081,8 @@ TargetOptions::enable_implicit_feature_reqs (std::string feature)
 /* rustc compile pipeline (basic, in way less detail):
  *  - parse input (parse .rs to AST)
  *  - name resolution, macro expansion, and configuration (process AST
- * recursively, resolving paths, expanding macros, processing #[cfg] nodes [i.e.
- * maybe stripping stuff from AST])
+ * recursively, resolving paths, expanding macros, processing #[cfg] nodes
+ * [i.e. maybe stripping stuff from AST])
  *  - lower to HIR
  *  - type check and other analyses (e.g. privacy checking)
  *  - lower to MIR and post-processing (and do stuff like borrow checking)
@@ -1077,14 +1094,14 @@ TargetOptions::enable_implicit_feature_reqs (std::string feature)
  *  - register plugins (attributes injection, set various options, register
  * lints, load plugins)
  *  - expansion/configure and expand (initial 'cfg' processing, 'loading
- * compiler plugins', syntax expansion, secondary 'cfg' expansion, synthesis of
- * a test harness if required, injection of any std lib dependency and prelude,
- * and name resolution) - actually documented inline
+ * compiler plugins', syntax expansion, secondary 'cfg' expansion, synthesis
+ * of a test harness if required, injection of any std lib dependency and
+ * prelude, and name resolution) - actually documented inline
  *      - seeming pierced-together order: pre-AST expansion lint checks,
  * registering builtin macros, crate injection, then expand all macros, then
- * maybe build test harness, AST validation, maybe create a macro crate (if not
- * rustdoc), name resolution, complete gated feature checking, add all buffered
- * lints
+ * maybe build test harness, AST validation, maybe create a macro crate (if
+ * not rustdoc), name resolution, complete gated feature checking, add all
+ * buffered lints
  *  - create global context (lower to HIR)
  *  - analysis on global context (HIR optimisations? create MIR?)
  *  - code generation

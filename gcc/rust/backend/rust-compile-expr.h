@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -24,16 +24,15 @@
 #include "rust-compile-resolve-path.h"
 #include "rust-compile-block.h"
 #include "rust-compile-struct-field-expr.h"
+#include "rust-constexpr.h"
 
 namespace Rust {
 namespace Compile {
 
-class CompileExpr : public HIRCompileBase
+class CompileExpr : public HIRCompileBase, public HIR::HIRExpressionVisitor
 {
-  using Rust::Compile::HIRCompileBase::visit;
-
 public:
-  static Bexpression *Compile (HIR::Expr *expr, Context *ctx)
+  static tree Compile (HIR::Expr *expr, Context *ctx)
   {
     CompileExpr compiler (ctx);
     expr->accept_vis (compiler);
@@ -45,7 +44,27 @@ public:
     HIR::Expr *tuple_expr = expr.get_tuple_expr ().get ();
     TupleIndex index = expr.get_tuple_index ();
 
-    Bexpression *receiver_ref = CompileExpr::Compile (tuple_expr, ctx);
+    tree receiver_ref = CompileExpr::Compile (tuple_expr, ctx);
+
+    TyTy::BaseType *tuple_expr_ty = nullptr;
+    bool ok = ctx->get_tyctx ()->lookup_type (
+      tuple_expr->get_mappings ().get_hirid (), &tuple_expr_ty);
+    rust_assert (ok);
+
+    // do we need to add an indirect reference
+    if (tuple_expr_ty->get_kind () == TyTy::TypeKind::REF)
+      {
+	TyTy::ReferenceType *r
+	  = static_cast<TyTy::ReferenceType *> (tuple_expr_ty);
+	TyTy::BaseType *tuple_type = r->get_base ();
+	tree tuple_tyty = TyTyResolveCompile::compile (ctx, tuple_type);
+
+	tree indirect
+	  = ctx->get_backend ()->indirect_expression (tuple_tyty, receiver_ref,
+						      true, expr.get_locus ());
+	receiver_ref = indirect;
+      }
+
     translated
       = ctx->get_backend ()->struct_field_expression (receiver_ref, index,
 						      expr.get_locus ());
@@ -68,11 +87,11 @@ public:
 	return;
       }
 
-    Btype *tuple_type = TyTyResolveCompile::compile (ctx, tyty);
+    tree tuple_type = TyTyResolveCompile::compile (ctx, tyty);
     rust_assert (tuple_type != nullptr);
 
     // this assumes all fields are in order from type resolution
-    std::vector<Bexpression *> vals;
+    std::vector<tree> vals;
     for (auto &elem : expr.get_tuple_elems ())
       {
 	auto e = CompileExpr::Compile (elem.get (), ctx);
@@ -80,18 +99,18 @@ public:
       }
 
     translated
-      = ctx->get_backend ()->constructor_expression (tuple_type, vals, -1,
-						     expr.get_locus ());
+      = ctx->get_backend ()->constructor_expression (tuple_type, false, vals,
+						     -1, expr.get_locus ());
   }
 
   void visit (HIR::ReturnExpr &expr) override
   {
     auto fncontext = ctx->peek_fn ();
 
-    std::vector<Bexpression *> retstmts;
+    std::vector<tree> retstmts;
     if (expr.has_return_expr ())
       {
-	Bexpression *compiled_expr
+	tree compiled_expr
 	  = CompileExpr::Compile (expr.return_expr.get (), ctx);
 	rust_assert (compiled_expr != nullptr);
 
@@ -107,283 +126,83 @@ public:
 
   void visit (HIR::MethodCallExpr &expr) override;
 
-  void visit (HIR::IdentifierExpr &expr) override
-  {
-    NodeId ast_node_id = expr.get_mappings ().get_nodeid ();
-
-    bool is_value = false;
-    NodeId ref_node_id = UNKNOWN_NODEID;
-    if (ctx->get_resolver ()->lookup_resolved_name (ast_node_id, &ref_node_id))
-      {
-	// these ref_node_ids will resolve to a pattern declaration but we are
-	// interested in the definition that this refers to get the parent id
-	Resolver::Definition def;
-	if (!ctx->get_resolver ()->lookup_definition (ref_node_id, &def))
-	  {
-	    rust_error_at (expr.get_locus (),
-			   "unknown reference for resolved name");
-	    return;
-	  }
-	ref_node_id = def.parent;
-	is_value = true;
-      }
-    else if (!ctx->get_resolver ()->lookup_resolved_type (ast_node_id,
-							  &ref_node_id))
-      {
-	rust_error_at (expr.get_locus (),
-		       "Failed to lookup type reference for node: %s",
-		       expr.as_string ().c_str ());
-	return;
-      }
-
-    if (ref_node_id == UNKNOWN_NODEID)
-      {
-	rust_fatal_error (expr.get_locus (), "unresolved IdentifierExpr: %s",
-			  expr.as_string ().c_str ());
-	return;
-      }
-
-    // node back to HIR
-    HirId ref;
-    if (!ctx->get_mappings ()->lookup_node_to_hir (
-	  expr.get_mappings ().get_crate_num (), ref_node_id, &ref))
-      {
-	rust_error_at (expr.get_locus (), "reverse lookup failure");
-	return;
-      }
-
-    TyTy::BaseType *lookup = nullptr;
-    if (!ctx->get_tyctx ()->lookup_type (ref, &lookup))
-      {
-	rust_fatal_error (expr.get_locus (),
-			  "failed to find type relevant to this context: %s",
-			  expr.get_mappings ().as_string ().c_str ());
-	return;
-      }
-
-    bool is_type_ref = !is_value;
-    if (is_type_ref)
-      {
-	// this might be a case for
-	//
-	// struct S;
-	//
-	// fn main() {
-	//    let s = S;
-	// }
-
-	if (lookup->is_unit ())
-	  {
-	    translated = ctx->get_backend ()->unit_expression ();
-	    return;
-	  }
-
-	// rust actually treats like this an fn call or structs with fields but
-	// unit structs are just the struct name lets catch it with an is-unit
-	// check
-	gcc_unreachable ();
-      }
-
-    Bfunction *fn = nullptr;
-    Bvariable *var = nullptr;
-    if (ctx->lookup_const_decl (ref, &translated))
-      {
-	return;
-      }
-    else if (ctx->lookup_function_decl (ref, &fn))
-      {
-	translated
-	  = ctx->get_backend ()->function_code_expression (fn,
-							   expr.get_locus ());
-      }
-    else if (ctx->lookup_var_decl (ref, &var))
-      {
-	translated
-	  = ctx->get_backend ()->var_expression (var, expr.get_locus ());
-      }
-    else
-      {
-	rust_fatal_error (expr.get_locus (),
-			  "failed to lookup compiled reference");
-      }
-  }
+  void visit (HIR::IdentifierExpr &expr) override;
 
   void visit (HIR::LiteralExpr &expr) override
-  {
-    auto literal_value = expr.get_literal ();
-    switch (expr.get_lit_type ())
-      {
-	case HIR::Literal::BOOL: {
-	  bool bval = literal_value->as_string ().compare ("true") == 0;
-	  translated = ctx->get_backend ()->boolean_constant_expression (bval);
-	}
-	return;
-
-	case HIR::Literal::INT: {
-	  mpz_t ival;
-	  if (mpz_init_set_str (ival, literal_value->as_string ().c_str (), 10)
-	      != 0)
-	    {
-	      rust_fatal_error (expr.get_locus (), "bad number in literal");
-	      return;
-	    }
-
-	  TyTy::BaseType *tyty = nullptr;
-	  if (!ctx->get_tyctx ()->lookup_type (
-		expr.get_mappings ().get_hirid (), &tyty))
-	    {
-	      rust_fatal_error (
-		expr.get_locus (),
-		"did not resolve type for this literal expr (HirId %d)",
-		expr.get_mappings ().get_hirid ());
-	      return;
-	    }
-
-	  Btype *type = TyTyResolveCompile::compile (ctx, tyty);
-	  translated
-	    = ctx->get_backend ()->integer_constant_expression (type, ival);
-	}
-	return;
-
-	case HIR::Literal::FLOAT: {
-	  mpfr_t fval;
-	  if (mpfr_init_set_str (fval, literal_value->as_string ().c_str (), 10,
-				 MPFR_RNDN)
-	      != 0)
-	    {
-	      rust_fatal_error (expr.get_locus (),
-				"bad floating-point number in literal");
-	      return;
-	    }
-
-	  TyTy::BaseType *tyty = nullptr;
-	  if (!ctx->get_tyctx ()->lookup_type (
-		expr.get_mappings ().get_hirid (), &tyty))
-	    {
-	      rust_fatal_error (expr.get_locus (),
-				"did not resolve type for this literal expr");
-	      return;
-	    }
-
-	  Btype *type = TyTyResolveCompile::compile (ctx, tyty);
-	  translated
-	    = ctx->get_backend ()->float_constant_expression (type, fval);
-	}
-	return;
-
-	case HIR::Literal::CHAR: {
-	  // FIXME needs wchar_t
-	  char c = literal_value->as_string ().c_str ()[0];
-	  translated = ctx->get_backend ()->wchar_constant_expression (c);
-	}
-	return;
-
-	case HIR::Literal::BYTE: {
-	  char c = literal_value->as_string ().c_str ()[0];
-	  translated = ctx->get_backend ()->char_constant_expression (c);
-	}
-	return;
-
-      case HIR::Literal::STRING:
-	case HIR::Literal::BYTE_STRING: {
-	  auto base = ctx->get_backend ()->string_constant_expression (
-	    literal_value->as_string ());
-	  translated
-	    = ctx->get_backend ()->address_expression (base, expr.get_locus ());
-	}
-	return;
-
-      default:
-	rust_fatal_error (expr.get_locus (), "unknown literal");
-	return;
-      }
-
-    gcc_unreachable ();
-  }
-
-  void visit (HIR::AssignmentExpr &expr) override
-  {
-    fncontext fn = ctx->peek_fn ();
-    auto lhs = CompileExpr::Compile (expr.get_lhs (), ctx);
-    auto rhs = CompileExpr::Compile (expr.get_rhs (), ctx);
-
-    Bstatement *assignment
-      = ctx->get_backend ()->assignment_statement (fn.fndecl, lhs, rhs,
-						   expr.get_locus ());
-    ctx->add_statement (assignment);
-  }
-
-  void visit (HIR::ArrayIndexExpr &expr) override
-  {
-    Bexpression *array = CompileExpr::Compile (expr.get_array_expr (), ctx);
-    Bexpression *index = CompileExpr::Compile (expr.get_index_expr (), ctx);
-    translated
-      = ctx->get_backend ()->array_index_expression (array, index,
-						     expr.get_locus ());
-  }
-
-  void visit (HIR::ArrayExpr &expr) override
   {
     TyTy::BaseType *tyty = nullptr;
     if (!ctx->get_tyctx ()->lookup_type (expr.get_mappings ().get_hirid (),
 					 &tyty))
+      return;
+
+    switch (expr.get_lit_type ())
       {
-	rust_fatal_error (expr.get_locus (),
-			  "did not resolve type for this array expr");
+      case HIR::Literal::BOOL:
+	translated = compile_bool_literal (expr, tyty);
+	return;
+
+      case HIR::Literal::INT:
+	translated = compile_integer_literal (expr, tyty);
+	return;
+
+      case HIR::Literal::FLOAT:
+	translated = compile_float_literal (expr, tyty);
+	return;
+
+      case HIR::Literal::CHAR:
+	translated = compile_char_literal (expr, tyty);
+	return;
+
+      case HIR::Literal::BYTE:
+	translated = compile_byte_literal (expr, tyty);
+	return;
+
+      case HIR::Literal::STRING:
+	translated = compile_string_literal (expr, tyty);
+	return;
+
+      case HIR::Literal::BYTE_STRING:
+	translated = compile_byte_string_literal (expr, tyty);
 	return;
       }
-
-    rust_assert (tyty->get_kind () == TyTy::TypeKind::ARRAY);
-    TyTy::ArrayType *array_tyty = static_cast<TyTy::ArrayType *> (tyty);
-    capacity_expr = array_tyty->get_capacity ();
-
-    Btype *array_type = TyTyResolveCompile::compile (ctx, array_tyty);
-    rust_assert (array_type != nullptr);
-
-    expr.get_internal_elements ()->accept_vis (*this);
-    std::vector<unsigned long> indexes;
-    for (size_t i = 0; i < constructor.size (); i++)
-      indexes.push_back (i);
-
-    translated
-      = ctx->get_backend ()->array_constructor_expression (array_type, indexes,
-							   constructor,
-							   expr.get_locus ());
   }
 
-  void visit (HIR::ArrayElemsValues &elems) override
+  void visit (HIR::AssignmentExpr &expr) override
   {
-    elems.iterate ([&] (HIR::Expr *e) mutable -> bool {
-      Bexpression *translated_expr = CompileExpr::Compile (e, ctx);
-      constructor.push_back (translated_expr);
-      return true;
-    });
-  }
+    auto lvalue = CompileExpr::Compile (expr.get_lhs (), ctx);
+    auto rvalue = CompileExpr::Compile (expr.get_rhs (), ctx);
 
-  void visit (HIR::ArrayElemsCopied &elems) override
-  {
-    Bexpression *translated_expr
-      = CompileExpr::Compile (elems.get_elem_to_copy (), ctx);
+    // assignments are coercion sites so lets convert the rvalue if necessary
+    TyTy::BaseType *expected = nullptr;
+    TyTy::BaseType *actual = nullptr;
 
-    size_t capacity;
-    bool ok = ctx->get_backend ()->const_size_cast (capacity_expr, &capacity);
+    bool ok;
+    ok = ctx->get_tyctx ()->lookup_type (
+      expr.get_lhs ()->get_mappings ().get_hirid (), &expected);
     rust_assert (ok);
 
-    for (size_t i = 0; i < capacity; ++i)
-      constructor.push_back (translated_expr);
+    ok = ctx->get_tyctx ()->lookup_type (
+      expr.get_rhs ()->get_mappings ().get_hirid (), &actual);
+    rust_assert (ok);
+
+    rvalue
+      = coercion_site (rvalue, actual, expected, expr.get_lhs ()->get_locus (),
+		       expr.get_rhs ()->get_locus ());
+
+    tree assignment
+      = ctx->get_backend ()->assignment_statement (lvalue, rvalue,
+						   expr.get_locus ());
+
+    ctx->add_statement (assignment);
   }
 
-  void visit (HIR::ArithmeticOrLogicalExpr &expr) override
-  {
-    auto op = expr.get_expr_type ();
-    auto lhs = CompileExpr::Compile (expr.get_lhs (), ctx);
-    auto rhs = CompileExpr::Compile (expr.get_rhs (), ctx);
-    auto location = expr.get_locus ();
+  void visit (HIR::CompoundAssignmentExpr &expr) override;
 
-    translated
-      = ctx->get_backend ()->arithmetic_or_logical_expression (op, lhs, rhs,
-							       location);
-  }
+  void visit (HIR::ArrayIndexExpr &expr) override;
+
+  void visit (HIR::ArrayExpr &expr) override;
+
+  void visit (HIR::ArithmeticOrLogicalExpr &expr) override;
 
   void visit (HIR::ComparisonExpr &expr) override
   {
@@ -407,32 +226,23 @@ public:
       = ctx->get_backend ()->lazy_boolean_expression (op, lhs, rhs, location);
   }
 
-  void visit (HIR::NegationExpr &expr) override
-  {
-    auto op = expr.get_expr_type ();
-    auto negated_expr = CompileExpr::Compile (expr.get_expr ().get (), ctx);
-    auto location = expr.get_locus ();
-
-    translated
-      = ctx->get_backend ()->negation_expression (op, negated_expr, location);
-  }
+  void visit (HIR::NegationExpr &expr) override;
 
   void visit (HIR::TypeCastExpr &expr) override
   {
-    TyTy::BaseType *tyty_to_cast_to = nullptr;
+    TyTy::BaseType *tyty = nullptr;
     if (!ctx->get_tyctx ()->lookup_type (expr.get_mappings ().get_hirid (),
-					 &tyty_to_cast_to))
+					 &tyty))
       {
-	translated = ctx->get_backend ()->error_expression ();
+	translated = error_mark_node;
 	return;
       }
 
-    auto type_to_cast_to = TyTyResolveCompile::compile (ctx, tyty_to_cast_to);
+    auto type_to_cast_to = TyTyResolveCompile::compile (ctx, tyty);
     auto casted_expr
       = CompileExpr::Compile (expr.get_casted_expr ().get (), ctx);
     translated
-      = ctx->get_backend ()->convert_expression (type_to_cast_to, casted_expr,
-						 expr.get_locus ());
+      = type_cast_expression (type_to_cast_to, casted_expr, expr.get_locus ());
   }
 
   void visit (HIR::IfExpr &expr) override
@@ -457,11 +267,11 @@ public:
     if (needs_temp)
       {
 	fncontext fnctx = ctx->peek_fn ();
-	Bblock *enclosing_scope = ctx->peek_enclosing_scope ();
-	Btype *block_type = TyTyResolveCompile::compile (ctx, if_type);
+	tree enclosing_scope = ctx->peek_enclosing_scope ();
+	tree block_type = TyTyResolveCompile::compile (ctx, if_type);
 
 	bool is_address_taken = false;
-	Bstatement *ret_var_stmt = nullptr;
+	tree ret_var_stmt = nullptr;
 	tmp = ctx->get_backend ()->temporary_variable (
 	  fnctx.fndecl, enclosing_scope, block_type, NULL, is_address_taken,
 	  expr.get_locus (), &ret_var_stmt);
@@ -494,11 +304,11 @@ public:
     if (needs_temp)
       {
 	fncontext fnctx = ctx->peek_fn ();
-	Bblock *enclosing_scope = ctx->peek_enclosing_scope ();
-	Btype *block_type = TyTyResolveCompile::compile (ctx, if_type);
+	tree enclosing_scope = ctx->peek_enclosing_scope ();
+	tree block_type = TyTyResolveCompile::compile (ctx, if_type);
 
 	bool is_address_taken = false;
-	Bstatement *ret_var_stmt = nullptr;
+	tree ret_var_stmt = nullptr;
 	tmp = ctx->get_backend ()->temporary_variable (
 	  fnctx.fndecl, enclosing_scope, block_type, NULL, is_address_taken,
 	  expr.get_locus (), &ret_var_stmt);
@@ -530,19 +340,19 @@ public:
     if (needs_temp)
       {
 	fncontext fnctx = ctx->peek_fn ();
-	Bblock *enclosing_scope = ctx->peek_enclosing_scope ();
-	Btype *block_type = TyTyResolveCompile::compile (ctx, block_tyty);
+	tree enclosing_scope = ctx->peek_enclosing_scope ();
+	tree block_type = TyTyResolveCompile::compile (ctx, block_tyty);
 
 	bool is_address_taken = false;
-	Bstatement *ret_var_stmt = nullptr;
+	tree ret_var_stmt = nullptr;
 	tmp = ctx->get_backend ()->temporary_variable (
 	  fnctx.fndecl, enclosing_scope, block_type, NULL, is_address_taken,
 	  expr.get_locus (), &ret_var_stmt);
 	ctx->add_statement (ret_var_stmt);
       }
 
-    auto code_block = CompileBlock::compile (&expr, ctx, tmp);
-    auto block_stmt = ctx->get_backend ()->block_statement (code_block);
+    auto block_stmt = CompileBlock::compile (&expr, ctx, tmp);
+    rust_assert (TREE_CODE (block_stmt) == BIND_EXPR);
     ctx->add_statement (block_stmt);
 
     if (tmp != NULL)
@@ -581,22 +391,85 @@ public:
 	return;
       }
 
-    Btype *type = TyTyResolveCompile::compile (ctx, tyty);
-    rust_assert (type != nullptr);
+    // it must be an ADT
+    rust_assert (tyty->get_kind () == TyTy::TypeKind::ADT);
+    TyTy::ADTType *adt = static_cast<TyTy::ADTType *> (tyty);
+
+    // what variant is it?
+    int union_disriminator = struct_expr.union_index;
+    TyTy::VariantDef *variant = nullptr;
+    if (!adt->is_enum ())
+      {
+	rust_assert (adt->number_of_variants () == 1);
+	variant = adt->get_variants ().at (0);
+      }
+    else
+      {
+	HirId variant_id;
+	bool ok = ctx->get_tyctx ()->lookup_variant_definition (
+	  struct_expr.get_struct_name ().get_mappings ().get_hirid (),
+	  &variant_id);
+	rust_assert (ok);
+
+	ok = adt->lookup_variant_by_id (variant_id, &variant,
+					&union_disriminator);
+	rust_assert (ok);
+      }
+
+    // compile it
+    tree compiled_adt_type = TyTyResolveCompile::compile (ctx, tyty);
 
     // this assumes all fields are in order from type resolution and if a base
     // struct was specified those fields are filed via accesors
-    std::vector<Bexpression *> vals;
-    struct_expr.iterate ([&] (HIR::StructExprField *field) mutable -> bool {
-      Bexpression *expr = CompileStructExprField::Compile (field, ctx);
-      vals.push_back (expr);
-      return true;
-    });
+    std::vector<tree> arguments;
+    for (size_t i = 0; i < struct_expr.get_fields ().size (); i++)
+      {
+	// assignments are coercion sites so lets convert the rvalue if
+	// necessary
+	auto respective_field = variant->get_field_at_index (i);
+	auto expected = respective_field->get_field_type ();
 
-    translated
-      = ctx->get_backend ()->constructor_expression (type, vals,
-						     struct_expr.union_index,
-						     struct_expr.get_locus ());
+	// process arguments
+	auto &argument = struct_expr.get_fields ().at (i);
+	auto lvalue_locus
+	  = ctx->get_mappings ()->lookup_location (expected->get_ty_ref ());
+	auto rvalue_locus = argument->get_locus ();
+	auto rvalue = CompileStructExprField::Compile (argument.get (), ctx);
+
+	TyTy::BaseType *actual = nullptr;
+	bool ok = ctx->get_tyctx ()->lookup_type (
+	  argument->get_mappings ().get_hirid (), &actual);
+
+	// coerce it if required/possible see
+	// compile/torture/struct_base_init_1.rs
+	if (ok)
+	  {
+	    rvalue = coercion_site (rvalue, actual, expected, lvalue_locus,
+				    rvalue_locus);
+	  }
+
+	// add it to the list
+	arguments.push_back (rvalue);
+      }
+
+    // the constructor depends on whether this is actually an enum or not if
+    // its an enum we need to setup the discriminator
+    std::vector<tree> ctor_arguments;
+    if (adt->is_enum ())
+      {
+	HIR::Expr *discrim_expr = variant->get_discriminant ();
+	tree discrim_expr_node = CompileExpr::Compile (discrim_expr, ctx);
+	tree folded_discrim_expr = ConstCtx::fold (discrim_expr_node);
+	tree qualifier = folded_discrim_expr;
+
+	ctor_arguments.push_back (qualifier);
+      }
+    for (auto &arg : arguments)
+      ctor_arguments.push_back (arg);
+
+    translated = ctx->get_backend ()->constructor_expression (
+      compiled_adt_type, adt->is_enum (), ctor_arguments, union_disriminator,
+      struct_expr.get_locus ());
   }
 
   void visit (HIR::GroupedExpr &expr) override
@@ -606,27 +479,61 @@ public:
 
   void visit (HIR::FieldAccessExpr &expr) override
   {
+    tree receiver_ref
+      = CompileExpr::Compile (expr.get_receiver_expr ().get (), ctx);
+
     // resolve the receiver back to ADT type
     TyTy::BaseType *receiver = nullptr;
     if (!ctx->get_tyctx ()->lookup_type (
 	  expr.get_receiver_expr ()->get_mappings ().get_hirid (), &receiver))
       {
-	rust_error_at (expr.get_receiver_expr ()->get_locus_slow (),
+	rust_error_at (expr.get_receiver_expr ()->get_locus (),
 		       "unresolved type for receiver");
 	return;
       }
-    rust_assert (receiver->get_kind () == TyTy::TypeKind::ADT);
-    TyTy::ADTType *adt = static_cast<TyTy::ADTType *> (receiver);
 
-    size_t index = 0;
-    adt->get_field (expr.get_field_name (), &index);
+    size_t field_index = 0;
+    if (receiver->get_kind () == TyTy::TypeKind::ADT)
+      {
+	TyTy::ADTType *adt = static_cast<TyTy::ADTType *> (receiver);
+	rust_assert (!adt->is_enum ());
+	rust_assert (adt->number_of_variants () == 1);
 
-    Bexpression *struct_ref
-      = CompileExpr::Compile (expr.get_receiver_expr ().get (), ctx);
+	TyTy::VariantDef *variant = adt->get_variants ().at (0);
+	bool ok = variant->lookup_field (expr.get_field_name (), nullptr,
+					 &field_index);
+	rust_assert (ok);
+      }
+    else if (receiver->get_kind () == TyTy::TypeKind::REF)
+      {
+	TyTy::ReferenceType *r = static_cast<TyTy::ReferenceType *> (receiver);
+	TyTy::BaseType *b = r->get_base ();
+	rust_assert (b->get_kind () == TyTy::TypeKind::ADT);
+
+	TyTy::ADTType *adt = static_cast<TyTy::ADTType *> (b);
+	rust_assert (!adt->is_enum ());
+	rust_assert (adt->number_of_variants () == 1);
+
+	TyTy::VariantDef *variant = adt->get_variants ().at (0);
+	bool ok = variant->lookup_field (expr.get_field_name (), nullptr,
+					 &field_index);
+	rust_assert (ok);
+
+	tree adt_tyty = TyTyResolveCompile::compile (ctx, adt);
+	tree indirect
+	  = ctx->get_backend ()->indirect_expression (adt_tyty, receiver_ref,
+						      true, expr.get_locus ());
+	receiver_ref = indirect;
+      }
 
     translated
-      = ctx->get_backend ()->struct_field_expression (struct_ref, index,
+      = ctx->get_backend ()->struct_field_expression (receiver_ref, field_index,
 						      expr.get_locus ());
+  }
+
+  void visit (HIR::QualifiedPathInExpression &expr) override
+  {
+    translated = ResolvePathRef::Compile (expr, ctx);
   }
 
   void visit (HIR::PathInExpression &expr) override
@@ -649,11 +556,11 @@ public:
     bool needs_temp = !block_tyty->is_unit ();
     if (needs_temp)
       {
-	Bblock *enclosing_scope = ctx->peek_enclosing_scope ();
-	Btype *block_type = TyTyResolveCompile::compile (ctx, block_tyty);
+	tree enclosing_scope = ctx->peek_enclosing_scope ();
+	tree block_type = TyTyResolveCompile::compile (ctx, block_tyty);
 
 	bool is_address_taken = false;
-	Bstatement *ret_var_stmt = nullptr;
+	tree ret_var_stmt = NULL_TREE;
 	tmp = ctx->get_backend ()->temporary_variable (
 	  fnctx.fndecl, enclosing_scope, block_type, NULL, is_address_taken,
 	  expr.get_locus (), &ret_var_stmt);
@@ -664,31 +571,29 @@ public:
     if (expr.has_loop_label ())
       {
 	HIR::LoopLabel &loop_label = expr.get_loop_label ();
-	Blabel *label
+	tree label
 	  = ctx->get_backend ()->label (fnctx.fndecl,
 					loop_label.get_lifetime ().get_name (),
 					loop_label.get_locus ());
-	Bstatement *label_decl
+	tree label_decl
 	  = ctx->get_backend ()->label_definition_statement (label);
 	ctx->add_statement (label_decl);
 	ctx->insert_label_decl (
 	  loop_label.get_lifetime ().get_mappings ().get_hirid (), label);
       }
 
-    Blabel *loop_begin_label
+    tree loop_begin_label
       = ctx->get_backend ()->label (fnctx.fndecl, "", expr.get_locus ());
-    Bstatement *loop_begin_label_decl
+    tree loop_begin_label_decl
       = ctx->get_backend ()->label_definition_statement (loop_begin_label);
     ctx->add_statement (loop_begin_label_decl);
     ctx->push_loop_begin_label (loop_begin_label);
 
-    Bblock *code_block
+    tree code_block
       = CompileBlock::compile (expr.get_loop_block ().get (), ctx, nullptr);
-    Bexpression *loop_expr
+    tree loop_expr
       = ctx->get_backend ()->loop_expression (code_block, expr.get_locus ());
-    Bstatement *loop_stmt
-      = ctx->get_backend ()->expression_statement (fnctx.fndecl, loop_expr);
-    ctx->add_statement (loop_stmt);
+    ctx->add_statement (loop_expr);
 
     if (tmp != NULL)
       {
@@ -705,11 +610,11 @@ public:
     if (expr.has_loop_label ())
       {
 	HIR::LoopLabel &loop_label = expr.get_loop_label ();
-	Blabel *label
+	tree label
 	  = ctx->get_backend ()->label (fnctx.fndecl,
 					loop_label.get_lifetime ().get_name (),
 					loop_label.get_locus ());
-	Bstatement *label_decl
+	tree label_decl
 	  = ctx->get_backend ()->label_definition_statement (label);
 	ctx->add_statement (label_decl);
 	ctx->insert_label_decl (
@@ -720,57 +625,53 @@ public:
     Location start_location = expr.get_loop_block ()->get_locus ();
     Location end_location = expr.get_loop_block ()->get_locus (); // FIXME
 
-    Bblock *enclosing_scope = ctx->peek_enclosing_scope ();
-    Bblock *loop_block
+    tree enclosing_scope = ctx->peek_enclosing_scope ();
+    tree loop_block
       = ctx->get_backend ()->block (fnctx.fndecl, enclosing_scope, locals,
 				    start_location, end_location);
     ctx->push_block (loop_block);
 
-    Blabel *loop_begin_label
+    tree loop_begin_label
       = ctx->get_backend ()->label (fnctx.fndecl, "", expr.get_locus ());
-    Bstatement *loop_begin_label_decl
+    tree loop_begin_label_decl
       = ctx->get_backend ()->label_definition_statement (loop_begin_label);
     ctx->add_statement (loop_begin_label_decl);
     ctx->push_loop_begin_label (loop_begin_label);
 
-    Bexpression *condition
+    tree condition
       = CompileExpr::Compile (expr.get_predicate_expr ().get (), ctx);
-    Bexpression *exit_expr
+    tree exit_expr
       = ctx->get_backend ()->exit_expression (condition, expr.get_locus ());
-    Bstatement *break_stmt
-      = ctx->get_backend ()->expression_statement (fnctx.fndecl, exit_expr);
-    ctx->add_statement (break_stmt);
+    ctx->add_statement (exit_expr);
 
-    Bblock *code_block
+    tree code_block_stmt
       = CompileBlock::compile (expr.get_loop_block ().get (), ctx, nullptr);
-    Bstatement *code_block_stmt
-      = ctx->get_backend ()->block_statement (code_block);
+    rust_assert (TREE_CODE (code_block_stmt) == BIND_EXPR);
     ctx->add_statement (code_block_stmt);
 
     ctx->pop_loop_begin_label ();
     ctx->pop_block ();
 
-    Bexpression *loop_expr
+    tree loop_expr
       = ctx->get_backend ()->loop_expression (loop_block, expr.get_locus ());
-    Bstatement *loop_stmt
-      = ctx->get_backend ()->expression_statement (fnctx.fndecl, loop_expr);
-    ctx->add_statement (loop_stmt);
+    ctx->add_statement (loop_expr);
   }
 
   void visit (HIR::BreakExpr &expr) override
   {
-    fncontext fnctx = ctx->peek_fn ();
     if (expr.has_break_expr ())
       {
-	Bexpression *compiled_expr
+	tree compiled_expr
 	  = CompileExpr::Compile (expr.get_expr ().get (), ctx);
 
 	Bvariable *loop_result_holder = ctx->peek_loop_context ();
-	Bexpression *result_reference = ctx->get_backend ()->var_expression (
-	  loop_result_holder, expr.get_expr ()->get_locus_slow ());
+	tree result_reference = ctx->get_backend ()->var_expression (
+	  loop_result_holder, expr.get_expr ()->get_locus ());
 
-	Bstatement *assignment = ctx->get_backend ()->assignment_statement (
-	  fnctx.fndecl, result_reference, compiled_expr, expr.get_locus ());
+	tree assignment
+	  = ctx->get_backend ()->assignment_statement (result_reference,
+						       compiled_expr,
+						       expr.get_locus ());
 	ctx->add_statement (assignment);
       }
 
@@ -797,7 +698,7 @@ public:
 	    return;
 	  }
 
-	Blabel *label = nullptr;
+	tree label = NULL_TREE;
 	if (!ctx->lookup_label_decl (ref, &label))
 	  {
 	    rust_error_at (expr.get_label ().get_locus (),
@@ -805,24 +706,22 @@ public:
 	    return;
 	  }
 
-	Bstatement *goto_label
+	tree goto_label
 	  = ctx->get_backend ()->goto_statement (label, expr.get_locus ());
 	ctx->add_statement (goto_label);
       }
     else
       {
-	Bexpression *exit_expr = ctx->get_backend ()->exit_expression (
+	tree exit_expr = ctx->get_backend ()->exit_expression (
 	  ctx->get_backend ()->boolean_constant_expression (true),
 	  expr.get_locus ());
-	Bstatement *break_stmt
-	  = ctx->get_backend ()->expression_statement (fnctx.fndecl, exit_expr);
-	ctx->add_statement (break_stmt);
+	ctx->add_statement (exit_expr);
       }
   }
 
   void visit (HIR::ContinueExpr &expr) override
   {
-    Blabel *label = ctx->peek_loop_begin_label ();
+    tree label = ctx->peek_loop_begin_label ();
     if (expr.has_label ())
       {
 	NodeId resolved_node_id = UNKNOWN_NODEID;
@@ -854,50 +753,95 @@ public:
 	  }
       }
 
-    Bstatement *goto_label
-      = ctx->get_backend ()->goto_statement (label, expr.get_locus ());
-    ctx->add_statement (goto_label);
+    translated = ctx->get_backend ()->goto_statement (label, expr.get_locus ());
   }
 
-  void visit (HIR::BorrowExpr &expr) override
-  {
-    Bexpression *main_expr
-      = CompileExpr::Compile (expr.get_expr ().get (), ctx);
+  void visit (HIR::BorrowExpr &expr) override;
+  void visit (HIR::DereferenceExpr &expr) override;
+  void visit (HIR::MatchExpr &expr) override;
 
-    translated
-      = ctx->get_backend ()->address_expression (main_expr, expr.get_locus ());
-  }
+  void visit (HIR::RangeFromToExpr &expr) override;
 
-  void visit (HIR::DereferenceExpr &expr) override
-  {
-    Bexpression *main_expr
-      = CompileExpr::Compile (expr.get_expr ().get (), ctx);
+  void visit (HIR::RangeFromExpr &expr) override;
 
-    TyTy::BaseType *tyty = nullptr;
-    if (!ctx->get_tyctx ()->lookup_type (expr.get_mappings ().get_hirid (),
-					 &tyty))
-      {
-	rust_fatal_error (expr.get_locus (),
-			  "did not resolve type for this TupleExpr");
-	return;
-      }
+  void visit (HIR::RangeToExpr &expr) override;
 
-    Btype *expected_type = TyTyResolveCompile::compile (ctx, tyty);
-    bool known_valid = true;
-    translated
-      = ctx->get_backend ()->indirect_expression (expected_type, main_expr,
-						  known_valid,
-						  expr.get_locus ());
-  }
+  void visit (HIR::RangeFullExpr &expr) override;
+
+  void visit (HIR::RangeFromToInclExpr &expr) override;
+
+  // Empty visit for unused Expression HIR nodes.
+  void visit (HIR::ClosureExprInner &) override {}
+  void visit (HIR::ClosureExprInnerTyped &) override {}
+  void visit (HIR::StructExprFieldIdentifier &) override {}
+  void visit (HIR::StructExprFieldIdentifierValue &) override {}
+  void visit (HIR::StructExprFieldIndexValue &) override {}
+  void visit (HIR::ErrorPropagationExpr &) override {}
+  void visit (HIR::RangeToInclExpr &) override {}
+  void visit (HIR::WhileLetLoopExpr &) override {}
+  void visit (HIR::ForLoopExpr &) override {}
+  void visit (HIR::IfExprConseqIfLet &) override {}
+  void visit (HIR::IfLetExpr &) override {}
+  void visit (HIR::IfLetExprConseqElse &) override {}
+  void visit (HIR::IfLetExprConseqIf &) override {}
+  void visit (HIR::IfLetExprConseqIfLet &) override {}
+  void visit (HIR::AwaitExpr &) override {}
+  void visit (HIR::AsyncBlockExpr &) override {}
+
+protected:
+  tree compile_dyn_dispatch_call (const TyTy::DynamicObjectType *dyn,
+				  TyTy::BaseType *receiver,
+				  TyTy::FnType *fntype, tree receiver_ref,
+				  std::vector<HIR::Expr *> &arguments,
+				  Location expr_locus);
+
+  tree resolve_method_address (TyTy::FnType *fntype, HirId ref,
+			       TyTy::BaseType *receiver,
+			       HIR::PathIdentSegment &segment,
+			       Analysis::NodeMapping expr_mappings,
+			       Location expr_locus);
+
+  tree
+  resolve_operator_overload (Analysis::RustLangItem::ItemType lang_item_type,
+			     HIR::OperatorExprMeta expr, tree lhs, tree rhs,
+			     HIR::Expr *lhs_expr, HIR::Expr *rhs_expr);
+
+  tree compile_bool_literal (const HIR::LiteralExpr &expr,
+			     const TyTy::BaseType *tyty);
+
+  tree compile_integer_literal (const HIR::LiteralExpr &expr,
+				const TyTy::BaseType *tyty);
+
+  tree compile_float_literal (const HIR::LiteralExpr &expr,
+			      const TyTy::BaseType *tyty);
+
+  tree compile_char_literal (const HIR::LiteralExpr &expr,
+			     const TyTy::BaseType *tyty);
+
+  tree compile_byte_literal (const HIR::LiteralExpr &expr,
+			     const TyTy::BaseType *tyty);
+
+  tree compile_string_literal (const HIR::LiteralExpr &expr,
+			       const TyTy::BaseType *tyty);
+
+  tree compile_byte_string_literal (const HIR::LiteralExpr &expr,
+				    const TyTy::BaseType *tyty);
+
+  tree type_cast_expression (tree type_to_cast_to, tree expr, Location locus);
+
+  tree array_value_expr (Location expr_locus, const TyTy::ArrayType &array_tyty,
+			 tree array_type, HIR::ArrayElemsValues &elems);
+
+  tree array_copied_expr (Location expr_locus,
+			  const TyTy::ArrayType &array_tyty, tree array_type,
+			  HIR::ArrayElemsCopied &elems);
 
 private:
   CompileExpr (Context *ctx)
-    : HIRCompileBase (ctx), translated (nullptr), capacity_expr (nullptr)
+    : HIRCompileBase (ctx), translated (error_mark_node)
   {}
 
-  Bexpression *translated;
-  Bexpression *capacity_expr;
-  std::vector<Bexpression *> constructor;
+  tree translated;
 };
 
 } // namespace Compile

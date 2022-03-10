@@ -349,7 +349,8 @@ class Thread : ThreadBase
         }
         else version (Posix)
         {
-            pthread_detach( m_addr );
+            if (m_addr != m_addr.init)
+                pthread_detach( m_addr );
             m_addr = m_addr.init;
         }
         version (Darwin)
@@ -419,6 +420,17 @@ class Thread : ThreadBase
         else version (ARM)
         {
             uint[16]        m_reg; // r0-r15
+        }
+        else version (PPC)
+        {
+            // Make the assumption that we only care about non-fp and non-vr regs.
+            // ??? : it seems plausible that a valid address can be copied into a VR.
+            uint[32]        m_reg; // r0-31
+        }
+        else version (PPC64)
+        {
+            // As above.
+            ulong[32]       m_reg; // r0-31
         }
         else
         {
@@ -510,7 +522,7 @@ class Thread : ThreadBase
                 {
                     version (GNU)
                     {
-                        auto libs = externDFunc!("gcc.sections.elf_shared.pinLoadedLibraries",
+                        auto libs = externDFunc!("gcc.sections.pinLoadedLibraries",
                                                  void* function() @nogc nothrow)();
                     }
                     else
@@ -527,7 +539,7 @@ class Thread : ThreadBase
                     {
                         version (GNU)
                         {
-                            externDFunc!("gcc.sections.elf_shared.unpinLoadedLibraries",
+                            externDFunc!("gcc.sections.unpinLoadedLibraries",
                                          void function(void*) @nogc nothrow)(libs);
                         }
                         else
@@ -578,7 +590,7 @@ class Thread : ThreadBase
     {
         version (Windows)
         {
-            if ( WaitForSingleObject( m_hndl, INFINITE ) != WAIT_OBJECT_0 )
+            if ( m_addr != m_addr.init && WaitForSingleObject( m_hndl, INFINITE ) != WAIT_OBJECT_0 )
                 throw new ThreadException( "Unable to join thread" );
             // NOTE: m_addr must be cleared before m_hndl is closed to avoid
             //       a race condition with isRunning. The operation is done
@@ -589,7 +601,7 @@ class Thread : ThreadBase
         }
         else version (Posix)
         {
-            if ( pthread_join( m_addr, null ) != 0 )
+            if ( m_addr != m_addr.init && pthread_join( m_addr, null ) != 0 )
                 throw new ThreadException( "Unable to join thread" );
             // NOTE: pthread_join acts as a substitute for pthread_detach,
             //       which is normally called by the dtor.  Setting m_addr
@@ -707,7 +719,7 @@ class Thread : ThreadBase
                     // the effective maximum.
 
                     // maxupri
-                    result.PRIORITY_MIN = -clinfo[0];
+                    result.PRIORITY_MIN = -cast(int)(clinfo[0]);
                     // by definition
                     result.PRIORITY_DEFAULT = 0;
                 }
@@ -1037,7 +1049,7 @@ class Thread : ThreadBase
     }
 }
 
-private Thread toThread(ThreadBase t) @trusted nothrow @nogc pure
+private Thread toThread(return scope ThreadBase t) @trusted nothrow @nogc pure
 {
     return cast(Thread) cast(void*) t;
 }
@@ -1097,6 +1109,7 @@ unittest
     try
     {
         new Thread(
+        function()
         {
             throw new Exception( MSG );
         }).start().join();
@@ -1195,6 +1208,18 @@ unittest
     semb.notify();
 
     thr.join();
+}
+
+// https://issues.dlang.org/show_bug.cgi?id=22124
+unittest
+{
+    Thread thread = new Thread({});
+    auto fun(Thread t, int x)
+    {
+        t.__ctor({x = 3;});
+        return t;
+    }
+    static assert(!__traits(compiles, () @nogc => fun(thread, 3) ));
 }
 
 unittest
@@ -1396,8 +1421,107 @@ in (fn)
     void *sp = void;
     version (GNU)
     {
-        __builtin_unwind_init();
-        sp = &sp;
+        // The generic solution below using a call to __builtin_unwind_init ()
+        // followed by an assignment to sp has two issues:
+        // 1) On some archs it stores a huge amount of FP and Vector state which
+        //    is not the subject of the scan - and, indeed might produce false
+        //    hits.
+        // 2) Even on archs like X86, where there are no callee-saved FPRs/VRs there
+        //    tend to be 'holes' in the frame allocations (to deal with alignment) which
+        //    also will  contain random data which could produce false positives.
+        // This solution stores only the integer callee-saved registers.
+        version (X86)
+        {
+            void*[3] regs = void;
+            asm pure nothrow @nogc
+            {
+                "movl   %%ebx, %0" : "=m" (regs[0]);
+                "movl   %%esi, %0" : "=m" (regs[1]);
+                "movl   %%edi, %0" : "=m" (regs[2]);
+            }
+            sp = cast(void*)&regs[0];
+        }
+        else version (X86_64)
+        {
+            void*[5] regs = void;
+            asm pure nothrow @nogc
+            {
+                "movq   %%rbx, %0" : "=m" (regs[0]);
+                "movq   %%r12, %0" : "=m" (regs[1]);
+                "movq   %%r13, %0" : "=m" (regs[2]);
+                "movq   %%r14, %0" : "=m" (regs[3]);
+                "movq   %%r15, %0" : "=m" (regs[4]);
+            }
+            sp = cast(void*)&regs[0];
+        }
+        else version (PPC)
+        {
+            void*[19] regs = void;
+            version (Darwin)
+                enum regname = "r";
+            else
+                enum regname = "";
+            static foreach (i; 0 .. regs.length)
+            {{
+                enum int j = 13 + i; // source register
+                asm pure nothrow @nogc
+                {
+                    "stw "~regname~j.stringof~", %0" : "=m" (regs[i]);
+                }
+            }}
+            sp = cast(void*)&regs[0];
+        }
+        else version (PPC64)
+        {
+            void*[19] regs = void;
+            version (Darwin)
+                enum regname = "r";
+            else
+                enum regname = "";
+            static foreach (i; 0 .. regs.length)
+            {{
+                enum int j = 13 + i; // source register
+                asm pure nothrow @nogc
+                {
+                    "std "~regname~j.stringof~", %0" : "=m" (regs[i]);
+                }
+            }}
+            sp = cast(void*)&regs[0];
+        }
+        else version (AArch64)
+        {
+            // Callee-save registers, x19-x28 according to AAPCS64, section
+            // 5.1.1.  Include x29 fp because it optionally can be a callee
+            // saved reg
+            size_t[11] regs = void;
+            // store the registers in pairs
+            asm pure nothrow @nogc
+            {
+                "stp x19, x20, %0" : "=m" (regs[ 0]), "=m" (regs[1]);
+                "stp x21, x22, %0" : "=m" (regs[ 2]), "=m" (regs[3]);
+                "stp x23, x24, %0" : "=m" (regs[ 4]), "=m" (regs[5]);
+                "stp x25, x26, %0" : "=m" (regs[ 6]), "=m" (regs[7]);
+                "stp x27, x28, %0" : "=m" (regs[ 8]), "=m" (regs[9]);
+                "str x29, %0"      : "=m" (regs[10]);
+                "mov %0, sp"       : "=r" (sp);
+            }
+        }
+        else version (ARM)
+        {
+            // Callee-save registers, according to AAPCS, section 5.1.1.
+            // arm and thumb2 instructions
+            size_t[8] regs = void;
+            asm pure nothrow @nogc
+            {
+                "stm %0, {r4-r11}" : : "r" (regs.ptr) : "memory";
+                "mov %0, sp"       : "=r" (sp);
+            }
+        }
+        else
+        {
+            __builtin_unwind_init();
+            sp = &sp;
+        }
     }
     else version (AsmX86_Posix)
     {
@@ -1539,9 +1663,9 @@ package extern(D) void* getStackBottom() nothrow @nogc
             void *bottom;
 
             version (X86)
-                asm pure nothrow @nogc { "movl %%fs:4, %0;" : "=r" bottom; }
+                asm pure nothrow @nogc { "movl %%fs:4, %0;" : "=r" (bottom); }
             else version (X86_64)
-                asm pure nothrow @nogc { "movq %%gs:8, %0;" : "=r" bottom; }
+                asm pure nothrow @nogc { "movq %%gs:8, %0;" : "=r" (bottom); }
             else
                 static assert(false, "Platform not supported.");
 
@@ -1789,6 +1913,28 @@ private extern (D) bool suspend( Thread t ) nothrow @nogc
             t.m_reg[13] = state.sp;
             t.m_reg[14] = state.lr;
             t.m_reg[15] = state.pc;
+        }
+        else version (PPC)
+        {
+            ppc_thread_state_t state = void;
+            mach_msg_type_number_t count = PPC_THREAD_STATE_COUNT;
+
+            if (thread_get_state(t.m_tmach, PPC_THREAD_STATE, &state, &count) != KERN_SUCCESS)
+                onThreadError("Unable to load thread state");
+            if (!t.m_lock)
+                t.m_curr.tstack = cast(void*) state.r[1];
+            t.m_reg[] = state.r[];
+        }
+        else version (PPC64)
+        {
+            ppc_thread_state64_t state = void;
+            mach_msg_type_number_t count = PPC_THREAD_STATE64_COUNT;
+
+            if (thread_get_state(t.m_tmach, PPC_THREAD_STATE64, &state, &count) != KERN_SUCCESS)
+                onThreadError("Unable to load thread state");
+            if (!t.m_lock)
+                t.m_curr.tstack = cast(void*) state.r[1];
+            t.m_reg[] = state.r[];
         }
         else
         {
@@ -2050,8 +2196,7 @@ extern (C) void thread_init() @nogc
         status = sem_init( &suspendCount, 0, 0 );
         assert( status == 0 );
     }
-    if (typeid(Thread).initializer.ptr)
-        _mainThreadStore[] = typeid(Thread).initializer[];
+    _mainThreadStore[] = __traits(initSymbol, Thread)[];
     Thread.sm_main = attachThread((cast(Thread)_mainThreadStore.ptr).__ctor());
 }
 
@@ -2108,15 +2253,7 @@ version (Windows)
 
             void append( Throwable t )
             {
-                if ( obj.m_unhandled is null )
-                    obj.m_unhandled = t;
-                else
-                {
-                    Throwable last = obj.m_unhandled;
-                    while ( last.next !is null )
-                        last = last.next;
-                    last.next = t;
-                }
+                obj.m_unhandled = Throwable.chainTogether(obj.m_unhandled, t);
             }
 
             version (D_InlineAsm_X86)
@@ -2196,7 +2333,7 @@ else version (Posix)
             // before initilizing GC for TLS (rt_tlsgc_init)
             version (GNUShared)
             {
-                externDFunc!("gcc.sections.elf_shared.inheritLoadedLibraries",
+                externDFunc!("gcc.sections.inheritLoadedLibraries",
                              void function(void*) @nogc nothrow)(loadedLibraries);
             }
             else version (Shared)
@@ -2263,15 +2400,7 @@ else version (Posix)
 
             void append( Throwable t )
             {
-                if ( obj.m_unhandled is null )
-                    obj.m_unhandled = t;
-                else
-                {
-                    Throwable last = obj.m_unhandled;
-                    while ( last.next !is null )
-                        last = last.next;
-                    last.next = t;
-                }
+                obj.m_unhandled = Throwable.chainTogether(obj.m_unhandled, t);
             }
             try
             {
@@ -2287,7 +2416,7 @@ else version (Posix)
                 rt_moduleTlsDtor();
                 version (GNUShared)
                 {
-                    externDFunc!("gcc.sections.elf_shared.cleanupLoadedLibraries",
+                    externDFunc!("gcc.sections.cleanupLoadedLibraries",
                                  void function() @nogc nothrow)();
                 }
                 else version (Shared)
@@ -2786,7 +2915,7 @@ private size_t adjustStackSize(size_t sz) nothrow @nogc
         // On glibc, TLS uses the top of the stack, so add its size to the requested size
         version (GNU)
         {
-            sz += externDFunc!("gcc.sections.elf_shared.sizeOfTLS",
+            sz += externDFunc!("gcc.sections.elf.sizeOfTLS",
                                size_t function() @nogc nothrow)();
         }
         else

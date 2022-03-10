@@ -10,6 +10,9 @@
  * Source:    $(DRUNTIMESRC core/thread/osthread.d)
  */
 
+/* NOTE: This file has been patched from the original DMD distribution to
+ * work with the GDC compiler.
+ */
 module core.thread.threadbase;
 
 import core.thread.context;
@@ -313,6 +316,7 @@ class ThreadBase
         // NOTE: This function may not be called until thread_init has
         //       completed.  See thread_suspendAll for more information
         //       on why this might occur.
+        version (GNU) pragma(inline, false);
         return sm_this;
     }
 
@@ -569,11 +573,9 @@ package(core.thread):
 
     static void initLocks() @nogc
     {
-        _slock[] = typeid(Mutex).initializer[];
-        (cast(Mutex)_slock.ptr).__ctor();
-
-        _criticalRegionLock[] = typeid(Mutex).initializer[];
-        (cast(Mutex)_criticalRegionLock.ptr).__ctor();
+        import core.lifetime : emplace;
+        emplace!Mutex(_slock[]);
+        emplace!Mutex(_criticalRegionLock[]);
     }
 
     static void termLocks() @nogc
@@ -769,10 +771,7 @@ package void thread_term_tpl(ThreadT, MainThreadStore)(ref MainThreadStore _main
     // destruct manually as object.destroy is not @nogc
     (cast(ThreadT) cast(void*) ThreadBase.sm_main).__dtor();
     _d_monitordelete_nogc(ThreadBase.sm_main);
-    if (typeid(ThreadT).initializer.ptr)
-        _mainThreadStore[] = typeid(ThreadT).initializer[];
-    else
-        (cast(ubyte[])_mainThreadStore)[] = 0;
+    _mainThreadStore[] = __traits(initSymbol, ThreadT)[];
     ThreadBase.sm_main = null;
 
     assert(ThreadBase.sm_tbeg && ThreadBase.sm_tlen == 1);
@@ -1334,8 +1333,8 @@ package
 
     void initLowlevelThreads() @nogc
     {
-        ll_lock[] = typeid(Mutex).initializer[];
-        lowlevelLock.__ctor();
+        import core.lifetime : emplace;
+        emplace(lowlevelLock());
     }
 
     void termLowlevelThreads() @nogc

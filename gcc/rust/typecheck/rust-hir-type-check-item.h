@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -43,12 +43,61 @@ public:
 
   void visit (HIR::ImplBlock &impl_block) override
   {
+    std::vector<TyTy::SubstitutionParamMapping> substitutions;
+    if (impl_block.has_generics ())
+      {
+	for (auto &generic_param : impl_block.get_generic_params ())
+	  {
+	    switch (generic_param.get ()->get_kind ())
+	      {
+	      case HIR::GenericParam::GenericKind::LIFETIME:
+		// Skipping Lifetime completely until better handling.
+		break;
+
+		case HIR::GenericParam::GenericKind::TYPE: {
+		  TyTy::BaseType *l = nullptr;
+		  bool ok = context->lookup_type (
+		    generic_param->get_mappings ().get_hirid (), &l);
+		  if (ok && l->get_kind () == TyTy::TypeKind::PARAM)
+		    {
+		      substitutions.push_back (TyTy::SubstitutionParamMapping (
+			static_cast<HIR::TypeParam &> (*generic_param),
+			static_cast<TyTy::ParamType *> (l)));
+		    }
+		}
+		break;
+	      }
+	  }
+      }
+
+    std::vector<TyTy::TypeBoundPredicate> specified_bounds;
     TraitReference *trait_reference = &TraitReference::error_node ();
     if (impl_block.has_trait_ref ())
       {
 	std::unique_ptr<HIR::TypePath> &ref = impl_block.get_trait_ref ();
 	trait_reference = TraitResolver::Resolve (*ref.get ());
 	rust_assert (!trait_reference->is_error ());
+
+	// setup the bound
+	TyTy::TypeBoundPredicate predicate (
+	  trait_reference->get_mappings ().get_defid (), ref->get_locus ());
+	auto &final_seg = ref->get_final_segment ();
+	if (final_seg->is_generic_segment ())
+	  {
+	    auto final_generic_seg
+	      = static_cast<HIR::TypePathSegmentGeneric *> (final_seg.get ());
+	    if (final_generic_seg->has_generic_args ())
+	      {
+		HIR::GenericArgs &generic_args
+		  = final_generic_seg->get_generic_args ();
+
+		// this is applying generic arguments to a trait
+		// reference
+		predicate.apply_generic_arguments (&generic_args);
+	      }
+	  }
+
+	specified_bounds.push_back (std::move (predicate));
       }
 
     TyTy::BaseType *self = nullptr;
@@ -59,20 +108,23 @@ public:
 		       "failed to resolve Self for ImplBlock");
 	return;
       }
+    // inherit the bounds
+    self->inherit_bounds (specified_bounds);
 
     bool is_trait_impl_block = !trait_reference->is_error ();
 
-    std::vector<std::reference_wrapper<const TraitItemReference>>
-      trait_item_refs;
+    std::vector<const TraitItemReference *> trait_item_refs;
     for (auto &impl_item : impl_block.get_impl_items ())
       {
 	if (!is_trait_impl_block)
-	  TypeCheckImplItem::Resolve (impl_item.get (), self);
+	  TypeCheckImplItem::Resolve (&impl_block, impl_item.get (), self);
 	else
 	  {
-	    auto &trait_item_ref
-	      = TypeCheckImplItemWithTrait::Resolve (impl_item.get (), self,
-						     *trait_reference);
+	    auto trait_item_ref
+	      = TypeCheckImplItemWithTrait::Resolve (&impl_block,
+						     impl_item.get (), self,
+						     *trait_reference,
+						     substitutions);
 	    trait_item_refs.push_back (trait_item_ref);
 	  }
       }
@@ -88,12 +140,11 @@ public:
 	for (auto &trait_item_ref : trait_reference->get_trait_items ())
 	  {
 	    bool found = false;
-	    for (const TraitItemReference &implemented_trait_item :
-		 trait_item_refs)
+	    for (auto implemented_trait_item : trait_item_refs)
 	      {
 		std::string trait_item_name = trait_item_ref.get_identifier ();
 		std::string impl_item_name
-		  = implemented_trait_item.get_identifier ();
+		  = implemented_trait_item->get_identifier ();
 		found = trait_item_name.compare (impl_item_name) == 0;
 		if (found)
 		  break;
@@ -123,6 +174,19 @@ public:
 			   trait_reference->get_name ().c_str ());
 	  }
       }
+
+    if (is_trait_impl_block)
+      {
+	trait_reference->clear_associated_types ();
+
+	AssociatedImplTrait associated (trait_reference, &impl_block, self,
+					context);
+	context->insert_associated_trait_impl (
+	  impl_block.get_mappings ().get_hirid (), std::move (associated));
+	context->insert_associated_impl_mapping (
+	  trait_reference->get_mappings ().get_hirid (), self,
+	  impl_block.get_mappings ().get_hirid ());
+      }
   }
 
   void visit (HIR::Function &function) override
@@ -145,7 +209,8 @@ public:
     // need to get the return type from this
     TyTy::FnType *resolved_fn_type = static_cast<TyTy::FnType *> (lookup);
     auto expected_ret_tyty = resolved_fn_type->get_return_type ();
-    context->push_return_type (expected_ret_tyty);
+    context->push_return_type (TypeCheckContextItem (&function),
+			       expected_ret_tyty);
 
     auto block_expr_ty
       = TypeCheckExpr::Resolve (function.get_definition ().get (), false);
@@ -154,6 +219,12 @@ public:
 
     if (block_expr_ty->get_kind () != TyTy::NEVER)
       expected_ret_tyty->unify (block_expr_ty);
+  }
+
+  void visit (HIR::Module &module) override
+  {
+    for (auto &item : module.get_items ())
+      TypeCheckItem::Resolve (item.get ());
   }
 
 private:

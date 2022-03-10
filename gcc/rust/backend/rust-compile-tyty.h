@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -34,7 +34,7 @@ namespace Compile {
 class TyTyCompile : public TyTy::TyVisitor
 {
 public:
-  static ::Btype *compile (::Backend *backend, TyTy::BaseType *ty)
+  static tree compile (::Backend *backend, TyTy::BaseType *ty)
   {
     TyTyCompile compiler (backend);
     ty->accept_vis (compiler);
@@ -50,15 +50,19 @@ public:
 
   void visit (TyTy::PlaceholderType &) override { gcc_unreachable (); }
 
+  void visit (TyTy::ProjectionType &) override { gcc_unreachable (); }
+
   void visit (TyTy::TupleType &type) override
   {
-    if (type.num_fields () == 0)
-      translated = backend->unit_type ();
-    else
-      gcc_unreachable ();
+    // this interface is only for unit-type the -type interface takes into
+    // account the context
+    rust_assert (type.num_fields () == 0);
+    translated = backend->unit_type ();
   }
 
   void visit (TyTy::ArrayType &) override { gcc_unreachable (); }
+
+  void visit (TyTy::SliceType &) override { gcc_unreachable (); }
 
   void visit (TyTy::ReferenceType &) override { gcc_unreachable (); }
 
@@ -70,15 +74,15 @@ public:
 
   void visit (TyTy::FnType &type) override
   {
-    Backend::Btyped_identifier receiver;
-    std::vector<Backend::Btyped_identifier> parameters;
-    std::vector<Backend::Btyped_identifier> results;
+    Backend::typed_identifier receiver;
+    std::vector<Backend::typed_identifier> parameters;
+    std::vector<Backend::typed_identifier> results;
 
     if (!type.get_return_type ()->is_unit ())
       {
 	auto hir_type = type.get_return_type ();
 	auto ret = TyTyCompile::compile (backend, hir_type);
-	results.push_back (Backend::Btyped_identifier (
+	results.push_back (Backend::typed_identifier (
 	  "_", ret, mappings->lookup_location (hir_type->get_ref ())));
       }
 
@@ -88,7 +92,7 @@ public:
 	auto param_tyty = params.second;
 	auto compiled_param_type = TyTyCompile::compile (backend, param_tyty);
 
-	auto compiled_param = Backend::Btyped_identifier (
+	auto compiled_param = Backend::typed_identifier (
 	  param_pattern->as_string (), compiled_param_type,
 	  mappings->lookup_location (param_tyty->get_ref ()));
 
@@ -225,7 +229,7 @@ public:
 
   void visit (TyTy::StrType &) override
   {
-    Btype *raw_str = backend->raw_str_type ();
+    tree raw_str = backend->raw_str_type ();
     translated
       = backend->named_type ("str", raw_str, Linemap::predeclared_location ());
   }
@@ -235,6 +239,10 @@ public:
     translated = backend->unit_type ();
   }
 
+  void visit (TyTy::DynamicObjectType &) override { gcc_unreachable (); }
+
+  void visit (TyTy::ClosureType &) override { gcc_unreachable (); }
+
 private:
   TyTyCompile (::Backend *backend)
     : backend (backend), translated (nullptr),
@@ -242,7 +250,7 @@ private:
   {}
 
   ::Backend *backend;
-  ::Btype *translated;
+  tree translated;
   Analysis::Mappings *mappings;
 };
 

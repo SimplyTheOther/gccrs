@@ -1,6 +1,6 @@
 // Map implementation -*- C++ -*-
 
-// Copyright (C) 2001-2021 Free Software Foundation, Inc.
+// Copyright (C) 2001-2022 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -126,6 +126,8 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 #endif
 
     public:
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
       class value_compare
       : public std::binary_function<value_type, value_type, bool>
       {
@@ -140,6 +142,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	bool operator()(const value_type& __x, const value_type& __y) const
 	{ return comp(__x.first, __y.first); }
       };
+#pragma GCC diagnostic pop
 
     private:
       /// This turns a red-black tree into a [multi]map.
@@ -153,6 +156,13 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       _Rep_type _M_t;
 
       typedef __gnu_cxx::__alloc_traits<_Pair_alloc_type> _Alloc_traits;
+
+#if __cplusplus >= 201703L
+      template<typename _Up, typename _Vp = remove_reference_t<_Up>>
+	static constexpr bool __usable_key
+	  = __or_v<is_same<const _Vp, const _Key>,
+		   __and_<is_scalar<_Vp>, is_scalar<_Key>>>;
+#endif
 
     public:
       // many of these are specified differently in ISO, but the following are
@@ -237,11 +247,11 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       : _M_t(_Pair_alloc_type(__a)) { }
 
       /// Allocator-extended copy constructor.
-      map(const map& __m, const allocator_type& __a)
+      map(const map& __m, const __type_identity_t<allocator_type>& __a)
       : _M_t(__m._M_t, _Pair_alloc_type(__a)) { }
 
       /// Allocator-extended move constructor.
-      map(map&& __m, const allocator_type& __a)
+      map(map&& __m, const __type_identity_t<allocator_type>& __a)
       noexcept(is_nothrow_copy_constructible<_Compare>::value
 	       && _Alloc_traits::_S_always_equal())
       : _M_t(std::move(__m._M_t), _Pair_alloc_type(__a)) { }
@@ -574,7 +584,27 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       template<typename... _Args>
 	std::pair<iterator, bool>
 	emplace(_Args&&... __args)
-	{ return _M_t._M_emplace_unique(std::forward<_Args>(__args)...); }
+	{
+#if __cplusplus >= 201703L
+	  if constexpr (sizeof...(_Args) == 2)
+	    if constexpr (is_same_v<allocator_type, allocator<value_type>>)
+	      {
+		auto&& [__a, __v] = pair<_Args&...>(__args...);
+		if constexpr (__usable_key<decltype(__a)>)
+		  {
+		    const key_type& __k = __a;
+		    iterator __i = lower_bound(__k);
+		    if (__i == end() || key_comp()(__k, (*__i).first))
+		      {
+			__i = emplace_hint(__i, std::forward<_Args>(__args)...);
+			return {__i, true};
+		      }
+		    return {__i, false};
+		  }
+	      }
+#endif
+	  return _M_t._M_emplace_unique(std::forward<_Args>(__args)...);
+	}
 
       /**
        *  @brief Attempts to build and insert a std::pair into the %map.
@@ -814,9 +844,27 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	__enable_if_t<is_constructible<value_type, _Pair>::value,
 		      pair<iterator, bool>>
 	insert(_Pair&& __x)
-	{ return _M_t._M_emplace_unique(std::forward<_Pair>(__x)); }
+	{
+#if __cplusplus >= 201703L
+	  using _P2 = remove_reference_t<_Pair>;
+	  if constexpr (__is_pair<_P2>)
+	    if constexpr (is_same_v<allocator_type, allocator<value_type>>)
+	      if constexpr (__usable_key<typename _P2::first_type>)
+		{
+		  const key_type& __k = __x.first;
+		  iterator __i = lower_bound(__k);
+		  if (__i == end() || key_comp()(__k, (*__i).first))
+		    {
+		      __i = emplace_hint(__i, std::forward<_Pair>(__x));
+		      return {__i, true};
+		    }
+		  return {__i, false};
+		}
 #endif
-      // @}
+	  return _M_t._M_emplace_unique(std::forward<_Pair>(__x));
+	}
+#endif
+      /// @}
 
 #if __cplusplus >= 201103L
       /**
@@ -878,7 +926,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 					     std::forward<_Pair>(__x));
 	}
 #endif
-      // @}
+      /// @}
 
       /**
        *  @brief Template function that attempts to insert a range of elements.
@@ -1036,7 +1084,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       iterator
       erase(iterator __position)
       { return _M_t.erase(__position); }
-      // @}
+      /// @}
 #else
       /**
        *  @brief Erases an element from a %map.
@@ -1152,7 +1200,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 
       // [23.3.1.3] map operations
 
-      //@{
+      ///@{
       /**
        *  @brief Tries to locate an element in a %map.
        *  @param  __x  Key of (key, value) %pair to be located.
@@ -1175,9 +1223,9 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	find(const _Kt& __x) -> decltype(_M_t._M_find_tr(__x))
 	{ return _M_t._M_find_tr(__x); }
 #endif
-      //@}
+      ///@}
 
-      //@{
+      ///@{
       /**
        *  @brief Tries to locate an element in a %map.
        *  @param  __x  Key of (key, value) %pair to be located.
@@ -1200,9 +1248,9 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	find(const _Kt& __x) const -> decltype(_M_t._M_find_tr(__x))
 	{ return _M_t._M_find_tr(__x); }
 #endif
-      //@}
+      ///@}
 
-      //@{
+      ///@{
       /**
        *  @brief  Finds the number of elements with given key.
        *  @param  __x  Key of (key, value) pairs to be located.
@@ -1221,10 +1269,10 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	count(const _Kt& __x) const -> decltype(_M_t._M_count_tr(__x))
 	{ return _M_t._M_count_tr(__x); }
 #endif
-      //@}
+      ///@}
 
 #if __cplusplus > 201703L
-      //@{
+      ///@{
       /**
        *  @brief  Finds whether an element with the given key exists.
        *  @param  __x  Key of (key, value) pairs to be located.
@@ -1239,10 +1287,10 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	contains(const _Kt& __x) const
 	-> decltype(_M_t._M_find_tr(__x), void(), true)
 	{ return _M_t._M_find_tr(__x) != _M_t.end(); }
-      //@}
+      ///@}
 #endif
 
-      //@{
+      ///@{
       /**
        *  @brief Finds the beginning of a subsequence matching given key.
        *  @param  __x  Key of (key, value) pair to be located.
@@ -1265,9 +1313,9 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	-> decltype(iterator(_M_t._M_lower_bound_tr(__x)))
 	{ return iterator(_M_t._M_lower_bound_tr(__x)); }
 #endif
-      //@}
+      ///@}
 
-      //@{
+      ///@{
       /**
        *  @brief Finds the beginning of a subsequence matching given key.
        *  @param  __x  Key of (key, value) pair to be located.
@@ -1290,9 +1338,9 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	-> decltype(const_iterator(_M_t._M_lower_bound_tr(__x)))
 	{ return const_iterator(_M_t._M_lower_bound_tr(__x)); }
 #endif
-      //@}
+      ///@}
 
-      //@{
+      ///@{
       /**
        *  @brief Finds the end of a subsequence matching given key.
        *  @param  __x  Key of (key, value) pair to be located.
@@ -1310,9 +1358,9 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	-> decltype(iterator(_M_t._M_upper_bound_tr(__x)))
 	{ return iterator(_M_t._M_upper_bound_tr(__x)); }
 #endif
-      //@}
+      ///@}
 
-      //@{
+      ///@{
       /**
        *  @brief Finds the end of a subsequence matching given key.
        *  @param  __x  Key of (key, value) pair to be located.
@@ -1330,9 +1378,9 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	-> decltype(const_iterator(_M_t._M_upper_bound_tr(__x)))
 	{ return const_iterator(_M_t._M_upper_bound_tr(__x)); }
 #endif
-      //@}
+      ///@}
 
-      //@{
+      ///@{
       /**
        *  @brief Finds a subsequence matching given key.
        *  @param  __x  Key of (key, value) pairs to be located.
@@ -1359,9 +1407,9 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	-> decltype(pair<iterator, iterator>(_M_t._M_equal_range_tr(__x)))
 	{ return pair<iterator, iterator>(_M_t._M_equal_range_tr(__x)); }
 #endif
-      //@}
+      ///@}
 
-      //@{
+      ///@{
       /**
        *  @brief Finds a subsequence matching given key.
        *  @param  __x  Key of (key, value) pairs to be located.
@@ -1392,7 +1440,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	      _M_t._M_equal_range_tr(__x));
 	}
 #endif
-      //@}
+      ///@}
 
       template<typename _K1, typename _T1, typename _C1, typename _A1>
 	friend bool

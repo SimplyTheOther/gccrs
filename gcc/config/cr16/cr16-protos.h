@@ -1,5 +1,5 @@
-/* Prototypes for exported functions defined in cr16.c
-   Copyright (C) 2012-2021 Free Software Foundation, Inc.
+/* Prototypes for exported functions defined in cr16.cc
+   Copyright (C) 2012-2022 Free Software Foundation, Inc.
    Contributed by KPIT Cummins Infosystems Limited.
 
    This file is part of GCC.
@@ -45,7 +45,7 @@ enum data_model_type
   ILLEGAL_DM		/* Illegal data model.  */
 };
 
-/* Defined in cr16-rust.c  */
+/* Defined in cr16-rust.cc  */
 extern void cr16_rust_target_cpu_info (void);
 
 #ifdef RTX_CODE
@@ -70,7 +70,6 @@ enum cr16_addrtype
   CR16_ABSOLUTE
 };
 
-extern void notice_update_cc (rtx);
 extern int cr16_operand_bit_pos (int val, int bitval);
 extern void cr16_decompose_const (rtx x, int *code,
 				  enum data_model_type *data,

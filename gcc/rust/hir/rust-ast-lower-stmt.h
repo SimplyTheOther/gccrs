@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -22,6 +22,7 @@
 #include "rust-diagnostics.h"
 
 #include "rust-ast-lower-base.h"
+#include "rust-ast-lower-enumitem.h"
 #include "rust-ast-lower-type.h"
 #include "rust-ast-lower-block.h"
 #include "rust-ast-lower-expr.h"
@@ -42,6 +43,19 @@ public:
     rust_assert (resolver.translated != nullptr);
     *terminated = resolver.terminated;
     return resolver.translated;
+  }
+
+  void visit (AST::MacroInvocation &invoc) override
+  {
+    if (!invoc.has_semicolon ())
+      return;
+
+    AST::ASTFragment &fragment = invoc.get_fragment ();
+
+    // FIXME
+    // this assertion might go away, maybe on failure's to expand a macro?
+    rust_assert (!fragment.get_nodes ().empty ());
+    fragment.get_nodes ().at (0).accept_vis (*this);
   }
 
   void visit (AST::ExprStmtWithBlock &stmt) override
@@ -82,6 +96,34 @@ public:
     mappings->insert_hir_stmt (crate_num, mapping.get_hirid (), translated);
   }
 
+  void visit (AST::ConstantItem &constant) override
+  {
+    HIR::Visibility vis = HIR::Visibility::create_public ();
+
+    HIR::Type *type = ASTLoweringType::translate (constant.get_type ().get ());
+    HIR::Expr *expr = ASTLoweringExpr::translate (constant.get_expr ().get ());
+
+    auto crate_num = mappings->get_current_crate ();
+    Analysis::NodeMapping mapping (crate_num, constant.get_node_id (),
+				   mappings->get_next_hir_id (crate_num),
+				   mappings->get_next_localdef_id (crate_num));
+
+    HIR::ConstantItem *constant_item
+      = new HIR::ConstantItem (mapping, constant.get_identifier (), vis,
+			       std::unique_ptr<HIR::Type> (type),
+			       std::unique_ptr<HIR::Expr> (expr),
+			       constant.get_outer_attrs (),
+			       constant.get_locus ());
+    translated = constant_item;
+
+    mappings->insert_hir_item (mapping.get_crate_num (), mapping.get_hirid (),
+			       constant_item);
+    mappings->insert_hir_stmt (mapping.get_crate_num (), mapping.get_hirid (),
+			       constant_item);
+    mappings->insert_location (crate_num, mapping.get_hirid (),
+			       constant.get_locus ());
+  }
+
   void visit (AST::LetStmt &stmt) override
   {
     HIR::Pattern *variables
@@ -110,38 +152,36 @@ public:
 
   void visit (AST::TupleStruct &struct_decl) override
   {
-    std::vector<std::unique_ptr<HIR::GenericParam> > generic_params;
+    std::vector<std::unique_ptr<HIR::GenericParam>> generic_params;
     if (struct_decl.has_generics ())
       {
 	generic_params
 	  = lower_generic_params (struct_decl.get_generic_params ());
       }
 
-    std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
+    std::vector<std::unique_ptr<HIR::WhereClauseItem>> where_clause_items;
     HIR::WhereClause where_clause (std::move (where_clause_items));
     HIR::Visibility vis = HIR::Visibility::create_public ();
 
     std::vector<HIR::TupleField> fields;
-    struct_decl.iterate ([&] (AST::TupleField &field) mutable -> bool {
-      HIR::Visibility vis = HIR::Visibility::create_public ();
-      HIR::Type *type
-	= ASTLoweringType::translate (field.get_field_type ().get ());
+    for (AST::TupleField &field : struct_decl.get_fields ())
+      {
+	HIR::Visibility vis = HIR::Visibility::create_public ();
+	HIR::Type *type
+	  = ASTLoweringType::translate (field.get_field_type ().get ());
 
-      auto crate_num = mappings->get_current_crate ();
-      Analysis::NodeMapping mapping (crate_num, field.get_node_id (),
-				     mappings->get_next_hir_id (crate_num),
-				     mappings->get_next_localdef_id (
-				       crate_num));
+	auto crate_num = mappings->get_current_crate ();
+	Analysis::NodeMapping mapping (crate_num, field.get_node_id (),
+				       mappings->get_next_hir_id (crate_num),
+				       mappings->get_next_localdef_id (
+					 crate_num));
 
-      // FIXME
-      // AST::TupleField is missing Location info
-      Location field_locus;
-      HIR::TupleField translated_field (mapping,
-					std::unique_ptr<HIR::Type> (type), vis,
-					field_locus, field.get_outer_attrs ());
-      fields.push_back (std::move (translated_field));
-      return true;
-    });
+	HIR::TupleField translated_field (mapping,
+					  std::unique_ptr<HIR::Type> (type),
+					  vis, field.get_locus (),
+					  field.get_outer_attrs ());
+	fields.push_back (std::move (translated_field));
+      }
 
     auto crate_num = mappings->get_current_crate ();
     Analysis::NodeMapping mapping (crate_num, struct_decl.get_node_id (),
@@ -163,37 +203,41 @@ public:
 
   void visit (AST::StructStruct &struct_decl) override
   {
-    std::vector<std::unique_ptr<HIR::GenericParam> > generic_params;
+    std::vector<std::unique_ptr<HIR::GenericParam>> generic_params;
     if (struct_decl.has_generics ())
       {
 	generic_params
 	  = lower_generic_params (struct_decl.get_generic_params ());
       }
 
-    std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
+    std::vector<std::unique_ptr<HIR::WhereClauseItem>> where_clause_items;
     HIR::WhereClause where_clause (std::move (where_clause_items));
     HIR::Visibility vis = HIR::Visibility::create_public ();
 
     bool is_unit = struct_decl.is_unit_struct ();
     std::vector<HIR::StructField> fields;
-    struct_decl.iterate ([&] (AST::StructField &field) mutable -> bool {
-      HIR::Visibility vis = HIR::Visibility::create_public ();
-      HIR::Type *type
-	= ASTLoweringType::translate (field.get_field_type ().get ());
+    for (AST::StructField &field : struct_decl.get_fields ())
+      {
+	HIR::Visibility vis = HIR::Visibility::create_public ();
+	HIR::Type *type
+	  = ASTLoweringType::translate (field.get_field_type ().get ());
 
-      auto crate_num = mappings->get_current_crate ();
-      Analysis::NodeMapping mapping (crate_num, field.get_node_id (),
-				     mappings->get_next_hir_id (crate_num),
-				     mappings->get_next_localdef_id (
-				       crate_num));
+	auto crate_num = mappings->get_current_crate ();
+	Analysis::NodeMapping mapping (crate_num, field.get_node_id (),
+				       mappings->get_next_hir_id (crate_num),
+				       mappings->get_next_localdef_id (
+					 crate_num));
 
-      HIR::StructField translated_field (mapping, field.get_field_name (),
-					 std::unique_ptr<HIR::Type> (type), vis,
-					 field.get_locus (),
-					 field.get_outer_attrs ());
-      fields.push_back (std::move (translated_field));
-      return true;
-    });
+	HIR::StructField translated_field (mapping, field.get_field_name (),
+					   std::unique_ptr<HIR::Type> (type),
+					   vis, field.get_locus (),
+					   field.get_outer_attrs ());
+
+	if (struct_field_name_exists (fields, translated_field))
+	  break;
+
+	fields.push_back (std::move (translated_field));
+      }
 
     auto crate_num = mappings->get_current_crate ();
     Analysis::NodeMapping mapping (crate_num, struct_decl.get_node_id (),
@@ -215,36 +259,40 @@ public:
 
   void visit (AST::Union &union_decl) override
   {
-    std::vector<std::unique_ptr<HIR::GenericParam> > generic_params;
+    std::vector<std::unique_ptr<HIR::GenericParam>> generic_params;
     if (union_decl.has_generics ())
       {
 	generic_params
 	  = lower_generic_params (union_decl.get_generic_params ());
       }
 
-    std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
+    std::vector<std::unique_ptr<HIR::WhereClauseItem>> where_clause_items;
     HIR::WhereClause where_clause (std::move (where_clause_items));
     HIR::Visibility vis = HIR::Visibility::create_public ();
 
     std::vector<HIR::StructField> variants;
-    union_decl.iterate ([&] (AST::StructField &variant) mutable -> bool {
-      HIR::Visibility vis = HIR::Visibility::create_public ();
-      HIR::Type *type
-	= ASTLoweringType::translate (variant.get_field_type ().get ());
+    for (AST::StructField &variant : union_decl.get_variants ())
+      {
+	HIR::Visibility vis = HIR::Visibility::create_public ();
+	HIR::Type *type
+	  = ASTLoweringType::translate (variant.get_field_type ().get ());
 
-      auto crate_num = mappings->get_current_crate ();
-      Analysis::NodeMapping mapping (crate_num, variant.get_node_id (),
-				     mappings->get_next_hir_id (crate_num),
-				     mappings->get_next_localdef_id (
-				       crate_num));
+	auto crate_num = mappings->get_current_crate ();
+	Analysis::NodeMapping mapping (crate_num, variant.get_node_id (),
+				       mappings->get_next_hir_id (crate_num),
+				       mappings->get_next_localdef_id (
+					 crate_num));
 
-      HIR::StructField translated_variant (mapping, variant.get_field_name (),
-					   std::unique_ptr<HIR::Type> (type),
-					   vis, variant.get_locus (),
-					   variant.get_outer_attrs ());
-      variants.push_back (std::move (translated_variant));
-      return true;
-    });
+	HIR::StructField translated_variant (mapping, variant.get_field_name (),
+					     std::unique_ptr<HIR::Type> (type),
+					     vis, variant.get_locus (),
+					     variant.get_outer_attrs ());
+
+	if (struct_field_name_exists (variants, translated_variant))
+	  break;
+
+	variants.push_back (std::move (translated_variant));
+      }
 
     auto crate_num = mappings->get_current_crate ();
     Analysis::NodeMapping mapping (crate_num, union_decl.get_node_id (),
@@ -261,6 +309,44 @@ public:
 			       translated);
     mappings->insert_location (crate_num, mapping.get_hirid (),
 			       union_decl.get_locus ());
+  }
+
+  void visit (AST::Enum &enum_decl) override
+  {
+    std::vector<std::unique_ptr<HIR::GenericParam>> generic_params;
+    if (enum_decl.has_generics ())
+      {
+	generic_params = lower_generic_params (enum_decl.get_generic_params ());
+      }
+
+    std::vector<std::unique_ptr<HIR::WhereClauseItem>> where_clause_items;
+    HIR::WhereClause where_clause (std::move (where_clause_items));
+    HIR::Visibility vis = HIR::Visibility::create_public ();
+
+    // bool is_unit = enum_decl.is_zero_variant ();
+    std::vector<std::unique_ptr<HIR::EnumItem>> items;
+    for (auto &variant : enum_decl.get_variants ())
+      {
+	HIR::EnumItem *hir_item
+	  = ASTLoweringEnumItem::translate (variant.get ());
+	items.push_back (std::unique_ptr<HIR::EnumItem> (hir_item));
+      }
+
+    auto crate_num = mappings->get_current_crate ();
+    Analysis::NodeMapping mapping (crate_num, enum_decl.get_node_id (),
+				   mappings->get_next_hir_id (crate_num),
+				   mappings->get_next_localdef_id (crate_num));
+
+    translated = new HIR::Enum (mapping, enum_decl.get_identifier (), vis,
+				std::move (generic_params),
+				std::move (where_clause), /* is_unit, */
+				std::move (items), enum_decl.get_outer_attrs (),
+				enum_decl.get_locus ());
+
+    mappings->insert_hir_stmt (mapping.get_crate_num (), mapping.get_hirid (),
+			       translated);
+    mappings->insert_location (crate_num, mapping.get_hirid (),
+			       enum_decl.get_locus ());
   }
 
   void visit (AST::EmptyStmt &empty) override
@@ -281,14 +367,14 @@ public:
   void visit (AST::Function &function) override
   {
     // ignore for now and leave empty
-    std::vector<std::unique_ptr<HIR::WhereClauseItem> > where_clause_items;
+    std::vector<std::unique_ptr<HIR::WhereClauseItem>> where_clause_items;
     HIR::WhereClause where_clause (std::move (where_clause_items));
-    HIR::FunctionQualifiers qualifiers (
-      HIR::FunctionQualifiers::AsyncConstStatus::NONE, false);
+    HIR::FunctionQualifiers qualifiers
+      = lower_qualifiers (function.get_qualifiers ());
     HIR::Visibility vis = HIR::Visibility::create_public ();
 
     // need
-    std::vector<std::unique_ptr<HIR::GenericParam> > generic_params;
+    std::vector<std::unique_ptr<HIR::GenericParam>> generic_params;
     if (function.has_generics ())
       {
 	generic_params = lower_generic_params (function.get_generic_params ());

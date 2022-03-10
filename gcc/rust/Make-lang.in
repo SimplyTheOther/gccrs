@@ -1,6 +1,6 @@
 # Make-lang.in -- Top level -*- makefile -*- fragment for GCC Rust frontend.
 
-# Copyright (C) 2009-2020 Free Software Foundation, Inc.
+# Copyright (C) 2009-2022 Free Software Foundation, Inc.
 
 # This file is part of GCC.
 
@@ -66,22 +66,53 @@ GRS_OBJS = \
     rust/rust-gcc.o \
     rust/rust-token.o \
     rust/rust-lex.o \
+    rust/rust-cfg-parser.o \
     rust/rust-parse.o \
     rust/rust-ast-full-test.o \
     rust/rust-session-manager.o \
     rust/rust-compile.o \
+    rust/rust-mangle.o \
     rust/rust-compile-resolve-path.o \
     rust/rust-macro-expand.o \
+    rust/rust-macro-invoc-lexer.o \
+    rust/rust-macro-substitute-ctx.o \
+    rust/rust-macro-builtins.o \
     rust/rust-hir-full-test.o \
     rust/rust-hir-map.o \
+    rust/rust-attributes.o \
+    rust/rust-abi.o \
     rust/rust-ast-lower.o \
+    rust/rust-ast-lower-pattern.o \
     rust/rust-ast-resolve.o \
+    rust/rust-ast-resolve-pattern.o \
+    rust/rust-ast-resolve-expr.o \
+    rust/rust-ast-resolve-type.o \
     rust/rust-hir-type-check.o \
     rust/rust-tyty.o \
     rust/rust-tyctx.o \
     rust/rust-tyty-bounds.o \
-    rust/rust-hir-const-fold.o \
+    rust/rust-hir-type-check-util.o \
+    rust/rust-hir-trait-resolve.o \
+    rust/rust-hir-type-check-type.o \
+    rust/rust-hir-type-check-struct.o \
+    rust/rust-hir-type-check-pattern.o \
+    rust/rust-hir-type-check-expr.o \
+    rust/rust-hir-dot-operator.o \
+    rust/rust-autoderef.o \
+    rust/rust-substitution-mapper.o \
     rust/rust-lint-marklive.o \
+    rust/rust-lint-unused-var.o \
+    rust/rust-hir-type-check-path.o \
+    rust/rust-compile-intrinsic.o \
+    rust/rust-compile-pattern.o \
+    rust/rust-base62.o \
+    rust/rust-compile-item.o \
+    rust/rust-compile-implitem.o \
+    rust/rust-compile-expr.o \
+    rust/rust-compile-type.o \
+    rust/rust-constexpr.o \
+    rust/rust-compile-base.o \
+    rust/rust-tree.o \
     $(END)
 # removed object files from here
 
@@ -91,7 +122,7 @@ RUST_ALL_OBJS = $(GRS_OBJS) $(RUST_TARGET_OBJS)
 rust_OBJS = $(RUST_ALL_OBJS) rust/rustspec.o
 
 # The compiler itself is called rust1 (formerly grs1)
-rust1$(exeext): $(RUST_ALL_OBJS) attribs.o  $(BACKEND) $(LIBDEPS)
+rust1$(exeext): $(RUST_ALL_OBJS) attribs.o $(BACKEND) $(LIBDEPS)
 	+$(LLINKER) $(ALL_LINKERFLAGS) $(LDFLAGS) -o $@ \
 	      $(RUST_ALL_OBJS) attribs.o $(BACKEND) $(LIBS) $(BACKENDLIBS)
 
@@ -192,8 +223,16 @@ rust.uninstall:
 	-rm -f $(RUST_ALL_OBJS)
 # ^those two are a maybe
 
-# No rust-specific selftests
-selftest-rust:
+# Enable selftests for the rust frontend
+selftest-rust: s-selftest-rust
+
+RUST_SELFTEST_FLAGS = -xrs $(SELFTEST_FLAGS)
+RUST_SELFTEST_DEPS = rust1$(exeext) $(SELFTEST_DEPS)
+
+# Run the rust selftests
+s-selftest-rust: $(RUST_SELFTEST_DEPS)
+	$(GCC_FOR_TARGET) $(RUST_SELFTEST_FLAGS)
+	$(STAMP) $@
 
 # Install info documentation for the front end, if it is present in the source directory. This target
 # should have dependencies on info files that should be installed.
@@ -302,4 +341,3 @@ rust/%.o: rust/typecheck/%.cc
 rust/%.o: rust/lint/%.cc
 	$(COMPILE) $(RUST_CXXFLAGS) $(RUST_INCLUDES) $<
 	$(POSTCOMPILE)
-

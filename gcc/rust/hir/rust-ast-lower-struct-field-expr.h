@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -41,8 +41,7 @@ public:
       compiler.translated->get_mappings ().get_hirid (), compiler.translated);
     compiler.mappings->insert_location (
       compiler.translated->get_mappings ().get_crate_num (),
-      compiler.translated->get_mappings ().get_hirid (),
-      field->get_locus_slow ());
+      compiler.translated->get_mappings ().get_hirid (), field->get_locus ());
 
     return compiler.translated;
   }

@@ -1,5 +1,5 @@
 # Makefile for directory with message catalog handling library of GNU gettext
-# Copyright (C) 1995-1998, 2000-2003 Free Software Foundation, Inc.
+# Copyright (C) 1995-2021 Free Software Foundation, Inc.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of the GNU Library General Public License as published
@@ -45,10 +45,14 @@ RANLIB = @RANLIB@
 YACC = @INTLBISON@ -y -d
 YFLAGS = --name-prefix=__gettext
 CPPFLAGS = @CPPFLAGS@
-CFLAGS = @CFLAGS@
+CFLAGS = @CFLAGS@ @PICFLAG@
 LDFLAGS = @LDFLAGS@
 LIBS = @LIBS@
 DEFS = -DHAVE_CONFIG_H
+
+CTAGS = @CTAGS@
+ETAGS = @ETAGS@
+MKID = @MKID@
 
 COMPILE = $(CC) -c $(CPPFLAGS) $(CFLAGS) $(DEFS) $(DEFS-$@) $(INCLUDES)
 
@@ -176,17 +180,17 @@ localealias.o localcharset.o relocatable.o: relocatable.h
 tags: TAGS
 TAGS: $(HEADERS) $(SOURCES)
 	here=`pwd`; cd $(srcdir) && \
-		etags -o $$here/TAGS $(HEADERS) $(SOURCES)
+		$(ETAGS) -o $$here/TAGS $(HEADERS) $(SOURCES)
 
 ctags: CTAGS
 CTAGS: $(HEADERS) $(SOURCES)
 	here=`pwd`; cd $(srcdir) && \
-		ctags -o $$here/CTAGS $(HEADERS) $(SOURCES)
+		$(CTAGS) -o $$here/CTAGS $(HEADERS) $(SOURCES)
 
 id: ID
 ID: $(HEADERS) $(SOURCES)
 	here=`pwd`; cd $(srcdir) && \
-		mkid -f$$here/ID $(HEADERS) $(SOURCES)
+		$(MKID) -f$$here/ID $(HEADERS) $(SOURCES)
 
 mostlyclean:
 	rm -f *.a *.la *.o *.obj *.lo core core.* libintl.h

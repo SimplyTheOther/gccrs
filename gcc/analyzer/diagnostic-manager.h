@@ -1,5 +1,5 @@
 /* Classes for saving, deduplicating, and emitting analyzer diagnostics.
-   Copyright (C) 2019-2021 Free Software Foundation, Inc.
+   Copyright (C) 2019-2022 Free Software Foundation, Inc.
    Contributed by David Malcolm <dmalcolm@redhat.com>.
 
 This file is part of GCC.
@@ -58,6 +58,8 @@ public:
 
   unsigned get_index () const { return m_idx; }
 
+  bool supercedes_p (const saved_diagnostic &other) const;
+
   //private:
   const state_machine *m_sm;
   const exploded_node *m_enode;
@@ -101,7 +103,7 @@ public:
   json::object *to_json () const;
 
   void add_diagnostic (const state_machine *sm,
-		       const exploded_node *enode,
+		       exploded_node *enode,
 		       const supernode *snode, const gimple *stmt,
 		       stmt_finder *finder,
 		       tree var,
@@ -109,7 +111,7 @@ public:
 		       state_machine::state_t state,
 		       pending_diagnostic *d);
 
-  void add_diagnostic (const exploded_node *enode,
+  void add_diagnostic (exploded_node *enode,
 		       const supernode *snode, const gimple *stmt,
 		       stmt_finder *finder,
 		       pending_diagnostic *d);

@@ -1,3 +1,21 @@
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+
+// This file is part of GCC.
+
+// GCC is free software; you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free
+// Software Foundation; either version 3, or (at your option) any later
+// version.
+
+// GCC is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with GCC; see the file COPYING3.  If not see
+// <http://www.gnu.org/licenses/>.
+
 #ifndef RUST_LEX_H
 #define RUST_LEX_H
 
@@ -5,6 +23,7 @@
 #include "rust-buffered-queue.h"
 #include "rust-token.h"
 
+#include <cstdio>
 #include <utility>
 #include <tuple>
 
@@ -14,6 +33,7 @@ struct RAIIFile
 {
 private:
   FILE *file;
+  const char *filename;
 
   void close ()
   {
@@ -22,7 +42,7 @@ private:
   }
 
 public:
-  RAIIFile (const char *filename)
+  RAIIFile (const char *filename) : filename (filename)
   {
     if (strcmp (filename, "-") == 0)
       file = stdin;
@@ -30,15 +50,27 @@ public:
       file = fopen (filename, "r");
   }
 
+  /**
+   * Create a RAIIFile from an existing instance of FILE*
+   */
+  RAIIFile (FILE *raw, const char *filename = nullptr)
+    : file (raw), filename (filename)
+  {}
+
   RAIIFile (const RAIIFile &other) = delete;
   RAIIFile &operator= (const RAIIFile &other) = delete;
 
   // have to specify setting file to nullptr, otherwise unintended fclose occurs
-  RAIIFile (RAIIFile &&other) : file (other.file) { other.file = nullptr; }
+  RAIIFile (RAIIFile &&other) : file (other.file), filename (other.filename)
+  {
+    other.file = nullptr;
+  }
+
   RAIIFile &operator= (RAIIFile &&other)
   {
     close ();
     file = other.file;
+    filename = other.filename;
     other.file = nullptr;
 
     return *this;
@@ -47,6 +79,7 @@ public:
   ~RAIIFile () { close (); }
 
   FILE *get_raw () { return file; }
+  const char *get_filename () { return filename; }
 };
 
 class Lexer
@@ -108,6 +141,42 @@ public:
   Lexer (const char *filename, RAIIFile input, Linemap *linemap);
   ~Lexer ();
 
+  /**
+   * Lex the contents of a string instead of a file
+   */
+  // FIXME: This is unsafe!
+  // Since we are taking a reference to the string's internal buffer, we must
+  // ensure that the lexer does not outlive the string, which might not always
+  // be the case.
+  //
+  // We could have a fix, which would include using fmemopen() to allocate a
+  // buffer and copy the string inside it.
+  // ```
+  // // There will be an extra nul-terminator byte written on fclose(), so
+  // // account for that
+  // auto string_file = fmemopen(NULL, input.length() + 1, "wr");
+  // fwrite(input.c_str(), sizeof(char), input.length(), string_file);
+  // auto wrapper = RAIIFile(string_file);
+  // ```
+  // But sadly our RAIIFile does not support moving really well... And the
+  // destructor, which calls fclose(), gets called, triggering a lack of a
+  // buffer to parse :)
+  //
+  // We need to look into fixing the RAIIFile so that it supports this
+  // behaviour. I'm assuming this will be something like fixing one of the copy
+  // or move constructors, but is outside of the scope of this fix. For now,
+  // make sure your lexers don't live longer than the strings they're trying
+  // to lex
+  static Lexer lex_string (std::string &input)
+  {
+    // We can perform this ugly cast to a non-const char* since we're only
+    // *reading* the string. This would not be valid if we were doing any
+    // modification to it.
+    auto string_file = fmemopen (&input[0], input.length (), "r");
+
+    return Lexer (nullptr, RAIIFile (string_file), nullptr);
+  }
+
   // don't allow copy semantics (for now, at least)
   Lexer (const Lexer &other) = delete;
   Lexer &operator= (const Lexer &other) = delete;
@@ -136,6 +205,7 @@ public:
   void split_current_token (TokenId new_left, TokenId new_right);
 
   Linemap *get_line_map () { return line_map; }
+  std::string get_filename () { return std::string (input.get_filename ()); }
 
 private:
   // File for use as input.
@@ -191,6 +261,7 @@ private:
   // Token stream queue.
   buffered_queue<std::shared_ptr<Token>, TokenSource> token_queue;
 };
+
 } // namespace Rust
 
 #endif

@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -64,21 +64,22 @@ ASTLoweringBlock::visit (AST::BlockExpr &expr)
 {
   std::vector<std::unique_ptr<HIR::Stmt> > block_stmts;
   bool block_did_terminate = false;
-  expr.iterate_stmts ([&] (AST::Stmt *s) mutable -> bool {
-    if (block_did_terminate)
-      rust_warning_at (s->get_locus_slow (), 0, "unreachable statement");
 
-    bool terminated = false;
-    auto translated_stmt = ASTLoweringStmt::translate (s, &terminated);
-    block_stmts.push_back (std::unique_ptr<HIR::Stmt> (translated_stmt));
-    block_did_terminate |= terminated;
-    return true;
-  });
+  for (auto &s : expr.get_statements ())
+    {
+      if (block_did_terminate)
+	rust_warning_at (s->get_locus (), 0, "unreachable statement");
+
+      bool terminated = false;
+      auto translated_stmt = ASTLoweringStmt::translate (s.get (), &terminated);
+      block_stmts.push_back (std::unique_ptr<HIR::Stmt> (translated_stmt));
+      block_did_terminate |= terminated;
+    }
 
   if (expr.has_tail_expr () && block_did_terminate)
     {
       // warning unreachable tail expressions
-      rust_warning_at (expr.get_tail_expr ()->get_locus_slow (), 0,
+      rust_warning_at (expr.get_tail_expr ()->get_locus (), 0,
 		       "unreachable expression");
     }
 
@@ -100,7 +101,8 @@ ASTLoweringBlock::visit (AST::BlockExpr &expr)
     = new HIR::BlockExpr (mapping, std::move (block_stmts),
 			  std::unique_ptr<HIR::ExprWithoutBlock> (tail_expr),
 			  tail_reachable, expr.get_inner_attrs (),
-			  expr.get_outer_attrs (), expr.get_locus ());
+			  expr.get_outer_attrs (), expr.get_start_locus (),
+			  expr.get_end_locus ());
 
   terminated = block_did_terminate;
 }
@@ -261,17 +263,17 @@ void
 ASTLowerPathInExpression::visit (AST::PathInExpression &expr)
 {
   std::vector<HIR::PathExprSegment> path_segments;
-  expr.iterate_path_segments ([&] (AST::PathExprSegment &s) mutable -> bool {
-    path_segments.push_back (lower_path_expr_seg (s));
+  auto &segments = expr.get_segments ();
+  for (auto &s : segments)
+    {
+      path_segments.push_back (lower_path_expr_seg ((s)));
 
-    // insert the mappings for the segment
-    HIR::PathExprSegment *lowered_seg = &path_segments.back ();
-    mappings->insert_hir_path_expr_seg (
-      lowered_seg->get_mappings ().get_crate_num (),
-      lowered_seg->get_mappings ().get_hirid (), lowered_seg);
-    return true;
-  });
-
+      // insert the mappings for the segment
+      HIR::PathExprSegment *lowered_seg = &path_segments.back ();
+      mappings->insert_hir_path_expr_seg (
+	lowered_seg->get_mappings ().get_crate_num (),
+	lowered_seg->get_mappings ().get_hirid (), lowered_seg);
+    }
   auto crate_num = mappings->get_current_crate ();
   Analysis::NodeMapping mapping (crate_num, expr.get_node_id (),
 				 mappings->get_next_hir_id (crate_num),
@@ -280,6 +282,56 @@ ASTLowerPathInExpression::visit (AST::PathInExpression &expr)
   translated = new HIR::PathInExpression (mapping, std::move (path_segments),
 					  expr.get_locus (),
 					  expr.opening_scope_resolution ());
+}
+
+HIR::QualifiedPathType
+ASTLoweringBase::lower_qual_path_type (AST::QualifiedPathType &qualified_type)
+{
+  HIR::Type *type
+    = ASTLoweringType::translate (qualified_type.get_type ().get ());
+  HIR::TypePath *trait
+    = qualified_type.has_as_clause ()
+	? ASTLowerTypePath::translate (qualified_type.get_as_type_path ())
+	: nullptr;
+
+  auto crate_num = mappings->get_current_crate ();
+  Analysis::NodeMapping mapping (crate_num, qualified_type.get_node_id (),
+				 mappings->get_next_hir_id (crate_num),
+				 UNKNOWN_LOCAL_DEFID);
+
+  return HIR::QualifiedPathType (mapping, std::unique_ptr<HIR::Type> (type),
+				 std::unique_ptr<HIR::TypePath> (trait),
+				 qualified_type.get_locus ());
+}
+
+void
+ASTLowerQualPathInExpression::visit (AST::QualifiedPathInExpression &expr)
+{
+  HIR::QualifiedPathType qual_path_type
+    = lower_qual_path_type (expr.get_qualified_path_type ());
+
+  std::vector<HIR::PathExprSegment> path_segments;
+  auto &segments = expr.get_segments ();
+  for (auto &s : segments)
+    {
+      path_segments.push_back (lower_path_expr_seg ((s)));
+
+      // insert the mappings for the segment
+      HIR::PathExprSegment *lowered_seg = &path_segments.back ();
+      mappings->insert_hir_path_expr_seg (
+	lowered_seg->get_mappings ().get_crate_num (),
+	lowered_seg->get_mappings ().get_hirid (), lowered_seg);
+    }
+
+  auto crate_num = mappings->get_current_crate ();
+  Analysis::NodeMapping mapping (crate_num, expr.get_node_id (),
+				 mappings->get_next_hir_id (crate_num),
+				 UNKNOWN_LOCAL_DEFID);
+
+  translated = new HIR::QualifiedPathInExpression (mapping, qual_path_type,
+						   std::move (path_segments),
+						   expr.get_locus (),
+						   expr.get_outer_attrs ());
 }
 
 // rust-ast-lower-base.h
@@ -354,17 +406,26 @@ ASTLoweringBase::lower_generic_args (AST::GenericArgs &args)
 HIR::SelfParam
 ASTLoweringBase::lower_self (AST::SelfParam &self)
 {
-  HIR::Type *type = self.has_type ()
-		      ? ASTLoweringType::translate (self.get_type ().get ())
-		      : nullptr;
-
   auto crate_num = mappings->get_current_crate ();
   Analysis::NodeMapping mapping (crate_num, self.get_node_id (),
 				 mappings->get_next_hir_id (crate_num),
 				 mappings->get_next_localdef_id (crate_num));
 
-  return HIR::SelfParam (mapping, std::unique_ptr<HIR::Type> (type),
-			 self.get_is_mut (), self.get_locus ());
+  if (self.has_type ())
+    {
+      HIR::Type *type = ASTLoweringType::translate (self.get_type ().get ());
+      return HIR::SelfParam (mapping, std::unique_ptr<HIR::Type> (type),
+			     self.get_is_mut (), self.get_locus ());
+    }
+  else if (!self.get_has_ref ())
+    {
+      return HIR::SelfParam (mapping, std::unique_ptr<HIR::Type> (nullptr),
+			     self.get_is_mut (), self.get_locus ());
+    }
+
+  AST::Lifetime l = self.get_lifetime ();
+  return HIR::SelfParam (mapping, lower_lifetime (l), self.get_is_mut (),
+			 self.get_locus ());
 }
 
 void
@@ -401,6 +462,105 @@ ASTLowerTypePath::visit (AST::TypePathSegmentGeneric &segment)
     segment.get_locus ());
 }
 
+void
+ASTLowerQualifiedPathInType::visit (AST::QualifiedPathInType &path)
+{
+  auto crate_num = mappings->get_current_crate ();
+  auto hirid = mappings->get_next_hir_id (crate_num);
+  Analysis::NodeMapping qual_mappings (
+    crate_num, path.get_qualified_path_type ().get_node_id (), hirid,
+    UNKNOWN_LOCAL_DEFID);
+
+  HIR::Type *qual_type = ASTLoweringType::translate (
+    path.get_qualified_path_type ().get_type ().get ());
+  HIR::TypePath *qual_trait = ASTLowerTypePath::translate (
+    path.get_qualified_path_type ().get_as_type_path ());
+
+  HIR::QualifiedPathType qual_path_type (
+    qual_mappings, std::unique_ptr<HIR::Type> (qual_type),
+    std::unique_ptr<HIR::TypePath> (qual_trait),
+    path.get_qualified_path_type ().get_locus ());
+
+  translated_segment = nullptr;
+  path.get_associated_segment ()->accept_vis (*this);
+  if (translated_segment == nullptr)
+    {
+      rust_fatal_error (path.get_associated_segment ()->get_locus (),
+			"failed to translate AST TypePathSegment");
+      return;
+    }
+  std::unique_ptr<HIR::TypePathSegment> associated_segment (translated_segment);
+
+  std::vector<std::unique_ptr<HIR::TypePathSegment> > translated_segments;
+  for (auto &seg : path.get_segments ())
+    {
+      translated_segment = nullptr;
+      seg->accept_vis (*this);
+      if (translated_segment == nullptr)
+	{
+	  rust_fatal_error (seg->get_locus (),
+			    "failed to translte AST TypePathSegment");
+	}
+      translated_segments.push_back (
+	std::unique_ptr<HIR::TypePathSegment> (translated_segment));
+    }
+
+  Analysis::NodeMapping mapping (crate_num, path.get_node_id (), hirid,
+				 mappings->get_next_localdef_id (crate_num));
+
+  translated = new HIR::QualifiedPathInType (std::move (mapping),
+					     std::move (qual_path_type),
+					     std::move (associated_segment),
+					     std::move (translated_segments),
+					     path.get_locus ());
+  mappings->insert_hir_type (crate_num, hirid, translated);
+}
+
+void
+ASTLoweringType::visit (AST::TraitObjectTypeOneBound &type)
+{
+  std::vector<std::unique_ptr<HIR::TypeParamBound> > bounds;
+  HIR::TypeParamBound *translated_bound
+    = ASTLoweringTypeBounds::translate (&type.get_trait_bound ());
+  bounds.push_back (std::unique_ptr<HIR::TypeParamBound> (translated_bound));
+
+  auto crate_num = mappings->get_current_crate ();
+  Analysis::NodeMapping mapping (crate_num, type.get_node_id (),
+				 mappings->get_next_hir_id (crate_num),
+				 mappings->get_next_localdef_id (crate_num));
+
+  translated = new HIR::TraitObjectType (mapping, std::move (bounds),
+					 type.get_locus (), type.is_dyn ());
+
+  mappings->insert_hir_type (mapping.get_crate_num (), mapping.get_hirid (),
+			     translated);
+}
+
+void
+ASTLoweringType::visit (AST::TraitObjectType &type)
+{
+  std::vector<std::unique_ptr<HIR::TypeParamBound> > bounds;
+
+  for (auto &bound : type.get_type_param_bounds ())
+    {
+      HIR::TypeParamBound *translated_bound
+	= ASTLoweringTypeBounds::translate (bound.get ());
+      bounds.push_back (
+	std::unique_ptr<HIR::TypeParamBound> (translated_bound));
+    }
+
+  auto crate_num = mappings->get_current_crate ();
+  Analysis::NodeMapping mapping (crate_num, type.get_node_id (),
+				 mappings->get_next_hir_id (crate_num),
+				 mappings->get_next_localdef_id (crate_num));
+
+  translated = new HIR::TraitObjectType (mapping, std::move (bounds),
+					 type.get_locus (), type.is_dyn ());
+
+  mappings->insert_hir_type (mapping.get_crate_num (), mapping.get_hirid (),
+			     translated);
+}
+
 // rust-ast-lower-base
 
 HIR::Type *
@@ -413,6 +573,110 @@ HIR::TypeParamBound *
 ASTLoweringBase::lower_bound (AST::TypeParamBound *bound)
 {
   return ASTLoweringTypeBounds::translate (bound);
+}
+
+/* Checks whether the name of a field already exists.  Returns true
+   and produces an error if so.  */
+bool
+struct_field_name_exists (std::vector<HIR::StructField> &fields,
+			  HIR::StructField &new_field)
+{
+  for (auto &field : fields)
+    {
+      if (field.get_field_name ().compare (new_field.get_field_name ()) == 0)
+	{
+	  RichLocation r (new_field.get_locus ());
+	  r.add_range (field.get_locus ());
+	  rust_error_at (r, "duplicate field name %qs",
+			 field.get_field_name ().c_str ());
+	  return true;
+	}
+    }
+  return false;
+}
+
+HIR::FunctionQualifiers
+ASTLoweringBase::lower_qualifiers (const AST::FunctionQualifiers &qualifiers)
+{
+  Unsafety unsafety
+    = qualifiers.is_unsafe () ? Unsafety::Unsafe : Unsafety::Normal;
+  bool has_extern = qualifiers.is_extern ();
+
+  ABI abi = ABI::RUST;
+  if (qualifiers.has_abi ())
+    {
+      const std::string &extern_abi = qualifiers.get_extern_abi ();
+      abi = get_abi_from_string (extern_abi);
+      if (has_extern && abi == ABI::UNKNOWN)
+	rust_error_at (qualifiers.get_locus (), "unknown ABI option");
+    }
+
+  return HIR::FunctionQualifiers (qualifiers.get_const_status (), unsafety,
+				  has_extern, abi);
+}
+
+void
+ASTLoweringBase::handle_outer_attributes (const HIR::Item &item)
+{
+  for (const auto &attr : item.get_outer_attrs ())
+    {
+      const auto &str_path = attr.get_path ().as_string ();
+      if (!is_known_attribute (str_path))
+	{
+	  rust_error_at (attr.get_locus (), "unknown attribute");
+	  continue;
+	}
+
+      bool is_lang_item = str_path.compare ("lang") == 0
+			  && attr.has_attr_input ()
+			  && attr.get_attr_input ().get_attr_input_type ()
+			       == AST::AttrInput::AttrInputType::LITERAL;
+
+      if (is_lang_item)
+	handle_lang_item_attribute (item, attr);
+      else if (!attribute_handled_in_another_pass (str_path))
+	{
+	  rust_error_at (attr.get_locus (), "unhandled attribute: [%s]",
+			 attr.get_path ().as_string ().c_str ());
+	}
+    }
+}
+
+void
+ASTLoweringBase::handle_lang_item_attribute (const HIR::Item &item,
+					     const AST::Attribute &attr)
+{
+  auto &literal = static_cast<AST::AttrInputLiteral &> (attr.get_attr_input ());
+  const auto &lang_item_type_str = literal.get_literal ().as_string ();
+  auto lang_item_type = Analysis::RustLangItem::Parse (lang_item_type_str);
+  if (lang_item_type == Analysis::RustLangItem::ItemType::UNKNOWN)
+    {
+      rust_error_at (attr.get_locus (), "unknown lang item");
+      return;
+    }
+  mappings->insert_lang_item (lang_item_type,
+			      item.get_mappings ().get_defid ());
+}
+
+bool
+ASTLoweringBase::is_known_attribute (const std::string &attribute_path) const
+{
+  const auto &lookup = attr_mappings->lookup_builtin (attribute_path);
+  return !lookup.is_error ();
+}
+
+bool
+ASTLoweringBase::attribute_handled_in_another_pass (
+  const std::string &attribute_path) const
+{
+  const auto &lookup = attr_mappings->lookup_builtin (attribute_path);
+  if (lookup.is_error ())
+    return false;
+
+  if (lookup.handler == Analysis::CompilerPass::UNKNOWN)
+    return false;
+
+  return lookup.handler != Analysis::CompilerPass::HIR_LOWERING;
 }
 
 } // namespace HIR

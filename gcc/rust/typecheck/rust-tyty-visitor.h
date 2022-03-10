@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -33,6 +33,7 @@ public:
   virtual void visit (FnType &type) = 0;
   virtual void visit (FnPtr &type) = 0;
   virtual void visit (ArrayType &type) = 0;
+  virtual void visit (SliceType &type) = 0;
   virtual void visit (BoolType &type) = 0;
   virtual void visit (IntType &type) = 0;
   virtual void visit (UintType &type) = 0;
@@ -47,6 +48,9 @@ public:
   virtual void visit (StrType &type) = 0;
   virtual void visit (NeverType &type) = 0;
   virtual void visit (PlaceholderType &type) = 0;
+  virtual void visit (ProjectionType &type) = 0;
+  virtual void visit (DynamicObjectType &type) = 0;
+  virtual void visit (ClosureType &type) = 0;
 };
 
 class TyConstVisitor
@@ -58,6 +62,7 @@ public:
   virtual void visit (const FnType &type) = 0;
   virtual void visit (const FnPtr &type) = 0;
   virtual void visit (const ArrayType &type) = 0;
+  virtual void visit (const SliceType &type) = 0;
   virtual void visit (const BoolType &type) = 0;
   virtual void visit (const IntType &type) = 0;
   virtual void visit (const UintType &type) = 0;
@@ -72,6 +77,9 @@ public:
   virtual void visit (const StrType &type) = 0;
   virtual void visit (const NeverType &type) = 0;
   virtual void visit (const PlaceholderType &type) = 0;
+  virtual void visit (const ProjectionType &type) = 0;
+  virtual void visit (const DynamicObjectType &type) = 0;
+  virtual void visit (const ClosureType &type) = 0;
 };
 
 } // namespace TyTy

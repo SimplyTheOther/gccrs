@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -22,11 +22,12 @@
 #include "rust-ast-resolve-toplevel.h"
 #include "rust-ast-resolve-item.h"
 #include "rust-ast-resolve-expr.h"
+#include "rust-ast-resolve-struct-expr-field.h"
 
 #define MKBUILTIN_TYPE(_X, _R, _TY)                                            \
   do                                                                           \
     {                                                                          \
-      AST::PathIdentSegment seg (_X);                                          \
+      AST::PathIdentSegment seg (_X, Linemap::predeclared_location ());        \
       auto typePath = ::std::unique_ptr<AST::TypePathSegment> (                \
 	new AST::TypePathSegment (::std::move (seg), false,                    \
 				  Linemap::predeclared_location ()));          \
@@ -54,6 +55,7 @@ Resolver::Resolver ()
     name_scope (Scope (mappings->get_current_crate ())),
     type_scope (Scope (mappings->get_current_crate ())),
     label_scope (Scope (mappings->get_current_crate ())),
+    macro_scope (Scope (mappings->get_current_crate ())),
     global_type_node_id (UNKNOWN_NODEID), unit_ty_node_id (UNKNOWN_NODEID)
 {
   generate_builtins ();
@@ -93,6 +95,13 @@ Resolver::push_new_label_rib (Rib *r)
   label_ribs[r->get_node_id ()] = r;
 }
 
+void
+Resolver::push_new_macro_rib (Rib *r)
+{
+  rust_assert (label_ribs.find (r->get_node_id ()) == label_ribs.end ());
+  macro_ribs[r->get_node_id ()] = r;
+}
+
 bool
 Resolver::find_name_rib (NodeId id, Rib **rib)
 {
@@ -109,6 +118,17 @@ Resolver::find_type_rib (NodeId id, Rib **rib)
 {
   auto it = type_ribs.find (id);
   if (it == type_ribs.end ())
+    return false;
+
+  *rib = it->second;
+  return true;
+}
+
+bool
+Resolver::find_macro_rib (NodeId id, Rib **rib)
+{
+  auto it = macro_ribs.find (id);
+  if (it == macro_ribs.end ())
     return false;
 
   *rib = it->second;
@@ -187,9 +207,8 @@ Resolver::generate_builtins ()
   MKBUILTIN_TYPE ("str", builtins, str);
 
   // unit type ()
-
   TyTy::TupleType *unit_tyty
-    = new TyTy::TupleType (mappings->get_next_hir_id ());
+    = TyTy::TupleType::get_unit_type (mappings->get_next_hir_id ());
   std::vector<std::unique_ptr<AST::Type> > elems;
   AST::TupleType *unit_type
     = new AST::TupleType (std::move (elems), Linemap::predeclared_location ());
@@ -203,8 +222,11 @@ void
 Resolver::insert_new_definition (NodeId id, Definition def)
 {
   auto it = name_definitions.find (id);
-  rust_assert (it == name_definitions.end ());
-
+  if (it != name_definitions.end ())
+    {
+      rust_assert (it->second.is_equal (def));
+      return;
+    }
   name_definitions[id] = def;
 }
 
@@ -222,9 +244,6 @@ Resolver::lookup_definition (NodeId id, Definition *def)
 void
 Resolver::insert_resolved_name (NodeId refId, NodeId defId)
 {
-  auto it = resolved_names.find (refId);
-  rust_assert (it == resolved_names.end ());
-
   resolved_names[refId] = defId;
   get_name_scope ().append_reference_for_def (refId, defId);
 }
@@ -243,8 +262,8 @@ Resolver::lookup_resolved_name (NodeId refId, NodeId *defId)
 void
 Resolver::insert_resolved_type (NodeId refId, NodeId defId)
 {
-  auto it = resolved_types.find (refId);
-  rust_assert (it == resolved_types.end ());
+  // auto it = resolved_types.find (refId);
+  // rust_assert (it == resolved_types.end ());
 
   resolved_types[refId] = defId;
   get_type_scope ().append_reference_for_def (refId, defId);
@@ -282,6 +301,27 @@ Resolver::lookup_resolved_label (NodeId refId, NodeId *defId)
   return true;
 }
 
+void
+Resolver::insert_resolved_macro (NodeId refId, NodeId defId)
+{
+  auto it = resolved_macros.find (refId);
+  rust_assert (it == resolved_macros.end ());
+
+  resolved_labels[refId] = defId;
+  get_label_scope ().append_reference_for_def (refId, defId);
+}
+
+bool
+Resolver::lookup_resolved_macro (NodeId refId, NodeId *defId)
+{
+  auto it = resolved_macros.find (refId);
+  if (it == resolved_macros.end ())
+    return false;
+
+  *defId = it->second;
+  return true;
+}
+
 // NameResolution
 
 NameResolution *
@@ -313,34 +353,14 @@ NameResolution::Resolve (AST::Crate &crate)
 void
 NameResolution::go (AST::Crate &crate)
 {
-  // setup parent scoping for names
-  resolver->get_name_scope ().push (crate.get_node_id ());
-  resolver->push_new_name_rib (resolver->get_name_scope ().peek ());
-  // setup parent scoping for new types
-  resolver->get_type_scope ().push (mappings->get_next_node_id ());
-  resolver->push_new_type_rib (resolver->get_type_scope ().peek ());
-  // setup label scope
-  resolver->get_label_scope ().push (mappings->get_next_node_id ());
-  resolver->push_new_label_rib (resolver->get_type_scope ().peek ());
+  // lookup current crate name
+  CrateNum cnum = mappings->get_current_crate ();
+  std::string crate_name;
+  bool ok = mappings->get_crate_name (cnum, crate_name);
+  rust_assert (ok);
 
-  // first gather the top-level namespace names then we drill down
-  for (auto it = crate.items.begin (); it != crate.items.end (); it++)
-    ResolveTopLevel::go (it->get ());
-
-  if (saw_errors ())
-    return;
-
-  // next we can drill down into the items and their scopes
-  for (auto it = crate.items.begin (); it != crate.items.end (); it++)
-    ResolveItem::go (it->get ());
-}
-
-// rust-ast-resolve-expr.h
-
-void
-ResolveExpr::visit (AST::BlockExpr &expr)
-{
-  NodeId scope_node_id = expr.get_node_id ();
+  // setup the ribs
+  NodeId scope_node_id = crate.get_node_id ();
   resolver->get_name_scope ().push (scope_node_id);
   resolver->get_type_scope ().push (scope_node_id);
   resolver->get_label_scope ().push (scope_node_id);
@@ -348,17 +368,25 @@ ResolveExpr::visit (AST::BlockExpr &expr)
   resolver->push_new_type_rib (resolver->get_type_scope ().peek ());
   resolver->push_new_label_rib (resolver->get_type_scope ().peek ());
 
-  expr.iterate_stmts ([&] (AST::Stmt *s) mutable -> bool {
-    ResolveStmt::go (s, s->get_node_id ());
-    return true;
-  });
+  // get the root segment
+  CanonicalPath crate_prefix
+    = CanonicalPath::new_seg (scope_node_id, crate_name);
+  crate_prefix.set_crate_num (cnum);
 
-  if (expr.has_tail_expr ())
-    ResolveExpr::go (expr.get_tail_expr ().get (), expr.get_node_id ());
+  // first gather the top-level namespace names then we drill down so this
+  // allows for resolving forward declarations since an impl block might have
+  // a Self type Foo which is defined after the impl block for example.
+  for (auto it = crate.items.begin (); it != crate.items.end (); it++)
+    ResolveTopLevel::go (it->get (), CanonicalPath::create_empty (),
+			 crate_prefix);
 
-  resolver->get_name_scope ().pop ();
-  resolver->get_type_scope ().pop ();
-  resolver->get_label_scope ().pop ();
+  // FIXME remove this
+  if (saw_errors ())
+    return;
+
+  // next we can drill down into the items and their scopes
+  for (auto it = crate.items.begin (); it != crate.items.end (); it++)
+    ResolveItem::go (it->get (), CanonicalPath::create_empty (), crate_prefix);
 }
 
 // rust-ast-resolve-struct-expr-field.h
@@ -366,13 +394,15 @@ ResolveExpr::visit (AST::BlockExpr &expr)
 void
 ResolveStructExprField::visit (AST::StructExprFieldIdentifierValue &field)
 {
-  ResolveExpr::go (field.get_value ().get (), field.get_node_id ());
+  ResolveExpr::go (field.get_value ().get (), field.get_node_id (), prefix,
+		   canonical_prefix);
 }
 
 void
 ResolveStructExprField::visit (AST::StructExprFieldIndexValue &field)
 {
-  ResolveExpr::go (field.get_value ().get (), field.get_node_id ());
+  ResolveExpr::go (field.get_value ().get (), field.get_node_id (), prefix,
+		   canonical_prefix);
 }
 
 void
@@ -381,97 +411,7 @@ ResolveStructExprField::visit (AST::StructExprFieldIdentifier &field)
   AST::IdentifierExpr expr (field.get_field_name (), {}, field.get_locus ());
   expr.set_node_id (field.get_node_id ());
 
-  ResolveExpr::go (&expr, field.get_node_id ());
-}
-
-// rust-ast-resolve-type.h
-
-std::string
-ResolveTypeToCanonicalPath::canonicalize_generic_args (AST::GenericArgs &args)
-{
-  std::string buf;
-
-  size_t i = 0;
-  size_t total = args.get_type_args ().size ();
-
-  for (auto &ty_arg : args.get_type_args ())
-    {
-      buf += ty_arg->as_string ();
-      if ((i + 1) < total)
-	buf += ",";
-
-      i++;
-    }
-
-  return "<" + buf + ">";
-}
-
-bool
-ResolveTypeToCanonicalPath::type_resolve_generic_args (AST::GenericArgs &args)
-{
-  for (auto &gt : args.get_type_args ())
-    {
-      ResolveType::go (gt.get (), UNKNOWN_NODEID);
-      // FIXME error handling here for inference variable since they do not have
-      // a node to resolve to
-      // if (resolved == UNKNOWN_NODEID) return false;
-    }
-  return true;
-}
-
-void
-ResolveTypeToCanonicalPath::visit (AST::TypePathSegmentGeneric &seg)
-{
-  if (seg.is_error ())
-    {
-      failure_flag = true;
-      rust_error_at (seg.get_locus (), "segment has error: %s",
-		     seg.as_string ().c_str ());
-      return;
-    }
-
-  if (!seg.has_generic_args ())
-    {
-      result = CanonicalPath::new_seg (seg.get_node_id (),
-				       seg.get_ident_segment ().as_string ());
-      return;
-    }
-
-  if (type_resolve_generic_args_flag)
-    {
-      bool ok = type_resolve_generic_args (seg.get_generic_args ());
-      failure_flag = !ok;
-    }
-
-  if (include_generic_args_flag)
-    {
-      std::string generics
-	= canonicalize_generic_args (seg.get_generic_args ());
-      result = CanonicalPath::new_seg (seg.get_node_id (),
-				       seg.get_ident_segment ().as_string ()
-					 + "::" + generics);
-      return;
-    }
-
-  result = CanonicalPath::new_seg (seg.get_node_id (),
-				   seg.get_ident_segment ().as_string ());
-}
-
-void
-ResolveTypeToCanonicalPath::visit (AST::TypePathSegment &seg)
-{
-  if (seg.is_error ())
-    {
-      failure_flag = true;
-      rust_error_at (seg.get_locus (), "segment has error: %s",
-		     seg.as_string ().c_str ());
-      return;
-    }
-
-  CanonicalPath ident_seg
-    = CanonicalPath::new_seg (seg.get_node_id (),
-			      seg.get_ident_segment ().as_string ());
-  result = result.append (ident_seg);
+  ResolveExpr::go (&expr, field.get_node_id (), prefix, canonical_prefix);
 }
 
 // rust-ast-resolve-expr.h
@@ -480,12 +420,13 @@ void
 ResolvePath::resolve_path (AST::PathInExpression *expr)
 {
   // resolve root segment first then apply segments in turn
-  AST::PathExprSegment &root_segment = expr->get_segments ().at (0);
+  std::vector<AST::PathExprSegment> &segs = expr->get_segments ();
+  AST::PathExprSegment &root_segment = segs.at (0);
   AST::PathIdentSegment &root_ident_seg = root_segment.get_ident_segment ();
 
   bool segment_is_type = false;
   CanonicalPath root_seg_path
-    = CanonicalPath::new_seg (expr->get_node_id (),
+    = CanonicalPath::new_seg (root_segment.get_node_id (),
 			      root_ident_seg.as_string ());
 
   // name scope first
@@ -512,7 +453,7 @@ ResolvePath::resolve_path (AST::PathInExpression *expr)
     {
       rust_error_at (expr->get_locus (),
 		     "Cannot find path %<%s%> in this scope",
-		     expr->as_string ().c_str ());
+		     root_segment.as_string ().c_str ());
       return;
     }
 
@@ -528,7 +469,8 @@ ResolvePath::resolve_path (AST::PathInExpression *expr)
 	}
     }
 
-  if (expr->is_single_segment ())
+  bool is_single_segment = segs.size () == 1;
+  if (is_single_segment)
     {
       if (segment_is_type)
 	resolver->insert_resolved_type (expr->get_node_id (), resolved_node);
@@ -541,28 +483,115 @@ ResolvePath::resolve_path (AST::PathInExpression *expr)
       return;
     }
 
-  // we can attempt to resolve this path fully
-  CanonicalPath path = root_seg_path;
-  for (size_t i = 1; i < expr->get_segments ().size (); i++)
+  resolve_segments (root_seg_path, 1, expr->get_segments (),
+		    expr->get_node_id (), expr->get_locus ());
+}
+
+void
+ResolvePath::resolve_path (AST::QualifiedPathInExpression *expr)
+{
+  AST::QualifiedPathType &root_segment = expr->get_qualified_path_type ();
+
+  bool canonicalize_type_with_generics = false;
+  ResolveType::go (&root_segment.get_as_type_path (),
+		   root_segment.get_node_id (),
+		   canonicalize_type_with_generics);
+
+  ResolveType::go (root_segment.get_type ().get (), root_segment.get_node_id (),
+		   canonicalize_type_with_generics);
+
+  bool type_resolve_generic_args = true;
+  CanonicalPath impl_type_seg
+    = ResolveTypeToCanonicalPath::resolve (*root_segment.get_type ().get (),
+					   canonicalize_type_with_generics,
+					   type_resolve_generic_args);
+
+  CanonicalPath trait_type_seg
+    = ResolveTypeToCanonicalPath::resolve (root_segment.get_as_type_path (),
+					   canonicalize_type_with_generics,
+					   type_resolve_generic_args);
+  CanonicalPath root_seg_path
+    = TraitImplProjection::resolve (root_segment.get_node_id (), trait_type_seg,
+				    impl_type_seg);
+  bool segment_is_type = false;
+
+  // name scope first
+  if (resolver->get_name_scope ().lookup (root_seg_path, &resolved_node))
     {
-      AST::PathExprSegment &seg = expr->get_segments ().at (i);
+      segment_is_type = false;
+      resolver->insert_resolved_name (root_segment.get_node_id (),
+				      resolved_node);
+      resolver->insert_new_definition (root_segment.get_node_id (),
+				       Definition{expr->get_node_id (),
+						  parent});
+    }
+  // check the type scope
+  else if (resolver->get_type_scope ().lookup (root_seg_path, &resolved_node))
+    {
+      segment_is_type = true;
+      resolver->insert_resolved_type (root_segment.get_node_id (),
+				      resolved_node);
+      resolver->insert_new_definition (root_segment.get_node_id (),
+				       Definition{expr->get_node_id (),
+						  parent});
+    }
+  else
+    {
+      rust_error_at (expr->get_locus (),
+		     "Cannot find path %<%s%> in this scope",
+		     root_segment.as_string ().c_str ());
+      return;
+    }
+
+  bool is_single_segment = expr->get_segments ().empty ();
+  if (is_single_segment)
+    {
+      if (segment_is_type)
+	resolver->insert_resolved_type (expr->get_node_id (), resolved_node);
+      else
+	resolver->insert_resolved_name (expr->get_node_id (), resolved_node);
+
+      resolver->insert_new_definition (expr->get_node_id (),
+				       Definition{expr->get_node_id (),
+						  parent});
+      return;
+    }
+
+  resolve_segments (root_seg_path, 0, expr->get_segments (),
+		    expr->get_node_id (), expr->get_locus ());
+}
+
+void
+ResolvePath::resolve_segments (CanonicalPath prefix, size_t offs,
+			       std::vector<AST::PathExprSegment> &segs,
+			       NodeId expr_node_id, Location expr_locus)
+{
+  // we can attempt to resolve this path fully
+  CanonicalPath path = prefix;
+  bool segment_is_type = false;
+  for (size_t i = offs; i < segs.size (); i++)
+    {
+      AST::PathExprSegment &seg = segs.at (i);
       auto s = ResolvePathSegmentToCanonicalPath::resolve (seg);
       path = path.append (s);
+
+      // reset state
+      segment_is_type = false;
+      resolved_node = UNKNOWN_NODEID;
 
       if (resolver->get_name_scope ().lookup (path, &resolved_node))
 	{
 	  resolver->insert_resolved_name (seg.get_node_id (), resolved_node);
 	  resolver->insert_new_definition (seg.get_node_id (),
-					   Definition{expr->get_node_id (),
-						      parent});
+					   Definition{expr_node_id, parent});
 	}
       // check the type scope
       else if (resolver->get_type_scope ().lookup (path, &resolved_node))
 	{
+	  segment_is_type = true;
 	  resolver->insert_resolved_type (seg.get_node_id (), resolved_node);
 	  resolver->insert_new_definition (seg.get_node_id (),
-					   Definition{expr->get_node_id (),
-						      parent});
+					   Definition{expr_node_id, parent});
 	}
       else
 	{
@@ -608,37 +637,85 @@ ResolvePath::resolve_path (AST::PathInExpression *expr)
 	  return;
 	}
     }
-}
 
-// rust-ast-resolve-type.h
+  // its fully resolved lets mark it as such
+  if (resolved_node != UNKNOWN_NODEID)
+    {
+      if (segment_is_type)
+	resolver->insert_resolved_type (expr_node_id, resolved_node);
+      else
+	resolver->insert_resolved_name (expr_node_id, resolved_node);
 
-void
-ResolveType::visit (AST::ArrayType &type)
-{
-  type.get_elem_type ()->accept_vis (*this);
-  ResolveExpr::go (type.get_size_expr ().get (), type.get_node_id ());
+      resolver->insert_new_definition (expr_node_id,
+				       Definition{expr_node_id, parent});
+    }
 }
 
 // rust-ast-resolve-item.h
 
 void
 ResolveItem::resolve_impl_item (AST::TraitImplItem *item,
-				const CanonicalPath &self)
+				const CanonicalPath &prefix,
+				const CanonicalPath &canonical_prefix)
 {
-  ResolveImplItems::go (item, self);
+  ResolveImplItems::go (item, prefix, canonical_prefix);
 }
 
 void
 ResolveItem::resolve_impl_item (AST::InherentImplItem *item,
-				const CanonicalPath &self)
+				const CanonicalPath &prefix,
+				const CanonicalPath &canonical_prefix)
 {
-  ResolveImplItems::go (item, self);
+  ResolveImplItems::go (item, prefix, canonical_prefix);
 }
 
 void
 ResolveItem::resolve_extern_item (AST::ExternalItem *item)
 {
   ResolveExternItem::go (item);
+}
+
+// qualified path in type
+
+bool
+ResolveRelativeTypePath::resolve_qual_seg (AST::QualifiedPathType &seg,
+					   CanonicalPath &result)
+{
+  if (seg.is_error ())
+    {
+      rust_error_at (seg.get_locus (), "segment has error: %s",
+		     seg.as_string ().c_str ());
+      return false;
+    }
+  bool include_generic_args_in_path = false;
+
+  NodeId type_resolved_node
+    = ResolveType::go (seg.get_type ().get (), seg.get_node_id ());
+  if (type_resolved_node == UNKNOWN_NODEID)
+    return false;
+
+  CanonicalPath impl_type_seg
+    = ResolveTypeToCanonicalPath::resolve (*seg.get_type ().get (),
+					   include_generic_args_in_path);
+  if (!seg.has_as_clause ())
+    {
+      result = result.append (impl_type_seg);
+      return true;
+    }
+
+  NodeId trait_resolved_node
+    = ResolveType::go (&seg.get_as_type_path (), seg.get_node_id ());
+  if (trait_resolved_node == UNKNOWN_NODEID)
+    return false;
+
+  CanonicalPath trait_type_seg
+    = ResolveTypeToCanonicalPath::resolve (seg.get_as_type_path (),
+					   include_generic_args_in_path);
+  CanonicalPath projection
+    = TraitImplProjection::resolve (seg.get_node_id (), trait_type_seg,
+				    impl_type_seg);
+  result = result.append (projection);
+  return true;
 }
 
 } // namespace Resolver

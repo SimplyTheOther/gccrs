@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -20,12 +20,13 @@
 #define RUST_AST_MACRO_H
 
 #include "rust-ast.h"
+#include "rust-location.h"
 
 namespace Rust {
 namespace AST {
+
 // Decls as definitions moved to rust-ast.h
 class MacroItem;
-class MacroInvocationSemi;
 
 enum MacroFragSpec
 {
@@ -87,26 +88,34 @@ class MacroMatchFragment : public MacroMatch
 {
   Identifier ident;
   MacroFragSpec frag_spec;
-
-  // TODO: should store location information?
+  Location locus;
 
 public:
-  MacroMatchFragment (Identifier ident, MacroFragSpec frag_spec)
-    : ident (std::move (ident)), frag_spec (frag_spec)
+  MacroMatchFragment (Identifier ident, MacroFragSpec frag_spec, Location locus)
+    : ident (std::move (ident)), frag_spec (frag_spec), locus (locus)
   {}
 
   // Returns whether macro match fragment is in an error state.
   bool is_error () const { return frag_spec == INVALID; }
 
   // Creates an error state macro match fragment.
-  static MacroMatchFragment create_error ()
+  static MacroMatchFragment create_error (Location locus)
   {
-    return MacroMatchFragment (std::string (""), INVALID);
+    return MacroMatchFragment (std::string (""), INVALID, locus);
   }
 
   std::string as_string () const override;
+  Location get_match_locus () const override { return locus; };
 
   void accept_vis (ASTVisitor &vis) override;
+
+  MacroMatchType get_macro_match_type () const override
+  {
+    return MacroMatchType::Fragment;
+  }
+
+  Identifier get_ident () const { return ident; }
+  MacroFragSpec get_frag_spec () const { return frag_spec; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -124,9 +133,9 @@ public:
   enum MacroRepOp
   {
     NONE,
-    ASTERISK,
-    PLUS,
-    QUESTION_MARK
+    ANY,
+    ONE_OR_MORE,
+    ZERO_OR_ONE,
   };
 
 private:
@@ -137,20 +146,22 @@ private:
   typedef Token MacroRepSep;
   // any token except delimiters and repetition operators
   std::unique_ptr<MacroRepSep> sep;
-
-  // TODO: should store location information?
+  Location locus;
 
 public:
   // Returns whether macro match repetition has separator token.
   bool has_sep () const { return sep != nullptr; }
 
   MacroMatchRepetition (std::vector<std::unique_ptr<MacroMatch> > matches,
-			MacroRepOp op, std::unique_ptr<MacroRepSep> sep)
-    : matches (std::move (matches)), op (op), sep (std::move (sep))
+			MacroRepOp op, std::unique_ptr<MacroRepSep> sep,
+			Location locus)
+    : matches (std::move (matches)), op (op), sep (std::move (sep)),
+      locus (locus)
   {}
 
   // Copy constructor with clone
-  MacroMatchRepetition (MacroMatchRepetition const &other) : op (other.op)
+  MacroMatchRepetition (MacroMatchRepetition const &other)
+    : op (other.op), locus (other.locus)
   {
     // guard to protect from null pointer dereference
     if (other.sep != nullptr)
@@ -165,6 +176,7 @@ public:
   MacroMatchRepetition &operator= (MacroMatchRepetition const &other)
   {
     op = other.op;
+    locus = other.locus;
 
     // guard to protect from null pointer dereference
     if (other.sep != nullptr)
@@ -184,8 +196,18 @@ public:
   MacroMatchRepetition &operator= (MacroMatchRepetition &&other) = default;
 
   std::string as_string () const override;
+  Location get_match_locus () const override { return locus; };
 
   void accept_vis (ASTVisitor &vis) override;
+
+  MacroMatchType get_macro_match_type () const override
+  {
+    return MacroMatchType::Repetition;
+  }
+
+  MacroRepOp get_op () const { return op; }
+  const std::unique_ptr<MacroRepSep> &get_sep () const { return sep; }
+  std::vector<std::unique_ptr<MacroMatch> > &get_matches () { return matches; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -201,20 +223,22 @@ class MacroMatcher : public MacroMatch
 {
   DelimType delim_type;
   std::vector<std::unique_ptr<MacroMatch> > matches;
+  Location locus;
 
   // TODO: think of way to mark invalid that doesn't take up more space
   bool is_invalid;
 
-  // TODO: should store location information?
-
 public:
   MacroMatcher (DelimType delim_type,
-		std::vector<std::unique_ptr<MacroMatch> > matches)
-    : delim_type (delim_type), matches (std::move (matches)), is_invalid (false)
+		std::vector<std::unique_ptr<MacroMatch> > matches,
+		Location locus)
+    : delim_type (delim_type), matches (std::move (matches)), locus (locus),
+      is_invalid (false)
   {}
 
   // copy constructor with vector clone
-  MacroMatcher (MacroMatcher const &other) : delim_type (other.delim_type)
+  MacroMatcher (MacroMatcher const &other)
+    : delim_type (other.delim_type), locus (other.locus)
   {
     matches.reserve (other.matches.size ());
     for (const auto &e : other.matches)
@@ -225,6 +249,7 @@ public:
   MacroMatcher &operator= (MacroMatcher const &other)
   {
     delim_type = other.delim_type;
+    locus = other.locus;
 
     matches.reserve (other.matches.size ());
     for (const auto &e : other.matches)
@@ -238,14 +263,26 @@ public:
   MacroMatcher &operator= (MacroMatcher &&other) = default;
 
   // Creates an error state macro matcher.
-  static MacroMatcher create_error () { return MacroMatcher (true); }
+  static MacroMatcher create_error (Location locus)
+  {
+    return MacroMatcher (true, locus);
+  }
 
   // Returns whether MacroMatcher is in an error state.
   bool is_error () const { return is_invalid; }
+  Location get_match_locus () const override { return locus; }
 
   std::string as_string () const override;
 
   void accept_vis (ASTVisitor &vis) override;
+
+  MacroMatchType get_macro_match_type () const override
+  {
+    return MacroMatchType::Matcher;
+  }
+
+  DelimType get_delim_type () const { return delim_type; }
+  std::vector<std::unique_ptr<MacroMatch> > &get_matches () { return matches; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -256,7 +293,8 @@ protected:
   }
 
   // constructor only used to create error matcher
-  MacroMatcher (bool is_invalid) : delim_type (PARENS), is_invalid (is_invalid)
+  MacroMatcher (bool is_invalid, Location locus)
+    : delim_type (PARENS), locus (locus), is_invalid (is_invalid)
   {}
 };
 
@@ -265,15 +303,18 @@ struct MacroTranscriber
 {
 private:
   DelimTokenTree token_tree;
-
-  // TODO: should store location information?
+  Location locus;
 
 public:
-  MacroTranscriber (DelimTokenTree token_tree)
-    : token_tree (std::move (token_tree))
+  MacroTranscriber (DelimTokenTree token_tree, Location locus)
+    : token_tree (std::move (token_tree)), locus (locus)
   {}
 
   std::string as_string () const { return token_tree.as_string (); }
+
+  Location get_locus () const { return locus; }
+
+  DelimTokenTree &get_token_tree () { return token_tree; }
 };
 
 // A macro rule? Matcher and transcriber pair?
@@ -282,25 +323,32 @@ struct MacroRule
 private:
   MacroMatcher matcher;
   MacroTranscriber transcriber;
-
-  // TODO: should store location information?
+  Location locus;
 
 public:
-  MacroRule (MacroMatcher matcher, MacroTranscriber transcriber)
-    : matcher (std::move (matcher)), transcriber (std::move (transcriber))
+  MacroRule (MacroMatcher matcher, MacroTranscriber transcriber, Location locus)
+    : matcher (std::move (matcher)), transcriber (std::move (transcriber)),
+      locus (locus)
   {}
 
   // Returns whether macro rule is in error state.
   bool is_error () const { return matcher.is_error (); }
 
   // Creates an error state macro rule.
-  static MacroRule create_error ()
+  static MacroRule create_error (Location locus)
   {
-    return MacroRule (MacroMatcher::create_error (),
-		      MacroTranscriber (DelimTokenTree::create_empty ()));
+    return MacroRule (MacroMatcher::create_error (locus),
+		      MacroTranscriber (DelimTokenTree::create_empty (),
+					Location ()),
+		      locus);
   }
 
+  Location get_locus () const { return locus; }
+
   std::string as_string () const;
+
+  MacroMatcher &get_matcher () { return matcher; }
+  MacroTranscriber &get_transcriber () { return transcriber; }
 };
 
 // A macro rules definition item AST node
@@ -313,8 +361,25 @@ class MacroRulesDefinition : public MacroItem
   DelimType delim_type;
   // MacroRules rules;
   std::vector<MacroRule> rules; // inlined form
-
   Location locus;
+
+  std::function<ASTFragment (Location, MacroInvocData &)>
+    associated_transcriber;
+  // Since we can't compare std::functions, we need to use an extra boolean
+  bool is_builtin_rule;
+
+  /**
+   * Default function to use as an associated transcriber. This function should
+   * never be called, hence the gcc_unreachable().
+   * If this function is used, then the macro is not builtin and the compiler
+   * should make use of the actual rules. If the macro is builtin, then another
+   * associated transcriber should be used
+   */
+  static ASTFragment dummy_builtin (Location, MacroInvocData &)
+  {
+    gcc_unreachable ();
+    return ASTFragment::create_empty ();
+  }
 
   /* NOTE: in rustc, macro definitions are considered (and parsed as) a type
    * of macro, whereas here they are considered part of the language itself.
@@ -329,7 +394,17 @@ public:
 			std::vector<MacroRule> rules,
 			std::vector<Attribute> outer_attrs, Location locus)
     : outer_attrs (std::move (outer_attrs)), rule_name (std::move (rule_name)),
-      delim_type (delim_type), rules (std::move (rules)), locus (locus)
+      delim_type (delim_type), rules (std::move (rules)), locus (locus),
+      associated_transcriber (dummy_builtin), is_builtin_rule (false)
+  {}
+
+  MacroRulesDefinition (Identifier builtin_name, DelimType delim_type,
+			std::function<ASTFragment (Location, MacroInvocData &)>
+			  associated_transcriber)
+    : outer_attrs (std::vector<Attribute> ()), rule_name (builtin_name),
+      delim_type (delim_type), rules (std::vector<MacroRule> ()),
+      locus (Location ()), associated_transcriber (associated_transcriber),
+      is_builtin_rule (true)
   {}
 
   void accept_vis (ASTVisitor &vis) override;
@@ -345,6 +420,27 @@ public:
   std::vector<MacroRule> &get_macro_rules () { return rules; }
   const std::vector<MacroRule> &get_macro_rules () const { return rules; }
 
+  Location get_locus () const override final { return locus; }
+
+  Identifier get_rule_name () const { return rule_name; }
+
+  std::vector<MacroRule> &get_rules () { return rules; }
+  const std::vector<MacroRule> &get_rules () const { return rules; }
+
+  bool is_builtin () const { return is_builtin_rule; }
+  const std::function<ASTFragment (Location, MacroInvocData &)> &
+  get_builtin_transcriber () const
+  {
+    rust_assert (is_builtin ());
+    return associated_transcriber;
+  }
+  void set_builtin_transcriber (
+    std::function<ASTFragment (Location, MacroInvocData &)> transcriber)
+  {
+    associated_transcriber = transcriber;
+    is_builtin_rule = true;
+  }
+
 protected:
   /* Use covariance to implement clone function as returning this object rather
    * than base */
@@ -358,23 +454,38 @@ protected:
  * compile time */
 class MacroInvocation : public TypeNoBounds,
 			public Pattern,
+			public MacroItem,
+			public TraitItem,
+			public TraitImplItem,
+			public InherentImplItem,
 			public ExprWithoutBlock
 {
   std::vector<Attribute> outer_attrs;
   MacroInvocData invoc_data;
   Location locus;
 
+  // this is the expanded macro
+  ASTFragment fragment;
+
+  // Important for when we actually expand the macro
+  bool is_semi_coloned;
+
+  NodeId node_id;
+
 public:
   std::string as_string () const override;
 
   MacroInvocation (MacroInvocData invoc_data,
-		   std::vector<Attribute> outer_attrs, Location locus)
+		   std::vector<Attribute> outer_attrs, Location locus,
+		   bool is_semi_coloned = false)
     : outer_attrs (std::move (outer_attrs)),
-      invoc_data (std::move (invoc_data)), locus (locus)
+      invoc_data (std::move (invoc_data)), locus (locus),
+      fragment (ASTFragment::create_empty ()),
+      is_semi_coloned (is_semi_coloned),
+      node_id (Analysis::Mappings::get ()->get_next_node_id ())
   {}
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -392,6 +503,21 @@ public:
   {
     outer_attrs = std::move (new_attrs);
   }
+
+  NodeId get_pattern_node_id () const override final
+  {
+    return ExprWithoutBlock::get_node_id ();
+  }
+
+  NodeId get_macro_node_id () const { return node_id; }
+
+  MacroInvocData &get_invoc_data () { return invoc_data; }
+
+  ASTFragment &get_fragment () { return fragment; }
+
+  void set_fragment (ASTFragment &&f) { fragment = std::move (f); }
+
+  bool has_semicolon () const { return is_semi_coloned; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -418,6 +544,37 @@ protected:
   /*virtual*/ MacroInvocation *clone_macro_invocation_impl () const
   {
     return new MacroInvocation (*this);
+  }
+
+  Item *clone_item_impl () const override
+  {
+    return clone_macro_invocation_impl ();
+  }
+
+  bool is_item () const override { return !has_semicolon (); }
+
+  TraitItem *clone_trait_item_impl () const override
+  {
+    return clone_macro_invocation_impl ();
+  };
+
+  TraitImplItem *clone_trait_impl_item_impl () const override
+  {
+    return clone_macro_invocation_impl ();
+  };
+
+  InherentImplItem *clone_inherent_impl_item_impl () const override
+  {
+    return clone_macro_invocation_impl ();
+  }
+
+  ExprWithoutBlock *to_stmt () const override
+
+  {
+    auto new_impl = clone_macro_invocation_impl ();
+    new_impl->is_semi_coloned = true;
+
+    return new_impl;
   }
 };
 
@@ -604,6 +761,8 @@ class MetaListNameValueStr : public MetaItem
   Identifier ident;
   std::vector<MetaNameValueStr> strs;
 
+  // FIXME add location info
+
 public:
   MetaListNameValueStr (Identifier ident, std::vector<MetaNameValueStr> strs)
     : ident (std::move (ident)), strs (std::move (strs))
@@ -625,66 +784,10 @@ protected:
   }
 };
 
-/* Should be a tagged union to save space but implemented as struct due to
- * technical difficulties. TODO: fix
- * Basically, a single AST node used inside an AST fragment. */
-struct SingleASTNode
-{
-  std::unique_ptr<Expr> expr;
-  std::unique_ptr<Stmt> stmt;
-  std::unique_ptr<Item> item;
-  std::unique_ptr<Type> type;
-  std::unique_ptr<Pattern> pattern;
-  std::unique_ptr<TraitItem> trait_item;
-  std::unique_ptr<InherentImplItem> inherent_impl_item;
-  std::unique_ptr<TraitImplItem> trait_impl_item;
-  std::unique_ptr<ExternalItem> external_item;
-
-  SingleASTNode (std::unique_ptr<Expr> expr) : expr (std::move (expr)) {}
-  SingleASTNode (std::unique_ptr<Stmt> stmt) : stmt (std::move (stmt)) {}
-  SingleASTNode (std::unique_ptr<Item> item) : item (std::move (item)) {}
-  SingleASTNode (std::unique_ptr<Type> type) : type (std::move (type)) {}
-  SingleASTNode (std::unique_ptr<Pattern> pattern)
-    : pattern (std::move (pattern))
-  {}
-  SingleASTNode (std::unique_ptr<TraitItem> trait_item)
-    : trait_item (std::move (trait_item))
-  {}
-  SingleASTNode (std::unique_ptr<InherentImplItem> inherent_impl_item)
-    : inherent_impl_item (std::move (inherent_impl_item))
-  {}
-  SingleASTNode (std::unique_ptr<TraitImplItem> trait_impl_item)
-    : trait_impl_item (std::move (trait_impl_item))
-  {}
-  SingleASTNode (std::unique_ptr<ExternalItem> external_item)
-    : external_item (std::move (external_item))
-  {}
-};
-
-/* Basically, a "fragment" that can be incorporated into the AST, created as
- * a result of macro expansion. Really annoying to work with due to the fact
- * that macros can really expand to anything. As such, horrible representation
- * at the moment. */
-struct ASTFragment
-{
-private:
-  /* basic idea: essentially, a vector of tagged unions of different AST node
-   * types. Now, this could actually be stored without a tagged union if the
-   * different AST node types had a unified parent, but that would create
-   * issues with the diamond problem or significant performance penalties. So
-   * a tagged union had to be used instead. A vector is used to represent the
-   * ability for a macro to expand to two statements, for instance. */
-
-  std::vector<SingleASTNode> nodes;
-
-public:
-  ASTFragment (std::vector<SingleASTNode> nodes) : nodes (std::move (nodes)) {}
-};
-
 // Object that parses macros from a token stream.
 /* TODO: would "AttributeParser" be a better name? MetaItems are only for
  * attributes, I believe */
-struct MacroParser
+struct AttributeParser
 {
 private:
   // TODO: might as well rewrite to use lexer tokens
@@ -692,12 +795,12 @@ private:
   int stream_pos;
 
 public:
-  MacroParser (std::vector<std::unique_ptr<Token> > token_stream,
-	       int stream_start_pos = 0)
+  AttributeParser (std::vector<std::unique_ptr<Token> > token_stream,
+		   int stream_start_pos = 0)
     : token_stream (std::move (token_stream)), stream_pos (stream_start_pos)
   {}
 
-  ~MacroParser () = default;
+  ~AttributeParser () = default;
 
   std::vector<std::unique_ptr<MetaItemInner> > parse_meta_item_seq ();
 

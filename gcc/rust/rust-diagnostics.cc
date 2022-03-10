@@ -1,5 +1,5 @@
 // rust-diagnostics.cc -- GCC implementation of rust diagnostics interface.
-// Copyright (C) 2016-2020 Free Software Foundation, Inc.
+// Copyright (C) 2016-2022 Free Software Foundation, Inc.
 // Contributed by Than McIntosh, Google.
 
 // This file is part of GCC.
@@ -147,6 +147,16 @@ rust_close_quote ()
 }
 
 void
+rust_internal_error_at (const Location location, const char *fmt, ...)
+{
+  va_list ap;
+
+  va_start (ap, fmt);
+  rust_be_internal_error_at (location, expand_message (fmt, ap));
+  va_end (ap);
+}
+
+void
 rust_error_at (const Location location, const char *fmt, ...)
 {
   va_list ap;
@@ -188,7 +198,7 @@ rust_inform (const Location location, const char *fmt, ...)
 
 // Rich Locations
 void
-rust_error_at (const RichLocation location, const char *fmt, ...)
+rust_error_at (const RichLocation &location, const char *fmt, ...)
 {
   va_list ap;
 

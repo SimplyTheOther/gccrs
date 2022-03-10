@@ -1,5 +1,5 @@
 /* Definitions of target machine for GNU compiler, EPIPHANY cpu.
-   Copyright (C) 2000-2021 Free Software Foundation, Inc.
+   Copyright (C) 2000-2022 Free Software Foundation, Inc.
    Contributed by Embecosm on behalf of Adapteva, Inc.
 
 This file is part of GCC.
@@ -26,7 +26,7 @@ extern struct rtx_def *gen_compare_reg (machine_mode, enum rtx_code,
 					machine_mode, rtx, rtx);
 #endif
 
-/* Defined in epiphany-rust.c  */
+/* Defined in epiphany-rust.cc  */
 extern void epiphany_rust_target_cpu_info (void);
 
 /* Declarations for various fns used in the .md file.  */

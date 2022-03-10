@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -90,17 +90,6 @@ class StructExprFieldIdentifierValue;
 class StructExprFieldIndexValue;
 class StructExprStructFields;
 class StructExprStructBase;
-class StructExprTuple;
-class StructExprUnit;
-class EnumVariantExpr;
-class EnumExprField;
-class EnumExprFieldIdentifier;
-class EnumExprFieldWithVal;
-class EnumExprFieldIdentifierValue;
-class EnumExprFieldIndexValue;
-class EnumExprStruct;
-class EnumExprTuple;
-class EnumExprFieldless;
 class CallExpr;
 class MethodCallExpr;
 class FieldAccessExpr;
@@ -162,8 +151,6 @@ struct FunctionParam;
 struct Visibility;
 class VisItem;
 class Module;
-class ModuleBodied;
-class ModuleNoBody;
 class ExternCrate;
 class UseTree;
 class UseTreeGlob;
@@ -212,7 +199,6 @@ class StructPatternField;
 class StructPatternFieldTuplePat;
 class StructPatternFieldIdentPat;
 class StructPatternFieldIdent;
-struct StructPatternElements;
 class StructPattern;
 class TupleStructItems;
 class TupleStructItemsNoRange;
@@ -231,7 +217,6 @@ class ImplTraitType;
 class TraitObjectType;
 class ParenthesisedType;
 class ImplTraitTypeOneBound;
-class TraitObjectTypeOneBound;
 class TupleType;
 class NeverType;
 class RawPointerType;

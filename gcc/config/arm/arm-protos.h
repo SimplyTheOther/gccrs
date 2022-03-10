@@ -1,5 +1,5 @@
-/* Prototypes for exported functions defined in arm.c and pe.c
-   Copyright (C) 1999-2021 Free Software Foundation, Inc.
+/* Prototypes for exported functions defined in arm.cc and pe.c
+   Copyright (C) 1999-2022 Free Software Foundation, Inc.
    Contributed by Richard Earnshaw (rearnsha@arm.com)
    Minor hacks by Nick Clifton (nickc@cygnus.com)
 
@@ -204,6 +204,11 @@ extern int arm_apply_result_size (void);
 
 #endif /* RTX_CODE */
 
+/* MVE functions.  */
+namespace arm_mve {
+  void handle_arm_mve_types_h ();
+}
+
 /* Thumb functions.  */
 extern void arm_init_expanders (void);
 extern const char *thumb1_unexpanded_epilogue (void);
@@ -243,8 +248,7 @@ extern bool arm_change_mode_p (tree);
 extern tree arm_valid_target_attribute_tree (tree, struct gcc_options *,
 					     struct gcc_options *);
 extern void arm_configure_build_target (struct arm_build_target *,
-					struct cl_target_option *,
-					struct gcc_options *, bool);
+					struct cl_target_option *, bool);
 extern void arm_option_reconfigure_globals (void);
 extern void arm_options_perform_arch_sanity_checks (void);
 extern void arm_pr_long_calls (struct cpp_reader *);
@@ -373,7 +377,7 @@ extern void arm_emit_coreregs_64bit_shift (enum rtx_code, rtx, rtx, rtx, rtx,
 extern bool arm_fusion_enabled_p (tune_params::fuse_ops);
 extern bool arm_valid_symbolic_address_p (rtx);
 extern bool arm_validize_comparison (rtx *, rtx *, rtx *);
-extern bool arm_expand_vector_compare (rtx, rtx_code, rtx, rtx, bool);
+extern bool arm_expand_vector_compare (rtx, rtx_code, rtx, rtx, bool, bool);
 #endif /* RTX_CODE */
 
 extern bool arm_gen_setmem (rtx *);
@@ -387,18 +391,19 @@ extern void arm_emit_eabi_attribute (const char *, int, int);
 extern void arm_reset_previous_fndecl (void);
 extern void save_restore_target_globals (tree);
 
-/* Defined in gcc/common/config/arm-common.c.  */
+/* Defined in gcc/common/config/arm-common.cc.  */
 extern const char *arm_rewrite_selected_cpu (const char *name);
 
-/* Defined in gcc/common/config/arm-c.c.  */
+/* Defined in gcc/common/config/arm-c.cc.  */
 extern void arm_lang_object_attributes_init (void);
 extern void arm_register_target_pragmas (void);
 extern void arm_cpu_cpp_builtins (struct cpp_reader *);
 
-/* Defined in arm-d.c  */
+/* Defined in arm-d.cc  */
 extern void arm_d_target_versions (void);
+extern void arm_d_register_target_info (void);
 
-/* Defined in arm-rust.c  */
+/* Defined in arm-rust.cc  */
 extern void arm_rust_target_cpu_info (void);
 
 extern bool arm_is_constant_pool_ref (rtx);

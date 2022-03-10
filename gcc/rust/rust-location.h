@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -96,7 +96,7 @@ public:
 
   void add_fixit_insert_after (Location where, const std::string &new_parent);
 
-  rich_location get () const { return gcc_rich_loc; }
+  const rich_location &get () const { return gcc_rich_loc; }
 
 private:
   rich_location gcc_rich_loc;

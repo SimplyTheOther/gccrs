@@ -1,5 +1,5 @@
-/* Prototypes for v850.c functions used in the md file & elsewhere.
-   Copyright (C) 1999-2021 Free Software Foundation, Inc.
+/* Prototypes for v850.cc functions used in the md file & elsewhere.
+   Copyright (C) 1999-2022 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -65,7 +65,7 @@ extern void ghs_pragma_endtda		    (struct cpp_reader *);
 extern void ghs_pragma_endsda		    (struct cpp_reader *);
 extern void ghs_pragma_endzda		    (struct cpp_reader *);
 
-/* Routines implemented in v850-rust.c  */
+/* Routines implemented in v850-rust.cc  */
 extern void v850_rust_target_cpu_info (void);
 
 #endif /* ! GCC_V850_PROTOS_H */

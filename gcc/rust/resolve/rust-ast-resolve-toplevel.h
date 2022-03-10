@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -23,6 +23,7 @@
 #include "rust-ast-resolve-type.h"
 #include "rust-ast-resolve-implitem.h"
 #include "rust-ast-full.h"
+#include "rust-name-resolver.h"
 
 namespace Rust {
 namespace Resolver {
@@ -32,18 +33,56 @@ class ResolveTopLevel : public ResolverBase
   using Rust::Resolver::ResolverBase::visit;
 
 public:
-  static void go (AST::Item *item,
-		  const CanonicalPath &prefix = CanonicalPath::create_empty ())
+  static void go (AST::Item *item, const CanonicalPath &prefix,
+		  const CanonicalPath &canonical_prefix)
   {
-    ResolveTopLevel resolver (prefix);
+    if (item->is_marked_for_strip ())
+      return;
+
+    ResolveTopLevel resolver (prefix, canonical_prefix);
     item->accept_vis (resolver);
   };
 
+  void visit (AST::MacroInvocation &invoc) override
+  {
+    AST::ASTFragment &fragment = invoc.get_fragment ();
+    for (auto &node : fragment.get_nodes ())
+      node.accept_vis (*this);
+  }
+
+  void visit (AST::Module &module) override
+  {
+    auto mod
+      = CanonicalPath::new_seg (module.get_node_id (), module.get_name ());
+    auto path = prefix.append (mod);
+    auto cpath = canonical_prefix.append (mod);
+
+    resolver->get_name_scope ().insert (
+      path, module.get_node_id (), module.get_locus (), false,
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (module.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
+      });
+
+    resolver->insert_new_definition (module.get_node_id (),
+				     Definition{module.get_node_id (),
+						module.get_node_id ()});
+
+    for (auto &item : module.get_items ())
+      ResolveTopLevel::go (item.get (), path, cpath);
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     module.get_node_id (), cpath);
+  }
+
   void visit (AST::TypeAlias &alias) override
   {
-    auto path
-      = prefix.append (CanonicalPath::new_seg (alias.get_node_id (),
-					       alias.get_new_type_name ()));
+    auto talias = CanonicalPath::new_seg (alias.get_node_id (),
+					  alias.get_new_type_name ());
+    auto path = prefix.append (talias);
+    auto cpath = canonical_prefix.append (talias);
+
     resolver->get_type_scope ().insert (
       path, alias.get_node_id (), alias.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -51,13 +90,18 @@ public:
 	r.add_range (locus);
 	rust_error_at (r, "redefined multiple times");
       });
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     alias.get_node_id (), cpath);
   }
 
   void visit (AST::TupleStruct &struct_decl) override
   {
-    auto path
-      = prefix.append (CanonicalPath::new_seg (struct_decl.get_node_id (),
-					       struct_decl.get_identifier ()));
+    auto decl = CanonicalPath::new_seg (struct_decl.get_node_id (),
+					struct_decl.get_identifier ());
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
     resolver->get_type_scope ().insert (
       path, struct_decl.get_node_id (), struct_decl.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -65,13 +109,116 @@ public:
 	r.add_range (locus);
 	rust_error_at (r, "redefined multiple times");
       });
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     struct_decl.get_node_id (), cpath);
+  }
+
+  void visit (AST::Enum &enum_decl) override
+  {
+    auto decl = CanonicalPath::new_seg (enum_decl.get_node_id (),
+					enum_decl.get_identifier ());
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
+    resolver->get_type_scope ().insert (
+      path, enum_decl.get_node_id (), enum_decl.get_locus (), false,
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (enum_decl.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
+      });
+
+    for (auto &variant : enum_decl.get_variants ())
+      ResolveTopLevel::go (variant.get (), path, cpath);
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     enum_decl.get_node_id (), cpath);
+  }
+
+  void visit (AST::EnumItem &item) override
+  {
+    auto decl
+      = CanonicalPath::new_seg (item.get_node_id (), item.get_identifier ());
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
+    resolver->get_type_scope ().insert (
+      path, item.get_node_id (), item.get_locus (), false,
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (item.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
+      });
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     item.get_node_id (), cpath);
+  }
+
+  void visit (AST::EnumItemTuple &item) override
+  {
+    auto decl
+      = CanonicalPath::new_seg (item.get_node_id (), item.get_identifier ());
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
+    resolver->get_type_scope ().insert (
+      path, item.get_node_id (), item.get_locus (), false,
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (item.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
+      });
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     item.get_node_id (), cpath);
+  }
+
+  void visit (AST::EnumItemStruct &item) override
+  {
+    auto decl
+      = CanonicalPath::new_seg (item.get_node_id (), item.get_identifier ());
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
+    resolver->get_type_scope ().insert (
+      path, item.get_node_id (), item.get_locus (), false,
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (item.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
+      });
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     item.get_node_id (), cpath);
+  }
+
+  void visit (AST::EnumItemDiscriminant &item) override
+  {
+    auto decl
+      = CanonicalPath::new_seg (item.get_node_id (), item.get_identifier ());
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
+    resolver->get_type_scope ().insert (
+      path, item.get_node_id (), item.get_locus (), false,
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (item.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
+      });
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     item.get_node_id (), cpath);
   }
 
   void visit (AST::StructStruct &struct_decl) override
   {
-    auto path
-      = prefix.append (CanonicalPath::new_seg (struct_decl.get_node_id (),
-					       struct_decl.get_identifier ()));
+    auto decl = CanonicalPath::new_seg (struct_decl.get_node_id (),
+					struct_decl.get_identifier ());
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
     resolver->get_type_scope ().insert (
       path, struct_decl.get_node_id (), struct_decl.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -79,13 +226,18 @@ public:
 	r.add_range (locus);
 	rust_error_at (r, "redefined multiple times");
       });
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     struct_decl.get_node_id (), cpath);
   }
 
   void visit (AST::Union &union_decl) override
   {
-    auto path
-      = prefix.append (CanonicalPath::new_seg (union_decl.get_node_id (),
-					       union_decl.get_identifier ()));
+    auto decl = CanonicalPath::new_seg (union_decl.get_node_id (),
+					union_decl.get_identifier ());
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
     resolver->get_type_scope ().insert (
       path, union_decl.get_node_id (), union_decl.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -93,12 +245,18 @@ public:
 	r.add_range (locus);
 	rust_error_at (r, "redefined multiple times");
       });
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     union_decl.get_node_id (), cpath);
   }
 
   void visit (AST::StaticItem &var) override
   {
-    auto path = prefix.append (
-      CanonicalPath::new_seg (var.get_node_id (), var.get_identifier ()));
+    auto decl
+      = CanonicalPath::new_seg (var.get_node_id (), var.get_identifier ());
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
     resolver->get_name_scope ().insert (
       path, var.get_node_id (), var.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -110,12 +268,17 @@ public:
 				     Definition{var.get_node_id (),
 						var.get_node_id ()});
     resolver->mark_decl_mutability (var.get_node_id (), var.is_mutable ());
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     var.get_node_id (), cpath);
   }
 
   void visit (AST::ConstantItem &constant) override
   {
-    auto path
-      = prefix.append (ResolveConstantItemToCanonicalPath::resolve (constant));
+    auto decl = ResolveConstantItemToCanonicalPath::resolve (constant);
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
     resolver->get_name_scope ().insert (
       path, constant.get_node_id (), constant.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -126,12 +289,17 @@ public:
     resolver->insert_new_definition (constant.get_node_id (),
 				     Definition{constant.get_node_id (),
 						constant.get_node_id ()});
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     constant.get_node_id (), cpath);
   }
 
   void visit (AST::Function &function) override
   {
-    auto path
-      = prefix.append (ResolveFunctionItemToCanonicalPath::resolve (function));
+    auto decl = ResolveFunctionItemToCanonicalPath::resolve (function);
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
     resolver->get_name_scope ().insert (
       path, function.get_node_id (), function.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -150,12 +318,16 @@ public:
 	resolver->insert_resolved_name (function.get_node_id (),
 					function.get_node_id ());
       }
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     function.get_node_id (), cpath);
   }
 
   void visit (AST::InherentImpl &impl_block) override
   {
     bool canonicalize_type_args = !impl_block.has_generics ();
     bool type_resolve_generic_args = false;
+
     CanonicalPath impl_type
       = ResolveTypeToCanonicalPath::resolve (*impl_block.get_type ().get (),
 					     canonicalize_type_args,
@@ -164,6 +336,8 @@ public:
 
     for (auto &impl_item : impl_block.get_impl_items ())
       ResolveToplevelImplItem::go (impl_item.get (), impl_prefix);
+
+    // we cannot resolve canonical paths here until later on
   }
 
   void visit (AST::TraitImpl &impl_block) override
@@ -185,14 +359,32 @@ public:
 				      impl_type_seg);
     CanonicalPath impl_prefix = prefix.append (projection);
 
+    resolver->get_name_scope ().insert (
+      impl_prefix, impl_block.get_node_id (), impl_block.get_locus (), false,
+      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+	RichLocation r (impl_block.get_locus ());
+	r.add_range (locus);
+	rust_error_at (r, "redefined multiple times");
+      });
+    resolver->insert_new_definition (impl_block.get_node_id (),
+				     Definition{impl_block.get_node_id (),
+						impl_block.get_node_id ()});
+    resolver->insert_resolved_name (impl_block.get_node_id (),
+				    impl_block.get_node_id ());
+
     for (auto &impl_item : impl_block.get_impl_items ())
       ResolveToplevelImplItem::go (impl_item.get (), impl_prefix);
+
+    // we cannot resolve canonical paths here until later on
   }
 
   void visit (AST::Trait &trait) override
   {
-    CanonicalPath path = prefix.append (
-      CanonicalPath::new_seg (trait.get_node_id (), trait.get_identifier ()));
+    auto decl
+      = CanonicalPath::new_seg (trait.get_node_id (), trait.get_identifier ());
+    auto path = prefix.append (decl);
+    auto cpath = canonical_prefix.append (decl);
+
     resolver->get_type_scope ().insert (
       path, trait.get_node_id (), trait.get_locus (), false,
       [&] (const CanonicalPath &, NodeId, Location locus) -> void {
@@ -202,7 +394,10 @@ public:
       });
 
     for (auto &item : trait.get_trait_items ())
-      ResolveTopLevelTraitItems::go (item.get (), path);
+      ResolveTopLevelTraitItems::go (item.get (), path, cpath);
+
+    mappings->insert_canonical_path (mappings->get_current_crate (),
+				     trait.get_node_id (), cpath);
   }
 
   void visit (AST::ExternBlock &extern_block) override
@@ -214,11 +409,14 @@ public:
   }
 
 private:
-  ResolveTopLevel (const CanonicalPath &prefix)
-    : ResolverBase (UNKNOWN_NODEID), prefix (prefix)
+  ResolveTopLevel (const CanonicalPath &prefix,
+		   const CanonicalPath &canonical_prefix)
+    : ResolverBase (UNKNOWN_NODEID), prefix (prefix),
+      canonical_prefix (canonical_prefix)
   {}
 
   const CanonicalPath &prefix;
+  const CanonicalPath &canonical_prefix;
 };
 
 } // namespace Resolver

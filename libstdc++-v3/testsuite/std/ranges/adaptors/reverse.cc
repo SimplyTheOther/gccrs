@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2021 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -138,7 +138,8 @@ namespace test_ns
   void make_reverse_iterator(T&&) {}
 } // namespace test_ns
 
-void test06()
+void
+test06()
 {
   // Check that views::reverse works and does not use ADL which could lead
   // to accidentally finding test_ns::make_reverse_iterator(A*).
@@ -147,6 +148,26 @@ void test06()
   using V = decltype(v);
   static_assert( std::ranges::view<V> );
   static_assert( std::ranges::range<const V> );
+}
+
+template<auto reverse = views::reverse>
+void
+test07()
+{
+  // Verify SFINAE behavior.
+  static_assert(!requires { reverse(); });
+  static_assert(!requires { reverse(0, 0); });
+  static_assert(!requires { reverse(0); });
+  static_assert(!requires { 0 | reverse; });
+}
+
+void
+test08()
+{
+  // PR libstdc++/100639
+  auto v = views::iota(1701ll, 3000ll) | views::reverse | views::take(5);
+  for (auto x : v)
+    ;
 }
 
 int
@@ -158,4 +179,6 @@ main()
   test04();
   test05();
   test06();
+  test07();
+  test08();
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2021 Free Software Foundation, Inc.
+// Copyright (C) 2021-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -81,26 +81,26 @@ public:
 
   void visit (HIR::ArrayElemsValues &expr) override
   {
-    expr.iterate ([&] (HIR::Expr *expr) mutable -> bool {
-      expr->accept_vis (*this);
-      return true;
-    });
+    for (auto &elem : expr.get_values ())
+      {
+	elem->accept_vis (*this);
+      }
   }
 
   void visit (HIR::TupleExpr &expr) override
   {
-    expr.iterate ([&] (HIR::Expr *expr) mutable -> bool {
-      expr->accept_vis (*this);
-      return true;
-    });
+    for (auto &elem : expr.get_tuple_elems ())
+      {
+	elem->accept_vis (*this);
+      }
   }
 
   void visit (HIR::BlockExpr &expr) override
   {
-    expr.iterate_stmts ([&] (HIR::Stmt *s) mutable -> bool {
-      s->accept_vis (*this);
-      return true;
-    });
+    for (auto &s : expr.get_statements ())
+      {
+	s->accept_vis (*this);
+      }
     if (expr.has_expr ())
       {
 	expr.get_final_expr ()->accept_vis (*this);
@@ -165,10 +165,8 @@ public:
   void visit (HIR::CallExpr &expr) override
   {
     expr.get_fnexpr ()->accept_vis (*this);
-    expr.iterate_params ([&] (HIR::Expr *expr) -> bool {
-      expr->accept_vis (*this);
-      return true;
-    });
+    for (auto &argument : expr.get_arguments ())
+      argument->accept_vis (*this);
   }
 
   void visit (HIR::ArithmeticOrLogicalExpr &expr) override
@@ -183,6 +181,12 @@ public:
   }
 
   void visit (HIR::AssignmentExpr &expr) override
+  {
+    expr.visit_lhs (*this);
+    expr.visit_rhs (*this);
+  }
+
+  void visit (HIR::CompoundAssignmentExpr &expr) override
   {
     expr.visit_lhs (*this);
     expr.visit_rhs (*this);
@@ -236,10 +240,10 @@ public:
 
   void visit (HIR::StructExprStructFields &stct) override
   {
-    stct.iterate ([&] (HIR::StructExprField *field) -> bool {
-      field->accept_vis (*this);
-      return true;
-    });
+    for (auto &field : stct.get_fields ())
+      {
+	field->accept_vis (*this);
+      }
 
     stct.get_struct_name ().accept_vis (*this);
     if (stct.has_struct_base ())
@@ -256,6 +260,12 @@ public:
   void visit (HIR::StructExprStructBase &stct) override
   {
     stct.get_struct_base ()->base_struct->accept_vis (*this);
+  }
+
+  void visit (HIR::Module &module) override
+  {
+    for (auto &item : module.get_items ())
+      item->accept_vis (*this);
   }
 
 private:

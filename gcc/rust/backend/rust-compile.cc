@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -16,13 +16,16 @@
 // along with GCC; see the file COPYING3.  If not see
 // <http://www.gnu.org/licenses/>.
 
-#include "rust-compile.h"
-#include "rust-compile-item.h"
-#include "rust-compile-expr.h"
-#include "rust-compile-struct-field-expr.h"
 #include "rust-hir-trait-resolve.h"
 #include "rust-hir-path-probe.h"
-#include "fnv-hash.h"
+#include "rust-hir-type-bounds.h"
+#include "rust-hir-dot-operator.h"
+#include "rust-compile.h"
+#include "rust-compile-item.h"
+#include "rust-compile-implitem.h"
+#include "rust-compile-expr.h"
+#include "rust-compile-struct-field-expr.h"
+#include "rust-compile-stmt.h"
 
 namespace Rust {
 namespace Compile {
@@ -45,228 +48,7 @@ void
 CompileCrate::go ()
 {
   for (auto &item : crate.items)
-    CompileItem::compile (item.get (), ctx, false);
-
-  for (auto &item : crate.items)
-    CompileItem::compile (item.get (), ctx, true);
-}
-
-// rust-compile-expr.h
-
-void
-CompileExpr::visit (HIR::CallExpr &expr)
-{
-  TyTy::BaseType *tyty = nullptr;
-  if (!ctx->get_tyctx ()->lookup_type (
-	expr.get_fnexpr ()->get_mappings ().get_hirid (), &tyty))
-    {
-      rust_error_at (expr.get_locus (), "unknown type");
-      return;
-    }
-
-  // must be a tuple constructor
-  bool is_fn = tyty->get_kind () == TyTy::TypeKind::FNDEF
-	       || tyty->get_kind () == TyTy::TypeKind::FNPTR;
-  if (!is_fn)
-    {
-      Btype *type = TyTyResolveCompile::compile (ctx, tyty);
-
-      // this assumes all fields are in order from type resolution and if a
-      // base struct was specified those fields are filed via accesors
-      std::vector<Bexpression *> vals;
-      expr.iterate_params ([&] (HIR::Expr *argument) mutable -> bool {
-	Bexpression *e = CompileExpr::Compile (argument, ctx);
-	vals.push_back (e);
-	return true;
-      });
-
-      translated
-	= ctx->get_backend ()->constructor_expression (type, vals, -1,
-						       expr.get_locus ());
-    }
-  else
-    {
-      // must be a call to a function
-      Bexpression *fn = CompileExpr::Compile (expr.get_fnexpr (), ctx);
-
-      std::vector<Bexpression *> args;
-      expr.iterate_params ([&] (HIR::Expr *p) mutable -> bool {
-	Bexpression *compiled_expr = CompileExpr::Compile (p, ctx);
-	rust_assert (compiled_expr != nullptr);
-	args.push_back (compiled_expr);
-	return true;
-      });
-
-      auto fncontext = ctx->peek_fn ();
-      translated
-	= ctx->get_backend ()->call_expression (fncontext.fndecl, fn, args,
-						nullptr, expr.get_locus ());
-    }
-}
-
-void
-CompileExpr::visit (HIR::MethodCallExpr &expr)
-{
-  // lookup the resolved name
-  NodeId resolved_node_id = UNKNOWN_NODEID;
-  if (!ctx->get_resolver ()->lookup_resolved_name (
-	expr.get_mappings ().get_nodeid (), &resolved_node_id))
-    {
-      rust_error_at (expr.get_locus (), "failed to lookup resolved MethodCall");
-      return;
-    }
-
-  // reverse lookup
-  HirId ref;
-  if (!ctx->get_mappings ()->lookup_node_to_hir (
-	expr.get_mappings ().get_crate_num (), resolved_node_id, &ref))
-    {
-      rust_fatal_error (expr.get_locus (), "reverse lookup failure");
-      return;
-    }
-
-  // lookup the expected function type
-  TyTy::BaseType *lookup_fntype = nullptr;
-  bool ok = ctx->get_tyctx ()->lookup_type (
-    expr.get_method_name ().get_mappings ().get_hirid (), &lookup_fntype);
-  rust_assert (ok);
-  rust_assert (lookup_fntype->get_kind () == TyTy::TypeKind::FNDEF);
-  TyTy::FnType *fntype = static_cast<TyTy::FnType *> (lookup_fntype);
-
-  // lookup compiled functions
-  Bfunction *fn = nullptr;
-  if (!ctx->lookup_function_decl (fntype->get_ty_ref (), &fn))
-    {
-      // this might fail because its a forward decl so we can attempt to
-      // resolve it now
-      HIR::ImplItem *resolved_item = ctx->get_mappings ()->lookup_hir_implitem (
-	expr.get_mappings ().get_crate_num (), ref, nullptr);
-      if (resolved_item == nullptr)
-	{
-	  // it might be resolved to a trait item
-	  HIR::TraitItem *trait_item
-	    = ctx->get_mappings ()->lookup_hir_trait_item (
-	      expr.get_mappings ().get_crate_num (), ref);
-	  HIR::Trait *trait = ctx->get_mappings ()->lookup_trait_item_mapping (
-	    trait_item->get_mappings ().get_hirid ());
-
-	  Resolver::TraitReference *trait_ref
-	    = &Resolver::TraitReference::error_node ();
-	  bool ok = ctx->get_tyctx ()->lookup_trait_reference (
-	    trait->get_mappings ().get_defid (), &trait_ref);
-	  rust_assert (ok);
-
-	  TyTy::BaseType *receiver = nullptr;
-	  ok = ctx->get_tyctx ()->lookup_receiver (
-	    expr.get_mappings ().get_hirid (), &receiver);
-	  rust_assert (ok);
-
-	  if (receiver->get_kind () == TyTy::TypeKind::PARAM)
-	    {
-	      TyTy::ParamType *p = static_cast<TyTy::ParamType *> (receiver);
-	      receiver = p->resolve ();
-	    }
-
-	  // the type resolver can only resolve type bounds to their trait
-	  // item so its up to us to figure out if this path should resolve
-	  // to an trait-impl-block-item or if it can be defaulted to the
-	  // trait-impl-item's definition
-	  std::vector<Resolver::PathProbeCandidate> candidates
-	    = Resolver::PathProbeType::Probe (
-	      receiver, expr.get_method_name ().get_segment (), true, false,
-	      true);
-
-	  if (candidates.size () == 0)
-	    {
-	      // this means we are defaulting back to the trait_item if
-	      // possible
-	      // TODO
-	      gcc_unreachable ();
-	    }
-	  else
-	    {
-	      Resolver::PathProbeCandidate &candidate = candidates.at (0);
-	      rust_assert (candidate.is_impl_candidate ());
-
-	      HIR::ImplItem *impl_item = candidate.item.impl.impl_item;
-
-	      TyTy::BaseType *self_type = nullptr;
-	      if (!ctx->get_tyctx ()->lookup_type (
-		    expr.get_receiver ()->get_mappings ().get_hirid (),
-		    &self_type))
-		{
-		  rust_error_at (expr.get_locus (),
-				 "failed to resolve type for self param");
-		  return;
-		}
-
-	      if (!fntype->has_subsititions_defined ())
-		CompileInherentImplItem::Compile (self_type, impl_item, ctx,
-						  true);
-	      else
-		CompileInherentImplItem::Compile (self_type, impl_item, ctx,
-						  true, fntype);
-
-	      if (!ctx->lookup_function_decl (
-		    impl_item->get_impl_mappings ().get_hirid (), &fn))
-		{
-		  translated = ctx->get_backend ()->error_expression ();
-		  rust_error_at (expr.get_locus (),
-				 "forward declaration was not compiled");
-		  return;
-		}
-	    }
-	}
-      else
-	{
-	  TyTy::BaseType *self_type = nullptr;
-	  if (!ctx->get_tyctx ()->lookup_type (
-		expr.get_receiver ()->get_mappings ().get_hirid (), &self_type))
-	    {
-	      rust_error_at (expr.get_locus (),
-			     "failed to resolve type for self param");
-	      return;
-	    }
-
-	  if (!fntype->has_subsititions_defined ())
-	    CompileInherentImplItem::Compile (self_type, resolved_item, ctx,
-					      true);
-	  else
-	    CompileInherentImplItem::Compile (self_type, resolved_item, ctx,
-					      true, fntype);
-
-	  if (!ctx->lookup_function_decl (fntype->get_ty_ref (), &fn))
-	    {
-	      translated = ctx->get_backend ()->error_expression ();
-	      rust_error_at (expr.get_locus (),
-			     "forward declaration was not compiled");
-	      return;
-	    }
-	}
-    }
-
-  Bexpression *fn_expr
-    = ctx->get_backend ()->function_code_expression (fn, expr.get_locus ());
-
-  std::vector<Bexpression *> args;
-
-  // method receiver
-  Bexpression *self = CompileExpr::Compile (expr.get_receiver ().get (), ctx);
-  rust_assert (self != nullptr);
-  args.push_back (self);
-
-  // normal args
-  expr.iterate_params ([&] (HIR::Expr *p) mutable -> bool {
-    Bexpression *compiled_expr = CompileExpr::Compile (p, ctx);
-    rust_assert (compiled_expr != nullptr);
-    args.push_back (compiled_expr);
-    return true;
-  });
-
-  auto fncontext = ctx->peek_fn ();
-  translated
-    = ctx->get_backend ()->call_expression (fncontext.fndecl, fn_expr, args,
-					    nullptr, expr.get_locus ());
+    CompileItem::compile (item.get (), ctx);
 }
 
 // rust-compile-block.h
@@ -275,9 +57,9 @@ void
 CompileBlock::visit (HIR::BlockExpr &expr)
 {
   fncontext fnctx = ctx->peek_fn ();
-  Bfunction *fndecl = fnctx.fndecl;
+  tree fndecl = fnctx.fndecl;
   Location start_location = expr.get_locus ();
-  Location end_location = expr.get_closing_locus ();
+  Location end_location = expr.get_end_locus ();
   auto body_mappings = expr.get_mappings ();
 
   Resolver::Rib *rib = nullptr;
@@ -287,14 +69,12 @@ CompileBlock::visit (HIR::BlockExpr &expr)
       return;
     }
 
-  std::vector<Bvariable *> locals;
-  bool ok = compile_locals_for_block (*rib, fndecl, locals);
-  rust_assert (ok);
+  std::vector<Bvariable *> locals
+    = compile_locals_for_block (ctx, *rib, fndecl);
 
-  Bblock *enclosing_scope = ctx->peek_enclosing_scope ();
-  Bblock *new_block
-    = ctx->get_backend ()->block (fndecl, enclosing_scope, locals,
-				  start_location, end_location);
+  tree enclosing_scope = ctx->peek_enclosing_scope ();
+  tree new_block = ctx->get_backend ()->block (fndecl, enclosing_scope, locals,
+					       start_location, end_location);
   ctx->push_block (new_block);
 
   for (auto &s : expr.get_statements ())
@@ -302,10 +82,8 @@ CompileBlock::visit (HIR::BlockExpr &expr)
       auto compiled_expr = CompileStmt::Compile (s.get (), ctx);
       if (compiled_expr != nullptr)
 	{
-	  Bstatement *compiled_stmt
-	    = ctx->get_backend ()->expression_statement (fnctx.fndecl,
-							 compiled_expr);
-	  ctx->add_statement (compiled_stmt);
+	  tree s = convert_to_void (compiled_expr, ICV_STATEMENT);
+	  ctx->add_statement (s);
 	}
     }
 
@@ -313,25 +91,20 @@ CompileBlock::visit (HIR::BlockExpr &expr)
     {
       // the previous passes will ensure this is a valid return or
       // a valid trailing expression
-      Bexpression *compiled_expr = CompileExpr::Compile (expr.expr.get (), ctx);
+      tree compiled_expr = CompileExpr::Compile (expr.expr.get (), ctx);
       if (compiled_expr != nullptr)
 	{
 	  if (result == nullptr)
 	    {
-	      Bstatement *final_stmt
-		= ctx->get_backend ()->expression_statement (fnctx.fndecl,
-							     compiled_expr);
-	      ctx->add_statement (final_stmt);
+	      ctx->add_statement (compiled_expr);
 	    }
 	  else
 	    {
-	      Bexpression *result_reference
-		= ctx->get_backend ()->var_expression (
-		  result, expr.get_final_expr ()->get_locus_slow ());
+	      tree result_reference = ctx->get_backend ()->var_expression (
+		result, expr.get_final_expr ()->get_locus ());
 
-	      Bstatement *assignment
-		= ctx->get_backend ()->assignment_statement (fnctx.fndecl,
-							     result_reference,
+	      tree assignment
+		= ctx->get_backend ()->assignment_statement (result_reference,
 							     compiled_expr,
 							     expr.get_locus ());
 	      ctx->add_statement (assignment);
@@ -347,11 +120,9 @@ void
 CompileConditionalBlocks::visit (HIR::IfExpr &expr)
 {
   fncontext fnctx = ctx->peek_fn ();
-  Bfunction *fndecl = fnctx.fndecl;
-  Bexpression *condition_expr
-    = CompileExpr::Compile (expr.get_if_condition (), ctx);
-  Bblock *then_block
-    = CompileBlock::compile (expr.get_if_block (), ctx, result);
+  tree fndecl = fnctx.fndecl;
+  tree condition_expr = CompileExpr::Compile (expr.get_if_condition (), ctx);
+  tree then_block = CompileBlock::compile (expr.get_if_block (), ctx, result);
 
   translated
     = ctx->get_backend ()->if_statement (fndecl, condition_expr, then_block,
@@ -362,13 +133,10 @@ void
 CompileConditionalBlocks::visit (HIR::IfExprConseqElse &expr)
 {
   fncontext fnctx = ctx->peek_fn ();
-  Bfunction *fndecl = fnctx.fndecl;
-  Bexpression *condition_expr
-    = CompileExpr::Compile (expr.get_if_condition (), ctx);
-  Bblock *then_block
-    = CompileBlock::compile (expr.get_if_block (), ctx, result);
-  Bblock *else_block
-    = CompileBlock::compile (expr.get_else_block (), ctx, result);
+  tree fndecl = fnctx.fndecl;
+  tree condition_expr = CompileExpr::Compile (expr.get_if_condition (), ctx);
+  tree then_block = CompileBlock::compile (expr.get_if_block (), ctx, result);
+  tree else_block = CompileBlock::compile (expr.get_else_block (), ctx, result);
 
   translated
     = ctx->get_backend ()->if_statement (fndecl, condition_expr, then_block,
@@ -379,23 +147,20 @@ void
 CompileConditionalBlocks::visit (HIR::IfExprConseqIf &expr)
 {
   fncontext fnctx = ctx->peek_fn ();
-  Bfunction *fndecl = fnctx.fndecl;
-  Bexpression *condition_expr
-    = CompileExpr::Compile (expr.get_if_condition (), ctx);
-  Bblock *then_block
-    = CompileBlock::compile (expr.get_if_block (), ctx, result);
+  tree fndecl = fnctx.fndecl;
+  tree condition_expr = CompileExpr::Compile (expr.get_if_condition (), ctx);
+  tree then_block = CompileBlock::compile (expr.get_if_block (), ctx, result);
 
   // else block
   std::vector<Bvariable *> locals;
   Location start_location = expr.get_conseq_if_expr ()->get_locus ();
   Location end_location = expr.get_conseq_if_expr ()->get_locus (); // FIXME
-  Bblock *enclosing_scope = ctx->peek_enclosing_scope ();
-  Bblock *else_block
-    = ctx->get_backend ()->block (fndecl, enclosing_scope, locals,
-				  start_location, end_location);
+  tree enclosing_scope = ctx->peek_enclosing_scope ();
+  tree else_block = ctx->get_backend ()->block (fndecl, enclosing_scope, locals,
+						start_location, end_location);
   ctx->push_block (else_block);
 
-  Bstatement *else_stmt_decl
+  tree else_stmt_decl
     = CompileConditionalBlocks::compile (expr.get_conseq_if_expr (), ctx,
 					 result);
   ctx->add_statement (else_stmt_decl);
@@ -433,173 +198,309 @@ CompileStructExprField::visit (HIR::StructExprFieldIdentifier &field)
 
 // Shared methods in compilation
 
-void
-HIRCompileBase::compile_function_body (
-  Bfunction *fndecl, std::unique_ptr<HIR::BlockExpr> &function_body,
-  bool has_return_type)
+tree
+HIRCompileBase::coercion_site (tree rvalue, TyTy::BaseType *actual,
+			       TyTy::BaseType *expected, Location lvalue_locus,
+			       Location rvalue_locus)
 {
-  for (auto &s : function_body->get_statements ())
+  auto root_actual_kind = actual->get_root ()->get_kind ();
+  auto root_expected_kind = expected->get_root ()->get_kind ();
+
+  if (root_expected_kind == TyTy::TypeKind::ARRAY
+      && root_actual_kind == TyTy::TypeKind::ARRAY)
     {
-      auto compiled_expr = CompileStmt::Compile (s.get (), ctx);
-      if (compiled_expr != nullptr)
+      tree tree_rval_type
+	= TyTyResolveCompile::compile (ctx, actual->get_root ());
+      tree tree_lval_type
+	= TyTyResolveCompile::compile (ctx, expected->get_root ());
+      if (!verify_array_capacities (tree_lval_type, tree_rval_type,
+				    lvalue_locus, rvalue_locus))
+	return error_mark_node;
+    }
+  else if (root_expected_kind == TyTy::TypeKind::DYNAMIC
+	   && root_actual_kind != TyTy::TypeKind::DYNAMIC)
+    {
+      const TyTy::DynamicObjectType *dyn
+	= static_cast<const TyTy::DynamicObjectType *> (expected->get_root ());
+      return coerce_to_dyn_object (rvalue, actual, expected, dyn, rvalue_locus);
+    }
+
+  return rvalue;
+}
+
+tree
+HIRCompileBase::coerce_to_dyn_object (tree compiled_ref,
+				      const TyTy::BaseType *actual,
+				      const TyTy::BaseType *expected,
+				      const TyTy::DynamicObjectType *ty,
+				      Location locus)
+{
+  tree dynamic_object = TyTyResolveCompile::compile (ctx, ty);
+
+  //' this assumes ordering and current the structure is
+  // __trait_object_ptr
+  // [list of function ptrs]
+
+  auto root = actual->get_root ();
+  std::vector<std::pair<Resolver::TraitReference *, HIR::ImplBlock *>>
+    probed_bounds_for_receiver = Resolver::TypeBoundsProbe::Probe (root);
+
+  std::vector<tree> vals;
+  vals.push_back (compiled_ref);
+  for (auto &bound : ty->get_object_items ())
+    {
+      const Resolver::TraitItemReference *item = bound.first;
+      const TyTy::TypeBoundPredicate *predicate = bound.second;
+
+      auto address = compute_address_for_trait_item (item, predicate,
+						     probed_bounds_for_receiver,
+						     actual, root, locus);
+      vals.push_back (address);
+    }
+
+  tree constructed_trait_object
+    = ctx->get_backend ()->constructor_expression (dynamic_object, false, vals,
+						   -1, locus);
+
+  fncontext fnctx = ctx->peek_fn ();
+  tree enclosing_scope = ctx->peek_enclosing_scope ();
+  bool is_address_taken = false;
+  tree ret_var_stmt = NULL_TREE;
+
+  Bvariable *dyn_tmp = ctx->get_backend ()->temporary_variable (
+    fnctx.fndecl, enclosing_scope, dynamic_object, constructed_trait_object,
+    is_address_taken, locus, &ret_var_stmt);
+  ctx->add_statement (ret_var_stmt);
+
+  // FIXME this needs to be more generic to apply any covariance
+
+  auto e = expected;
+  std::vector<Resolver::Adjustment> adjustments;
+  while (e->get_kind () == TyTy::TypeKind::REF)
+    {
+      auto r = static_cast<const TyTy::ReferenceType *> (e);
+      e = r->get_base ();
+
+      if (r->is_mutable ())
+	adjustments.push_back (
+	  Resolver::Adjustment (Resolver::Adjustment::AdjustmentType::MUT_REF,
+				e));
+      else
+	adjustments.push_back (
+	  Resolver::Adjustment (Resolver::Adjustment::AdjustmentType::IMM_REF,
+				e));
+    }
+
+  auto resulting_dyn_object_ref
+    = ctx->get_backend ()->var_expression (dyn_tmp, locus);
+  for (auto it = adjustments.rbegin (); it != adjustments.rend (); it++)
+    {
+      bool ok
+	= it->get_type () == Resolver::Adjustment::AdjustmentType::IMM_REF
+	  || it->get_type () == Resolver::Adjustment::AdjustmentType::MUT_REF;
+      rust_assert (ok);
+
+      resulting_dyn_object_ref
+	= address_expression (resulting_dyn_object_ref, locus);
+    }
+  return resulting_dyn_object_ref;
+}
+
+tree
+HIRCompileBase::compute_address_for_trait_item (
+  const Resolver::TraitItemReference *ref,
+  const TyTy::TypeBoundPredicate *predicate,
+  std::vector<std::pair<Resolver::TraitReference *, HIR::ImplBlock *>>
+    &receiver_bounds,
+  const TyTy::BaseType *receiver, const TyTy::BaseType *root, Location locus)
+{
+  // There are two cases here one where its an item which has an implementation
+  // within a trait-impl-block. Then there is the case where there is a default
+  // implementation for this within the trait.
+  //
+  // The awkward part here is that this might be a generic trait and we need to
+  // figure out the correct monomorphized type for this so we can resolve the
+  // address of the function , this is stored as part of the
+  // type-bound-predicate
+  //
+  // Algo:
+  // check if there is an impl-item for this trait-item-ref first
+  // else assert that the trait-item-ref has an implementation
+
+  TyTy::TypeBoundPredicateItem predicate_item
+    = predicate->lookup_associated_item (ref->get_identifier ());
+  rust_assert (!predicate_item.is_error ());
+
+  // this is the expected end type
+  TyTy::BaseType *trait_item_type = predicate_item.get_tyty_for_receiver (root);
+  rust_assert (trait_item_type->get_kind () == TyTy::TypeKind::FNDEF);
+  TyTy::FnType *trait_item_fntype
+    = static_cast<TyTy::FnType *> (trait_item_type);
+
+  // find impl-block for this trait-item-ref
+  HIR::ImplBlock *associated_impl_block = nullptr;
+  const Resolver::TraitReference *predicate_trait_ref = predicate->get ();
+  for (auto &item : receiver_bounds)
+    {
+      Resolver::TraitReference *trait_ref = item.first;
+      HIR::ImplBlock *impl_block = item.second;
+      if (predicate_trait_ref->is_equal (*trait_ref))
 	{
-	  Bstatement *compiled_stmt
-	    = ctx->get_backend ()->expression_statement (fndecl, compiled_expr);
-	  ctx->add_statement (compiled_stmt);
+	  associated_impl_block = impl_block;
+	  break;
 	}
     }
 
-  if (function_body->has_expr ())
+  // FIXME this probably should just return error_mark_node but this helps
+  // debug for now since we are wrongly returning early on type-resolution
+  // failures, until we take advantage of more error types and error_mark_node
+  rust_assert (associated_impl_block != nullptr);
+
+  // lookup self for the associated impl
+  std::unique_ptr<HIR::Type> &self_type_path
+    = associated_impl_block->get_type ();
+  TyTy::BaseType *self = nullptr;
+  bool ok = ctx->get_tyctx ()->lookup_type (
+    self_type_path->get_mappings ().get_hirid (), &self);
+  rust_assert (ok);
+
+  // lookup the predicate item from the self
+  TyTy::TypeBoundPredicate *self_bound = nullptr;
+  for (auto &bound : self->get_specified_bounds ())
     {
-      // the previous passes will ensure this is a valid return
-      // or a valid trailing expression
-      Bexpression *compiled_expr
-	= CompileExpr::Compile (function_body->expr.get (), ctx);
-
-      if (compiled_expr != nullptr)
+      const Resolver::TraitReference *bound_ref = bound.get ();
+      const Resolver::TraitReference *specified_ref = predicate->get ();
+      if (bound_ref->is_equal (*specified_ref))
 	{
-	  if (has_return_type)
-	    {
-	      std::vector<Bexpression *> retstmts;
-	      retstmts.push_back (compiled_expr);
-
-	      auto ret = ctx->get_backend ()->return_statement (
-		fndecl, retstmts,
-		function_body->get_final_expr ()->get_locus_slow ());
-	      ctx->add_statement (ret);
-	    }
-	  else
-	    {
-	      Bstatement *final_stmt
-		= ctx->get_backend ()->expression_statement (fndecl,
-							     compiled_expr);
-	      ctx->add_statement (final_stmt);
-	    }
+	  self_bound = &bound;
+	  break;
 	}
     }
+  rust_assert (self_bound != nullptr);
+
+  // lookup the associated item from the associated impl block
+  TyTy::TypeBoundPredicateItem associated_self_item
+    = self_bound->lookup_associated_item (ref->get_identifier ());
+  rust_assert (!associated_self_item.is_error ());
+
+  // apply any generic arguments from this predicate
+  TyTy::BaseType *mono1 = associated_self_item.get_tyty_for_receiver (self);
+  TyTy::BaseType *mono2 = nullptr;
+  if (predicate->has_generic_args ())
+    {
+      mono2 = associated_self_item.get_tyty_for_receiver (
+	self, predicate->get_generic_args ());
+    }
+  else
+    {
+      mono2 = associated_self_item.get_tyty_for_receiver (self);
+    }
+  rust_assert (mono1 != nullptr);
+  rust_assert (mono1->get_kind () == TyTy::TypeKind::FNDEF);
+  TyTy::FnType *assocated_item_ty1 = static_cast<TyTy::FnType *> (mono1);
+
+  rust_assert (mono2 != nullptr);
+  rust_assert (mono2->get_kind () == TyTy::TypeKind::FNDEF);
+  TyTy::FnType *assocated_item_ty2 = static_cast<TyTy::FnType *> (mono2);
+
+  // Lookup the impl-block for the associated impl_item if it exists
+  HIR::Function *associated_function = nullptr;
+  for (auto &impl_item : associated_impl_block->get_impl_items ())
+    {
+      bool is_function = impl_item->get_impl_item_type ()
+			 == HIR::ImplItem::ImplItemType::FUNCTION;
+      if (!is_function)
+	continue;
+
+      HIR::Function *fn = static_cast<HIR::Function *> (impl_item.get ());
+      bool found_associated_item
+	= fn->get_function_name ().compare (ref->get_identifier ()) == 0;
+      if (found_associated_item)
+	associated_function = fn;
+    }
+
+  // we found an impl_item for this
+  if (associated_function != nullptr)
+    {
+      // lookup the associated type for this item
+      TyTy::BaseType *lookup = nullptr;
+      bool ok = ctx->get_tyctx ()->lookup_type (
+	associated_function->get_mappings ().get_hirid (), &lookup);
+      rust_assert (ok);
+      rust_assert (lookup->get_kind () == TyTy::TypeKind::FNDEF);
+      TyTy::FnType *lookup_fntype = static_cast<TyTy::FnType *> (lookup);
+
+      if (lookup_fntype->needs_substitution ())
+	{
+	  TyTy::SubstitutionArgumentMappings mappings
+	    = assocated_item_ty1->solve_missing_mappings_from_this (
+	      *assocated_item_ty2, *lookup_fntype);
+	  lookup_fntype = lookup_fntype->handle_substitions (mappings);
+	}
+
+      return CompileInherentImplItem::Compile (associated_function, ctx,
+					       lookup_fntype, true, locus);
+    }
+
+  // we can only compile trait-items with a body
+  bool trait_item_has_definition = ref->is_optional ();
+  rust_assert (trait_item_has_definition);
+
+  HIR::TraitItem *trait_item = ref->get_hir_trait_item ();
+  return CompileTraitItem::Compile (trait_item, ctx, trait_item_fntype, true,
+				    locus);
 }
 
 bool
-HIRCompileBase::compile_locals_for_block (Resolver::Rib &rib, Bfunction *fndecl,
-					  std::vector<Bvariable *> &locals)
+HIRCompileBase::verify_array_capacities (tree ltype, tree rtype,
+					 Location lvalue_locus,
+					 Location rvalue_locus)
 {
-  rib.iterate_decls ([&] (NodeId n, Location) mutable -> bool {
-    Resolver::Definition d;
-    bool ok = ctx->get_resolver ()->lookup_definition (n, &d);
-    rust_assert (ok);
+  rust_assert (ltype != NULL_TREE);
+  rust_assert (rtype != NULL_TREE);
 
-    HIR::Stmt *decl = nullptr;
-    ok = ctx->get_mappings ()->resolve_nodeid_to_stmt (d.parent, &decl);
-    rust_assert (ok);
-
-    // if its a function we extract this out side of this fn context
-    // and it is not a local to this function
-    bool is_item = ctx->get_mappings ()->lookup_hir_item (
-		     decl->get_mappings ().get_crate_num (),
-		     decl->get_mappings ().get_hirid ())
-		   != nullptr;
-    if (is_item)
-      {
-	HIR::Item *item = static_cast<HIR::Item *> (decl);
-	CompileItem::compile (item, ctx, true);
-	return true;
-      }
-
-    Bvariable *compiled = CompileVarDecl::compile (fndecl, decl, ctx);
-    locals.push_back (compiled);
-
+  // lets just return ok as other errors have already occurred
+  if (ltype == error_mark_node || rtype == error_mark_node)
     return true;
-  });
 
-  return true;
-}
+  tree ltype_domain = TYPE_DOMAIN (ltype);
+  if (!ltype_domain)
+    return false;
 
-// Mr Mangle time
+  if (!TREE_CONSTANT (TYPE_MAX_VALUE (ltype_domain)))
+    return false;
 
-static const std::string kMangledSymbolPrefix = "_ZN";
-static const std::string kMangledSymbolDelim = "E";
-static const std::string kMangledGenericDelim = "$C$";
-static const std::string kMangledSubstBegin = "$LT$";
-static const std::string kMangledSubstEnd = "$GT$";
+  auto ltype_length
+    = wi::ext (wi::to_offset (TYPE_MAX_VALUE (ltype_domain))
+		 - wi::to_offset (TYPE_MIN_VALUE (ltype_domain)) + 1,
+	       TYPE_PRECISION (TREE_TYPE (ltype_domain)),
+	       TYPE_SIGN (TREE_TYPE (ltype_domain)))
+	.to_uhwi ();
 
-static std::string
-mangle_name (const std::string &name)
-{
-  return std::to_string (name.size ()) + name;
-}
+  tree rtype_domain = TYPE_DOMAIN (rtype);
+  if (!rtype_domain)
+    return false;
 
-// rustc uses a sip128 hash for legacy mangling, but an fnv 128 was quicker to
-// implement for now
-static std::string
-legacy_hash (const std::string &fingerprint)
-{
-  Hash::FNV128 hasher;
-  hasher.write ((const unsigned char *) fingerprint.c_str (),
-		fingerprint.size ());
+  if (!TREE_CONSTANT (TYPE_MAX_VALUE (rtype_domain)))
+    return false;
 
-  uint64_t hi, lo;
-  hasher.sum (&hi, &lo);
+  auto rtype_length
+    = wi::ext (wi::to_offset (TYPE_MAX_VALUE (rtype_domain))
+		 - wi::to_offset (TYPE_MIN_VALUE (rtype_domain)) + 1,
+	       TYPE_PRECISION (TREE_TYPE (rtype_domain)),
+	       TYPE_SIGN (TREE_TYPE (rtype_domain)))
+	.to_uhwi ();
 
-  char hex[16 + 1];
-  memset (hex, 0, sizeof hex);
-  snprintf (hex, sizeof hex, "%08" PRIx64 "%08" PRIx64, lo, hi);
-
-  return "h" + std::string (hex, sizeof (hex) - 1);
-}
-
-static std::string
-mangle_self (const TyTy::BaseType *self)
-{
-  if (self->get_kind () != TyTy::TypeKind::ADT)
-    return mangle_name (self->get_name ());
-
-  const TyTy::ADTType *s = static_cast<const TyTy::ADTType *> (self);
-  std::string buf = s->get_identifier ();
-
-  if (s->has_subsititions_defined ())
+  if (ltype_length != rtype_length)
     {
-      buf += kMangledSubstBegin;
-
-      const std::vector<TyTy::SubstitutionParamMapping> &params
-	= s->get_substs ();
-      for (size_t i = 0; i < params.size (); i++)
-	{
-	  const TyTy::SubstitutionParamMapping &sub = params.at (i);
-	  buf += sub.as_string ();
-
-	  if ((i + 1) < params.size ())
-	    buf += kMangledGenericDelim;
-	}
-
-      buf += kMangledSubstEnd;
+      rust_error_at (rvalue_locus,
+		     "expected an array with a fixed size of %lu "
+		     "elements, found one with %lu elements",
+		     ltype_length, rtype_length);
+      return false;
     }
 
-  return mangle_name (buf);
-}
-
-std::string
-Context::mangle_item (const TyTy::BaseType *ty, const std::string &name) const
-{
-  const std::string &crate_name = mappings->get_current_crate_name ();
-
-  const std::string hash = legacy_hash (ty->as_string ());
-  const std::string hash_sig = mangle_name (hash);
-
-  return kMangledSymbolPrefix + mangle_name (crate_name) + mangle_name (name)
-	 + hash_sig + kMangledSymbolDelim;
-}
-
-std::string
-Context::mangle_impl_item (const TyTy::BaseType *self, const TyTy::BaseType *ty,
-			   const std::string &name) const
-{
-  const std::string &crate_name = mappings->get_current_crate_name ();
-
-  const std::string hash = legacy_hash (ty->as_string ());
-  const std::string hash_sig = mangle_name (hash);
-
-  return kMangledSymbolPrefix + mangle_name (crate_name) + mangle_self (self)
-	 + mangle_name (name) + hash_sig + kMangledSymbolDelim;
+  return true;
 }
 
 } // namespace Compile

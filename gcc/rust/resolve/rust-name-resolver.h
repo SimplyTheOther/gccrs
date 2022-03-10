@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -20,159 +20,53 @@
 #define RUST_NAME_RESOLVER_H
 
 #include "rust-system.h"
+#include "rust-canonical-path.h"
 #include "rust-hir-map.h"
 #include "rust-hir-type-check.h"
 
 namespace Rust {
 namespace Resolver {
 
-// https://doc.rust-lang.org/reference/paths.html#canonical-paths
-//
-// struct X - path X
-// impl X { fn test - path X::test }
-//
-// struct X<T> - path X
-//
-// impl X<T>   { fn test - path X::test}
-// impl X<i32> { fn test - path X<i32>::test }
-// impl X<f32> { fn test - path X<f32>::test }
-//
-// pub trait Trait { // ::a::Trait
-//   fn f(&self); // ::a::Trait::f
-// }
-//
-// impl Trait for Struct {
-//    fn f(&self) {} // <::a::Struct as ::a::Trait>::f
-// }
-class CanonicalPath
-{
-public:
-  CanonicalPath (const CanonicalPath &other) : segs (other.segs) {}
-
-  CanonicalPath &operator= (const CanonicalPath &other)
-  {
-    segs = other.segs;
-    return *this;
-  }
-
-  static CanonicalPath new_seg (NodeId id, const std::string &path)
-  {
-    rust_assert (!path.empty ());
-    return CanonicalPath ({std::pair<NodeId, std::string> (id, path)});
-  }
-
-  std::string get () const
-  {
-    std::string buf;
-    for (size_t i = 0; i < segs.size (); i++)
-      {
-	bool have_more = (i + 1) < segs.size ();
-	const std::string &seg = segs.at (i).second;
-	buf += seg + (have_more ? "::" : "");
-      }
-    return buf;
-  }
-
-  static CanonicalPath get_big_self (NodeId id)
-  {
-    return CanonicalPath::new_seg (id, "Self");
-  }
-
-  static CanonicalPath create_empty () { return CanonicalPath ({}); }
-
-  bool is_error () const { return segs.size () == 0; }
-
-  CanonicalPath append (const CanonicalPath &other) const
-  {
-    rust_assert (!other.is_error ());
-    if (is_error ())
-      return CanonicalPath (other.segs);
-
-    std::vector<std::pair<NodeId, std::string>> copy (segs);
-    for (auto &s : other.segs)
-      copy.push_back (s);
-
-    return CanonicalPath (copy);
-  }
-
-  // if we have the path A::B::C this will give a callback for each segment
-  // example:
-  //   A
-  //   A::B
-  //   A::B::C
-  void iterate (std::function<bool (const CanonicalPath &)> cb) const
-  {
-    std::vector<std::pair<NodeId, std::string>> buf;
-    for (auto &seg : segs)
-      {
-	buf.push_back (seg);
-	if (!cb (CanonicalPath (buf)))
-	  return;
-      }
-  }
-
-  NodeId get_id () const
-  {
-    rust_assert (!segs.empty ());
-    return segs.back ().first;
-  }
-
-  bool operator== (const CanonicalPath &b) const
-  {
-    return get ().compare (b.get ()) == 0;
-  }
-
-  bool operator< (const CanonicalPath &b) const { return get () < b.get (); }
-
-private:
-  explicit CanonicalPath (std::vector<std::pair<NodeId, std::string>> path)
-    : segs (path)
-  {}
-
-  std::vector<std::pair<NodeId, std::string>> segs;
-};
-
 class Rib
 {
 public:
-  // Rusts uses local_def_ids assigned by def_collector on the AST
+  // Rust uses local_def_ids assigned by def_collector on the AST
   // lets use NodeId instead
   Rib (CrateNum crateNum, NodeId node_id)
-    : crate_num (crateNum), node_id (node_id)
+    : crate_num (crateNum), node_id (node_id),
+      mappings (Analysis::Mappings::get ())
   {}
 
   ~Rib () {}
 
+  // this takes the relative paths of items within a compilation unit for lookup
   void insert_name (
     const CanonicalPath &path, NodeId id, Location locus, bool shadow,
     std::function<void (const CanonicalPath &, NodeId, Location)> dup_cb)
   {
-    auto it = mappings.find (path);
-    bool already_exists = it != mappings.end ();
-    if (already_exists && !shadow)
+    auto it = path_mappings.find (path);
+    bool path_already_exists = it != path_mappings.end ();
+    if (path_already_exists && !shadow)
       {
-	for (auto &decl : decls_within_rib)
-	  {
-	    if (decl.first == it->second)
-	      {
-		dup_cb (path, it->second, decl.second);
-		return;
-	      }
-	  }
-	dup_cb (path, it->second, locus);
+	const auto &decl = decls_within_rib.find (it->second);
+	if (decl != decls_within_rib.end ())
+	  dup_cb (path, it->second, decl->second);
+	else
+	  dup_cb (path, it->second, locus);
+
 	return;
       }
 
-    mappings[path] = id;
-    reverse_mappings.insert (std::pair<NodeId, CanonicalPath> (id, path));
+    path_mappings[path] = id;
+    reverse_path_mappings.insert (std::pair<NodeId, CanonicalPath> (id, path));
     decls_within_rib.insert (std::pair<NodeId, Location> (id, locus));
     references[id] = {};
   }
 
   bool lookup_name (const CanonicalPath &ident, NodeId *id)
   {
-    auto it = mappings.find (ident);
-    if (it == mappings.end ())
+    auto it = path_mappings.find (ident);
+    if (it == path_mappings.end ())
       return false;
 
     *id = it->second;
@@ -181,8 +75,8 @@ public:
 
   bool lookup_canonical_path (const NodeId &id, CanonicalPath *ident)
   {
-    auto it = reverse_mappings.find (id);
-    if (it == reverse_mappings.end ())
+    auto it = reverse_path_mappings.find (id);
+    if (it == reverse_path_mappings.end ())
       return false;
 
     *ident = it->second;
@@ -191,17 +85,17 @@ public:
 
   void clear_name (const CanonicalPath &ident, NodeId id)
   {
-    mappings.erase (ident);
-    reverse_mappings.erase (id);
+    auto ii = path_mappings.find (ident);
+    if (ii != path_mappings.end ())
+      path_mappings.erase (ii);
 
-    for (auto &it : decls_within_rib)
-      {
-	if (it.first == id)
-	  {
-	    decls_within_rib.erase (it);
-	    break;
-	  }
-      }
+    auto ij = reverse_path_mappings.find (id);
+    if (ij != reverse_path_mappings.end ())
+      reverse_path_mappings.erase (ij);
+
+    auto ik = decls_within_rib.find (id);
+    if (ik != decls_within_rib.end ())
+      decls_within_rib.erase (ik);
   }
 
   CrateNum get_crate_num () const { return crate_num; }
@@ -256,10 +150,11 @@ public:
 private:
   CrateNum crate_num;
   NodeId node_id;
-  std::map<CanonicalPath, NodeId> mappings;
-  std::map<NodeId, CanonicalPath> reverse_mappings;
-  std::set<std::pair<NodeId, Location>> decls_within_rib;
+  std::map<CanonicalPath, NodeId> path_mappings;
+  std::map<NodeId, CanonicalPath> reverse_path_mappings;
+  std::map<NodeId, Location> decls_within_rib;
   std::map<NodeId, std::set<NodeId>> references;
+  Analysis::Mappings *mappings;
 };
 
 class Scope
@@ -356,6 +251,11 @@ struct Definition
   NodeId node;
   NodeId parent;
   // add kind ?
+
+  bool is_equal (const Definition &other)
+  {
+    return node == other.node && parent == other.parent;
+  }
 };
 
 class Resolver
@@ -374,10 +274,12 @@ public:
   void push_new_name_rib (Rib *r);
   void push_new_type_rib (Rib *r);
   void push_new_label_rib (Rib *r);
+  void push_new_macro_rib (Rib *r);
 
   bool find_name_rib (NodeId id, Rib **rib);
   bool find_type_rib (NodeId id, Rib **rib);
   bool find_label_rib (NodeId id, Rib **rib);
+  bool find_macro_rib (NodeId id, Rib **rib);
 
   void insert_new_definition (NodeId id, Definition def);
   bool lookup_definition (NodeId id, Definition *def);
@@ -391,10 +293,14 @@ public:
   void insert_resolved_label (NodeId refId, NodeId defId);
   bool lookup_resolved_label (NodeId refId, NodeId *defId);
 
+  void insert_resolved_macro (NodeId refId, NodeId defId);
+  bool lookup_resolved_macro (NodeId refId, NodeId *defId);
+
   // proxy for scoping
   Scope &get_name_scope () { return name_scope; }
   Scope &get_type_scope () { return type_scope; }
   Scope &get_label_scope () { return label_scope; }
+  Scope &get_macro_scope () { return macro_scope; }
 
   NodeId get_global_type_node_id () { return global_type_node_id; }
 
@@ -432,27 +338,30 @@ public:
     return it->second.size ();
   }
 
-  void iterate_name_ribs (std::function<void (Rib *)> cb)
+  void iterate_name_ribs (std::function<bool (Rib *)> cb)
   {
     for (auto it = name_ribs.begin (); it != name_ribs.end (); it++)
-      cb (it->second);
+      if (!cb (it->second))
+	break;
   }
 
-  void iterate_type_ribs (std::function<void (Rib *)> cb)
+  void iterate_type_ribs (std::function<bool (Rib *)> cb)
   {
     for (auto it = type_ribs.begin (); it != type_ribs.end (); it++)
       {
 	if (it->first == global_type_node_id)
 	  continue;
 
-	cb (it->second);
+	if (!cb (it->second))
+	  break;
       }
   }
 
-  void iterate_label_ribs (std::function<void (Rib *)> cb)
+  void iterate_label_ribs (std::function<bool (Rib *)> cb)
   {
     for (auto it = label_ribs.begin (); it != label_ribs.end (); it++)
-      cb (it->second);
+      if (!cb (it->second))
+	break;
   }
 
 private:
@@ -468,6 +377,7 @@ private:
   Scope name_scope;
   Scope type_scope;
   Scope label_scope;
+  Scope macro_scope;
 
   NodeId global_type_node_id;
   NodeId unit_ty_node_id;
@@ -476,6 +386,7 @@ private:
   std::map<NodeId, Rib *> name_ribs;
   std::map<NodeId, Rib *> type_ribs;
   std::map<NodeId, Rib *> label_ribs;
+  std::map<NodeId, Rib *> macro_ribs;
 
   // map any Node to its Definition
   // ie any name or type usage
@@ -492,6 +403,7 @@ private:
   std::map<NodeId, NodeId> resolved_names;
   std::map<NodeId, NodeId> resolved_types;
   std::map<NodeId, NodeId> resolved_labels;
+  std::map<NodeId, NodeId> resolved_macros;
 
   // map of resolved names mutability flag
   std::map<NodeId, bool> decl_mutability;

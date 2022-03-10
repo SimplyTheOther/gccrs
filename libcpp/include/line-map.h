@@ -1,5 +1,5 @@
 /* Map (unsigned int) keys to (source file, line, column) triples.
-   Copyright (C) 2001-2021 Free Software Foundation, Inc.
+   Copyright (C) 2001-2022 Free Software Foundation, Inc.
 
 This program is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -83,7 +83,7 @@ enum lc_reason
 
    This key only has meaning in relation to a line_maps instance.  Within
    gcc there is a single line_maps instance: "line_table", declared in
-   gcc/input.h and defined in gcc/input.c.
+   gcc/input.h and defined in gcc/input.cc.
 
    The values of the keys are intended to be internal to libcpp,
    but for ease-of-understanding the implementation, they are currently
@@ -563,7 +563,7 @@ struct GTY((tag ("2"))) line_map_macro : public line_map {
 #define linemap_assert_fails(EXPR) (! (EXPR))
 #endif
 
-/* Get whether location LOC is an ad-hoc, ordinary or macro location.  */
+/* Get whether location LOC is an ordinary location.  */
 
 inline bool
 IS_ORDINARY_LOC (location_t loc)
@@ -571,16 +571,12 @@ IS_ORDINARY_LOC (location_t loc)
   return loc < LINE_MAP_MAX_LOCATION;
 }
 
+/* Get whether location LOC is an ad-hoc location.  */
+
 inline bool
 IS_ADHOC_LOC (location_t loc)
 {
   return loc > MAX_LOCATION_T;
-}
-
-inline bool
-IS_MACRO_LOC (location_t loc)
-{
-  return !IS_ORDINARY_LOC (loc) && !IS_ADHOC_LOC (loc);
 }
 
 /* Categorize line map kinds.  */
@@ -807,11 +803,11 @@ public:
   unsigned int max_column_hint;
 
   /* The allocator to use when resizing 'maps', defaults to xrealloc.  */
-  line_map_realloc reallocator;
+  line_map_realloc GTY((callback)) reallocator;
 
   /* The allocators' function used to know the actual size it
      allocated, for a certain allocation size requested.  */
-  line_map_round_alloc_size_func round_alloc_size;
+  line_map_round_alloc_size_func GTY((callback)) round_alloc_size;
 
   struct location_adhoc_data_map location_adhoc_data_map;
 
@@ -1674,6 +1670,12 @@ class rich_location
   /* Destructor.  */
   ~rich_location ();
 
+  /* The class manages the memory pointed to by the elements of
+     the M_FIXIT_HINTS vector and is not meant to be copied or
+     assigned.  */
+  rich_location (const rich_location &) = delete;
+  void operator= (const rich_location &) = delete;
+
   /* Accessors.  */
   location_t get_loc () const { return get_loc (0); }
   location_t get_loc (unsigned int idx) const;
@@ -1785,6 +1787,18 @@ class rich_location
   const diagnostic_path *get_path () const { return m_path; }
   void set_path (const diagnostic_path *path) { m_path = path; }
 
+  /* A flag for hinting that the diagnostic involves character encoding
+     issues, and thus that it will be helpful to the user if we show some
+     representation of how the characters in the pertinent source lines
+     are encoded.
+     The default is false (i.e. do not escape).
+     When set to true, non-ASCII bytes in the pertinent source lines will
+     be escaped in a manner controlled by the user-supplied option
+     -fdiagnostics-escape-format=, so that the user can better understand
+     what's going on with the encoding in their source file.  */
+  bool escape_on_output_p () const { return m_escape_on_output; }
+  void set_escape_on_output (bool flag) { m_escape_on_output = flag; }
+
 private:
   bool reject_impossible_fixit (location_t where);
   void stop_supporting_fixits ();
@@ -1811,6 +1825,7 @@ protected:
   bool m_fixits_cannot_be_auto_applied;
 
   const diagnostic_path *m_path;
+  bool m_escape_on_output;
 };
 
 /* A struct for the result of range_label::get_text: a NUL-terminated buffer
@@ -2091,8 +2106,8 @@ enum location_aspect
 
 /* The rich_location class requires a way to expand location_t instances.
    We would directly use expand_location_to_spelling_point, which is
-   implemented in gcc/input.c, but we also need to use it for rich_location
-   within genmatch.c.
+   implemented in gcc/input.cc, but we also need to use it for rich_location
+   within genmatch.cc.
    Hence we require client code of libcpp to implement the following
    symbol.  */
 extern expanded_location

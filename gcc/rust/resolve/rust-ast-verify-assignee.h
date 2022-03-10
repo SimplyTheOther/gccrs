@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -35,7 +35,7 @@ public:
     VerifyAsignee checker (parent);
     assignee->accept_vis (checker);
     if (!checker.ok)
-      rust_error_at (assignee->get_locus_slow (),
+      rust_error_at (assignee->get_locus (),
 		     "invalid left-hand side of assignment");
     return checker.ok;
   }
@@ -65,15 +65,14 @@ public:
     ok = true;
     // mark the assignment to the name
     resolver->mark_assignment_to_decl (resolved_node, parent);
-
-    // check is mutable
-    if (!resolver->decl_is_mutable (resolved_node))
-      {
-	// we only allow a single assignment to immutable decls
-	if (resolver->get_num_assignments_to_decl (resolved_node) > 1)
-	  rust_error_at (expr.get_locus (), "cannot assign to immutable");
-      }
   }
+
+  void visit (AST::DereferenceExpr &expr) override
+  {
+    expr.get_dereferenced_expr ()->accept_vis (*this);
+  }
+
+  void visit (AST::PathInExpression &expr) override { ok = true; }
 
 private:
   VerifyAsignee (NodeId parent) : ResolverBase (parent), ok (false) {}

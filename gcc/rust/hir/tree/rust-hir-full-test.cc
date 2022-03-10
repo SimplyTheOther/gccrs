@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -170,16 +170,8 @@ Item::as_string () const
 std::string
 Module::as_string () const
 {
-  std::string vis_item = VisItem::as_string ();
-
-  return vis_item + "mod " + module_name;
-}
-
-std::string
-ModuleBodied::as_string () const
-{
   // get module string for "[vis] mod [name]"
-  std::string str = Module::as_string ();
+  std::string str = VisItem::as_string () + "mod " + module_name;
 
   // inner attributes
   str += "\n inner attributes: ";
@@ -223,23 +215,13 @@ ModuleBodied::as_string () const
 }
 
 std::string
-ModuleNoBody::as_string () const
-{
-  std::string str = Module::as_string ();
-
-  str += "\n no body (reference to external file)";
-
-  return str + "\n";
-}
-
-std::string
 StaticItem::as_string () const
 {
   std::string str = VisItem::as_string ();
 
   str += indent_spaces (stay) + "static";
 
-  if (has_mut)
+  if (is_mut ())
     {
       str += " mut";
     }
@@ -685,7 +667,7 @@ Trait::as_string () const
 {
   std::string str = VisItem::as_string ();
 
-  if (has_unsafe)
+  if (unsafety == Unsafety::Unsafe)
     {
       str += "unsafe ";
     }
@@ -1048,10 +1030,7 @@ ExternBlock::as_string () const
   std::string str = VisItem::as_string ();
 
   str += "extern ";
-  if (has_abi ())
-    {
-      str += "\"" + abi + "\" ";
-    }
+  str += "\"" + get_string_from_abi (abi) + "\" ";
 
   // inner attributes
   str += "\n inner attributes: ";
@@ -1192,11 +1171,11 @@ std::string
 QualifiedPathType::as_string () const
 {
   std::string str ("<");
-  str += type_to_invoke_on->as_string ();
+  str += type->as_string ();
 
   if (has_as_clause ())
     {
-      str += " as " + trait_path.as_string ();
+      str += " as " + trait->as_string ();
     }
 
   return str + ">";
@@ -1218,7 +1197,7 @@ BorrowExpr::as_string () const
       str += "&";
     }
 
-  if (is_mut)
+  if (is_mut ())
     {
       str += "mut ";
     }
@@ -1331,6 +1310,67 @@ AssignmentExpr::as_string () const
 {
   return main_or_left_expr->as_string () + " = " + right_expr->as_string ()
 	 + "::" + get_mappings ().as_string ();
+}
+
+std::string
+CompoundAssignmentExpr::as_string () const
+{
+  std::string operator_str;
+  operator_str.reserve (1);
+
+  // get operator string
+  switch (expr_type)
+    {
+    case ArithmeticOrLogicalOperator::ADD:
+      operator_str = "+";
+      break;
+    case ArithmeticOrLogicalOperator::SUBTRACT:
+      operator_str = "-";
+      break;
+    case ArithmeticOrLogicalOperator::MULTIPLY:
+      operator_str = "*";
+      break;
+    case ArithmeticOrLogicalOperator::DIVIDE:
+      operator_str = "/";
+      break;
+    case ArithmeticOrLogicalOperator::MODULUS:
+      operator_str = "%";
+      break;
+    case ArithmeticOrLogicalOperator::BITWISE_AND:
+      operator_str = "&";
+      break;
+    case ArithmeticOrLogicalOperator::BITWISE_OR:
+      operator_str = "|";
+      break;
+    case ArithmeticOrLogicalOperator::BITWISE_XOR:
+      operator_str = "^";
+      break;
+    case ArithmeticOrLogicalOperator::LEFT_SHIFT:
+      operator_str = "<<";
+      break;
+    case ArithmeticOrLogicalOperator::RIGHT_SHIFT:
+      operator_str = ">>";
+      break;
+    default:
+      gcc_unreachable ();
+      break;
+    }
+
+  operator_str += "=";
+
+  std::string str ("CompoundAssignmentExpr: ");
+  if (main_or_left_expr == nullptr || right_expr == nullptr)
+    {
+      str += "error. this is probably a parsing failure.";
+    }
+  else
+    {
+      str += "\n left: " + main_or_left_expr->as_string ();
+      str += "\n right: " + right_expr->as_string ();
+      str += "\n operator: " + operator_str;
+    }
+
+  return str;
 }
 
 std::string
@@ -1997,17 +2037,17 @@ FunctionQualifiers::as_string () const
     case NONE:
       // do nothing
       break;
-    case CONST:
+    case CONST_FN:
       str += "const ";
       break;
-    case ASYNC:
+    case ASYNC_FN:
       str += "async ";
       break;
     default:
       return "ERROR_MARK_STRING: async-const status failure";
     }
 
-  if (has_unsafe)
+  if (unsafety == Unsafety::Unsafe)
     {
       str += "unsafe ";
     }
@@ -2015,10 +2055,7 @@ FunctionQualifiers::as_string () const
   if (has_extern)
     {
       str += "extern";
-      if (extern_abi != "")
-	{
-	  str += " \"" + extern_abi + "\"";
-	}
+      str += " \"" + get_string_from_abi (abi) + "\"";
     }
 
   return str;
@@ -2481,7 +2518,7 @@ StructPatternFieldIdent::as_string () const
       str += "ref ";
     }
 
-  if (has_mut)
+  if (is_mut ())
     {
       str += "mut ";
     }
@@ -2532,16 +2569,6 @@ StructPatternElements::as_string () const
 	}
     }
 
-  str += "\n  Etc: ";
-  if (has_struct_pattern_etc)
-    {
-      str += "true";
-    }
-  else
-    {
-      str += "false";
-    }
-
   return str;
 }
 
@@ -2588,7 +2615,7 @@ ReferencePattern::as_string () const
       str += "&";
     }
 
-  if (is_mut)
+  if (is_mut ())
     {
       str += "mut ";
     }
@@ -2608,7 +2635,7 @@ IdentifierPattern::as_string () const
       str += "ref ";
     }
 
-  if (is_mut)
+  if (is_mut ())
     {
       str += "mut ";
     }
@@ -2794,7 +2821,7 @@ ReferenceType::as_string () const
       str += lifetime.as_string () + " ";
     }
 
-  if (has_mut)
+  if (is_mut ())
     {
       str += "mut ";
     }
@@ -2911,25 +2938,6 @@ TypePathSegmentGeneric::as_string () const
 }
 
 std::string
-TraitObjectTypeOneBound::as_string () const
-{
-  std::string str ("TraitObjectTypeOneBound: \n Has dyn dispatch: ");
-
-  if (has_dyn)
-    {
-      str += "true";
-    }
-  else
-    {
-      str += "false";
-    }
-
-  str += "\n TraitBound: " + trait_bound.as_string ();
-
-  return str;
-}
-
-std::string
 TypePathFunction::as_string () const
 {
   std::string str ("(");
@@ -3009,59 +3017,6 @@ StructExpr::as_string () const
   str += indent_spaces (stay) + struct_name.as_string ();
   indent_spaces (out);
   indent_spaces (out);
-  return str;
-}
-
-std::string
-StructExprTuple::as_string () const
-{
-  std::string str = StructExpr::as_string ();
-
-  if (exprs.empty ())
-    {
-      str += "()";
-    }
-  else
-    {
-      auto i = exprs.begin ();
-      auto e = exprs.end ();
-
-      // debug - null pointer check
-      if (*i == nullptr)
-	{
-	  return "ERROR_MARK_STRING - nullptr struct expr tuple field";
-	}
-
-      str += '(';
-      for (; i != e; i++)
-	{
-	  str += (*i)->as_string ();
-	  if (e != i + 1)
-	    str += ", ";
-	}
-      str += ')';
-    }
-
-  indent_spaces (enter);
-  indent_spaces (enter);
-  // inner attributes
-  str += "\n" + indent_spaces (stay) + "inner attributes:";
-  if (inner_attrs.empty ())
-    {
-      str += "none";
-    }
-  else
-    {
-      /* note that this does not print them with "inner attribute" syntax -
-       * just the body */
-      for (const auto &attr : inner_attrs)
-	{
-	  str += "\n" + indent_spaces (stay) + attr.as_string ();
-	}
-    }
-  indent_spaces (out);
-  indent_spaces (out);
-
   return str;
 }
 
@@ -3157,23 +3112,8 @@ StructExprStructFields::as_string () const
 std::string
 EnumItem::as_string () const
 {
-  // outer attributes
-  std::string str = "outer attributes: ";
-  if (outer_attrs.empty ())
-    {
-      str += "none";
-    }
-  else
-    {
-      /* note that this does not print them with "outer attribute" syntax -
-       * just the body */
-      for (const auto &attr : outer_attrs)
-	{
-	  str += "\n  " + attr.as_string ();
-	}
-    }
-
-  str += "\n" + variant_name;
+  std::string str = Item::as_string ();
+  str += variant_name;
 
   return str;
 }
@@ -3335,7 +3275,7 @@ ExternalStaticItem::as_string () const
 
   str += "static ";
 
-  if (has_mut)
+  if (is_mut ())
     {
       str += "mut ";
     }
@@ -3507,7 +3447,7 @@ TraitFunctionDecl::as_string () const
   str += "\n Function params: ";
   if (is_method ())
     {
-      str += self.as_string ();
+      str += self.as_string () + (has_params () ? ", " : "");
     }
 
   if (has_params ())
@@ -3517,7 +3457,7 @@ TraitFunctionDecl::as_string () const
 	  str += "\n  " + param.as_string ();
 	}
     }
-  else
+  else if (!is_method ())
     {
       str += "none";
     }
@@ -3794,7 +3734,7 @@ MaybeNamedParam::as_string () const
 /* Override that calls the function recursively on all items contained within
  * the module. */
 void
-ModuleBodied::add_crate_name (std::vector<std::string> &names) const
+Module::add_crate_name (std::vector<std::string> &names) const
 {
   /* TODO: test whether module has been 'cfg'-ed out to determine whether to
    * exclude it from search */
@@ -3803,854 +3743,1538 @@ ModuleBodied::add_crate_name (std::vector<std::string> &names) const
     item->add_crate_name (names);
 }
 
+/* All accept_vis method below */
+
+void
+IdentifierExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+IdentifierExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+Lifetime::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+LifetimeParam::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+PathInExpression::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+void
+PathInExpression::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TypePathSegment::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TypePathSegmentGeneric::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TypePathSegmentFunction::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TypePath::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+QualifiedPathInExpression::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+void
+QualifiedPathInExpression::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+QualifiedPathInType::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+LiteralExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+LiteralExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+BorrowExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+BorrowExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+DereferenceExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+DereferenceExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ErrorPropagationExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ErrorPropagationExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+NegationExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+NegationExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ArithmeticOrLogicalExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ArithmeticOrLogicalExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ComparisonExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ComparisonExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+LazyBooleanExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+LazyBooleanExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TypeCastExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TypeCastExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+AssignmentExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+AssignmentExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+CompoundAssignmentExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+CompoundAssignmentExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+GroupedExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+GroupedExpr::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ArrayElemsValues::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ArrayElemsCopied::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ArrayExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ArrayIndexExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TupleExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TupleIndexExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+StructExprStruct::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+StructExprFieldIndexValue::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+StructExprStructFields::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+StructExprStructBase::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+CallExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+MethodCallExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+FieldAccessExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ClosureExprInner::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+BlockExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ClosureExprInnerTyped::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ContinueExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+BreakExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+RangeFromToExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+RangeFromExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+RangeToExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+RangeFullExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+RangeFromToInclExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+RangeToInclExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ReturnExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+UnsafeBlockExpr::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
 void
-IdentifierExpr::accept_vis (HIRVisitor &vis)
+LoopExpr::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-Lifetime::accept_vis (HIRVisitor &vis)
+WhileLoopExpr::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-LifetimeParam::accept_vis (HIRVisitor &vis)
+WhileLetLoopExpr::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-PathInExpression::accept_vis (HIRVisitor &vis)
+ForLoopExpr::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TypePathSegment::accept_vis (HIRVisitor &vis)
+IfExpr::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TypePathSegmentGeneric::accept_vis (HIRVisitor &vis)
+IfExprConseqElse::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TypePathSegmentFunction::accept_vis (HIRVisitor &vis)
+IfExprConseqIf::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TypePath::accept_vis (HIRVisitor &vis)
+IfExprConseqIfLet::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-QualifiedPathInExpression::accept_vis (HIRVisitor &vis)
+IfLetExpr::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-QualifiedPathInType::accept_vis (HIRVisitor &vis)
+IfLetExprConseqElse::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-LiteralExpr::accept_vis (HIRVisitor &vis)
+IfLetExprConseqIf::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-BorrowExpr::accept_vis (HIRVisitor &vis)
+IfLetExprConseqIfLet::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-DereferenceExpr::accept_vis (HIRVisitor &vis)
+MatchExpr::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ErrorPropagationExpr::accept_vis (HIRVisitor &vis)
+AwaitExpr::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-NegationExpr::accept_vis (HIRVisitor &vis)
+AsyncBlockExpr::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ArithmeticOrLogicalExpr::accept_vis (HIRVisitor &vis)
+TypeParam::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ComparisonExpr::accept_vis (HIRVisitor &vis)
+LifetimeWhereClauseItem::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-LazyBooleanExpr::accept_vis (HIRVisitor &vis)
+TypeBoundWhereClauseItem::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TypeCastExpr::accept_vis (HIRVisitor &vis)
+Module::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-AssignmentExpr::accept_vis (HIRVisitor &vis)
+Module::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-GroupedExpr::accept_vis (HIRVisitor &vis)
+Module::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ArrayElemsValues::accept_vis (HIRVisitor &vis)
+ExternCrate::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ArrayElemsCopied::accept_vis (HIRVisitor &vis)
+UseTreeGlob::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ArrayExpr::accept_vis (HIRVisitor &vis)
+UseTreeList::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ArrayIndexExpr::accept_vis (HIRVisitor &vis)
+UseTreeRebind::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TupleExpr::accept_vis (HIRVisitor &vis)
+UseDeclaration::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TupleIndexExpr::accept_vis (HIRVisitor &vis)
+Function::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructExprStruct::accept_vis (HIRVisitor &vis)
+TypeAlias::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructExprFieldIdentifier::accept_vis (HIRVisitor &vis)
+StructStruct::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructExprFieldIdentifierValue::accept_vis (HIRVisitor &vis)
+TupleStruct::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructExprFieldIndexValue::accept_vis (HIRVisitor &vis)
+EnumItem::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructExprStructFields::accept_vis (HIRVisitor &vis)
+EnumItemTuple::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructExprStructBase::accept_vis (HIRVisitor &vis)
+EnumItemStruct::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructExprTuple::accept_vis (HIRVisitor &vis)
+EnumItemDiscriminant::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructExprUnit::accept_vis (HIRVisitor &vis)
+Enum::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-EnumExprFieldIdentifier::accept_vis (HIRVisitor &vis)
+Union::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-EnumExprFieldIdentifierValue::accept_vis (HIRVisitor &vis)
+ConstantItem::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-EnumExprFieldIndexValue::accept_vis (HIRVisitor &vis)
+StaticItem::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-EnumExprStruct::accept_vis (HIRVisitor &vis)
+TraitItemFunc::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-EnumExprTuple::accept_vis (HIRVisitor &vis)
+TraitItemConst::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-EnumExprFieldless::accept_vis (HIRVisitor &vis)
+TraitItemType::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-CallExpr::accept_vis (HIRVisitor &vis)
+Trait::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-MethodCallExpr::accept_vis (HIRVisitor &vis)
+ImplBlock::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-FieldAccessExpr::accept_vis (HIRVisitor &vis)
+ExternalStaticItem::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ClosureExprInner::accept_vis (HIRVisitor &vis)
+ExternalFunctionItem::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-BlockExpr::accept_vis (HIRVisitor &vis)
+ExternBlock::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ClosureExprInnerTyped::accept_vis (HIRVisitor &vis)
+LiteralPattern::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ContinueExpr::accept_vis (HIRVisitor &vis)
+IdentifierPattern::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-BreakExpr::accept_vis (HIRVisitor &vis)
+WildcardPattern::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-RangeFromToExpr::accept_vis (HIRVisitor &vis)
+RangePatternBoundLiteral::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-RangeFromExpr::accept_vis (HIRVisitor &vis)
+RangePatternBoundPath::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-RangeToExpr::accept_vis (HIRVisitor &vis)
+RangePatternBoundQualPath::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-RangeFullExpr::accept_vis (HIRVisitor &vis)
+RangePattern::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-RangeFromToInclExpr::accept_vis (HIRVisitor &vis)
+ReferencePattern::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-RangeToInclExpr::accept_vis (HIRVisitor &vis)
+StructPatternFieldTuplePat::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ReturnExpr::accept_vis (HIRVisitor &vis)
+StructPatternFieldIdentPat::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-UnsafeBlockExpr::accept_vis (HIRVisitor &vis)
+StructPatternFieldIdent::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-LoopExpr::accept_vis (HIRVisitor &vis)
+StructPattern::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-WhileLoopExpr::accept_vis (HIRVisitor &vis)
+TupleStructItemsNoRange::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-WhileLetLoopExpr::accept_vis (HIRVisitor &vis)
+TupleStructItemsRange::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ForLoopExpr::accept_vis (HIRVisitor &vis)
+TupleStructPattern::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-IfExpr::accept_vis (HIRVisitor &vis)
+TuplePatternItemsMultiple::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-IfExprConseqElse::accept_vis (HIRVisitor &vis)
+TuplePatternItemsRanged::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-IfExprConseqIf::accept_vis (HIRVisitor &vis)
+TuplePattern::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-IfExprConseqIfLet::accept_vis (HIRVisitor &vis)
+GroupedPattern::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-IfLetExpr::accept_vis (HIRVisitor &vis)
+SlicePattern::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-IfLetExprConseqElse::accept_vis (HIRVisitor &vis)
+EmptyStmt::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-IfLetExprConseqIf::accept_vis (HIRVisitor &vis)
+LetStmt::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-IfLetExprConseqIfLet::accept_vis (HIRVisitor &vis)
+ExprStmtWithoutBlock::accept_vis (HIRFullVisitor &vis)
 {
   vis.visit (*this);
 }
 
-/*void
-MatchCaseBlockExpr::accept_vis (HIRVisitor &vis)
+void
+ExprStmtWithBlock::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TraitBound::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ImplTraitType::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TraitObjectType::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ParenthesisedType::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ImplTraitTypeOneBound::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TupleType::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+NeverType::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+RawPointerType::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ReferenceType::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ArrayType::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+SliceType::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+InferredType::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+BareFunctionType::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+NeverType::accept_vis (HIRTypeVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ParenthesisedType::accept_vis (HIRTypeVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+EmptyStmt::accept_vis (HIRStmtVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+GroupedPattern::accept_vis (HIRPatternVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+WildcardPattern::accept_vis (HIRPatternVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TraitItemType::accept_vis (HIRTraitItemVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TraitItemConst::accept_vis (HIRTraitItemVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TraitItemFunc::accept_vis (HIRTraitItemVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ExternalFunctionItem::accept_vis (HIRExternalItemVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ExternalStaticItem::accept_vis (HIRExternalItemVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+EnumItemDiscriminant::accept_vis (HIRStmtVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+EnumItemStruct::accept_vis (HIRStmtVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+EnumItemTuple::accept_vis (HIRStmtVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+EnumItem::accept_vis (HIRStmtVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+StructExprStructFields::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+StructExprFieldIndexValue::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+StructExprFieldIdentifierValue::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+StructExprFieldIdentifierValue::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+StructExprFieldIdentifier::accept_vis (HIRFullVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+StructExprFieldIdentifier::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+StructExprStruct::accept_vis (HIRExpressionVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TupleType::accept_vis (HIRTypeVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+SliceType::accept_vis (HIRTypeVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ArrayType::accept_vis (HIRTypeVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ImplTraitTypeOneBound::accept_vis (HIRTypeVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+BareFunctionType::accept_vis (HIRTypeVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TraitObjectType::accept_vis (HIRTypeVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+RawPointerType::accept_vis (HIRTypeVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ReferenceType::accept_vis (HIRTypeVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ImplTraitType::accept_vis (HIRTypeVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+InferredType::accept_vis (HIRTypeVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+LetStmt::accept_vis (HIRStmtVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TupleStructPattern::accept_vis (HIRPatternVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+IdentifierPattern::accept_vis (HIRPatternVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+ReferencePattern::accept_vis (HIRPatternVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+LiteralPattern::accept_vis (HIRPatternVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+StructPattern::accept_vis (HIRPatternVisitor &vis)
+{
+  vis.visit (*this);
+}
+
+void
+TuplePattern::accept_vis (HIRPatternVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-MatchCaseExpr::accept_vis (HIRVisitor &vis)
+SlicePattern::accept_vis (HIRPatternVisitor &vis)
 {
   vis.visit (*this);
-}*/
+}
 
 void
-MatchExpr::accept_vis (HIRVisitor &vis)
+RangePattern::accept_vis (HIRPatternVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-AwaitExpr::accept_vis (HIRVisitor &vis)
+ForLoopExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-AsyncBlockExpr::accept_vis (HIRVisitor &vis)
+TypePath::accept_vis (HIRTypeVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TypeParam::accept_vis (HIRVisitor &vis)
+QualifiedPathInType::accept_vis (HIRTypeVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-LifetimeWhereClauseItem::accept_vis (HIRVisitor &vis)
+ExprStmtWithoutBlock::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TypeBoundWhereClauseItem::accept_vis (HIRVisitor &vis)
+TupleExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ModuleBodied::accept_vis (HIRVisitor &vis)
+MatchExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ModuleNoBody::accept_vis (HIRVisitor &vis)
+BreakExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ExternCrate::accept_vis (HIRVisitor &vis)
+AwaitExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-UseTreeGlob::accept_vis (HIRVisitor &vis)
+ArrayExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-UseTreeList::accept_vis (HIRVisitor &vis)
+LoopExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-UseTreeRebind::accept_vis (HIRVisitor &vis)
+WhileLetLoopExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-UseDeclaration::accept_vis (HIRVisitor &vis)
+WhileLoopExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-Function::accept_vis (HIRVisitor &vis)
+CallExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TypeAlias::accept_vis (HIRVisitor &vis)
+RangeFromToInclExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructStruct::accept_vis (HIRVisitor &vis)
+IfLetExprConseqIfLet::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TupleStruct::accept_vis (HIRVisitor &vis)
+IfLetExprConseqIf::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-EnumItem::accept_vis (HIRVisitor &vis)
+IfLetExprConseqElse::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-EnumItemTuple::accept_vis (HIRVisitor &vis)
+IfLetExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-EnumItemStruct::accept_vis (HIRVisitor &vis)
+IfExprConseqIfLet::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-EnumItemDiscriminant::accept_vis (HIRVisitor &vis)
+IfExprConseqIf::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-Enum::accept_vis (HIRVisitor &vis)
+IfExprConseqElse::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-Union::accept_vis (HIRVisitor &vis)
+IfExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ConstantItem::accept_vis (HIRVisitor &vis)
+ClosureExprInner::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StaticItem::accept_vis (HIRVisitor &vis)
+UnsafeBlockExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TraitItemFunc::accept_vis (HIRVisitor &vis)
+RangeToInclExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TraitItemConst::accept_vis (HIRVisitor &vis)
+RangeFromToExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TraitItemType::accept_vis (HIRVisitor &vis)
+FieldAccessExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-Trait::accept_vis (HIRVisitor &vis)
+TupleIndexExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ImplBlock::accept_vis (HIRVisitor &vis)
+MethodCallExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ExternalStaticItem::accept_vis (HIRVisitor &vis)
+AsyncBlockExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ExternalFunctionItem::accept_vis (HIRVisitor &vis)
+ArrayIndexExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ExternBlock::accept_vis (HIRVisitor &vis)
+RangeFullExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-LiteralPattern::accept_vis (HIRVisitor &vis)
+RangeFromExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-IdentifierPattern::accept_vis (HIRVisitor &vis)
+ContinueExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-WildcardPattern::accept_vis (HIRVisitor &vis)
+RangeToExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-RangePatternBoundLiteral::accept_vis (HIRVisitor &vis)
+ReturnExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-RangePatternBoundPath::accept_vis (HIRVisitor &vis)
+QualifiedPathInExpression::accept_vis (HIRPatternVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-RangePatternBoundQualPath::accept_vis (HIRVisitor &vis)
+ClosureExprInnerTyped::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-RangePattern::accept_vis (HIRVisitor &vis)
+ExprStmtWithBlock::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ReferencePattern::accept_vis (HIRVisitor &vis)
+PathInExpression::accept_vis (HIRPatternVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructPatternFieldTuplePat::accept_vis (HIRVisitor &vis)
+ExternBlock::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructPatternFieldIdentPat::accept_vis (HIRVisitor &vis)
+ExternBlock::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructPatternFieldIdent::accept_vis (HIRVisitor &vis)
+TypeAlias::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-StructPattern::accept_vis (HIRVisitor &vis)
+TypeAlias::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TupleStructItemsNoRange::accept_vis (HIRVisitor &vis)
+TypeAlias::accept_vis (HIRImplVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TupleStructItemsRange::accept_vis (HIRVisitor &vis)
+BlockExpr::accept_vis (HIRExpressionVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TupleStructPattern::accept_vis (HIRVisitor &vis)
+Function::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TuplePatternItemsMultiple::accept_vis (HIRVisitor &vis)
+Function::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TuplePatternItemsRanged::accept_vis (HIRVisitor &vis)
+Function::accept_vis (HIRImplVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TuplePattern::accept_vis (HIRVisitor &vis)
+Union::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-GroupedPattern::accept_vis (HIRVisitor &vis)
+Union::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-SlicePattern::accept_vis (HIRVisitor &vis)
+Trait::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-EmptyStmt::accept_vis (HIRVisitor &vis)
+Trait::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-LetStmt::accept_vis (HIRVisitor &vis)
+Enum::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ExprStmtWithoutBlock::accept_vis (HIRVisitor &vis)
+Enum::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ExprStmtWithBlock::accept_vis (HIRVisitor &vis)
+UseDeclaration::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TraitBound::accept_vis (HIRVisitor &vis)
+UseDeclaration::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ImplTraitType::accept_vis (HIRVisitor &vis)
+StructStruct::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TraitObjectType::accept_vis (HIRVisitor &vis)
+StructStruct::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ParenthesisedType::accept_vis (HIRVisitor &vis)
+ImplBlock::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ImplTraitTypeOneBound::accept_vis (HIRVisitor &vis)
+ImplBlock::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TraitObjectTypeOneBound::accept_vis (HIRVisitor &vis)
+ConstantItem::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-TupleType::accept_vis (HIRVisitor &vis)
+ConstantItem::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-NeverType::accept_vis (HIRVisitor &vis)
+ConstantItem::accept_vis (HIRImplVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-RawPointerType::accept_vis (HIRVisitor &vis)
+TupleStruct::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ReferenceType::accept_vis (HIRVisitor &vis)
+TupleStruct::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-ArrayType::accept_vis (HIRVisitor &vis)
+ExternCrate::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-SliceType::accept_vis (HIRVisitor &vis)
+ExternCrate::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-InferredType::accept_vis (HIRVisitor &vis)
+StaticItem::accept_vis (HIRStmtVisitor &vis)
 {
   vis.visit (*this);
 }
 
 void
-BareFunctionType::accept_vis (HIRVisitor &vis)
+StaticItem::accept_vis (HIRVisItemVisitor &vis)
 {
   vis.visit (*this);
 }

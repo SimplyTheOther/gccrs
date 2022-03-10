@@ -1,5 +1,5 @@
 // rust-system.h -- Rust frontend inclusion of gcc header files   -*- C++ -*-
-// Copyright (C) 2009-2020 Free Software Foundation, Inc.
+// Copyright (C) 2009-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -58,6 +58,16 @@
 
 #include "diagnostic-core.h" /* For error_at and friends.  */
 #include "intl.h"	     /* For _().  */
+
+#define RUST_ATTRIBUTE_NORETURN ATTRIBUTE_NORETURN
+
+// File separator to use based on whether or not the OS we're working with is
+// DOS-based
+#if defined(HAVE_DOS_BASED_FILE_SYSTEM)
+constexpr static const char *file_separator = "\\";
+#else
+constexpr static const char *file_separator = "/";
+#endif /* HAVE_DOS_BASED_FILE_SYSTEM */
 
 // When using gcc, rust_assert is just gcc_assert.
 #define rust_assert(EXPR) gcc_assert (EXPR)

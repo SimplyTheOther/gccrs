@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -21,12 +21,16 @@
 
 #include "rust-hir-type-check-base.h"
 #include "rust-hir-full.h"
+#include "rust-system.h"
 #include "rust-tyty.h"
 #include "rust-tyty-call.h"
 #include "rust-hir-type-check-struct-field.h"
 #include "rust-hir-path-probe.h"
 #include "rust-substitution-mapper.h"
-#include "rust-hir-const-fold.h"
+#include "rust-hir-trait-resolve.h"
+#include "rust-hir-type-bounds.h"
+#include "rust-hir-dot-operator.h"
+#include "rust-hir-type-check-pattern.h"
 
 namespace Rust {
 namespace Resolver {
@@ -46,8 +50,10 @@ public:
 
     if (resolver.infered == nullptr)
       {
-	rust_error_at (expr->get_locus_slow (),
-		       "failed to type resolve expression");
+	// FIXME
+	// this is an internal error message for debugging and should be removed
+	// at some point
+	rust_error_at (expr->get_locus (), "failed to type resolve expression");
 	return new TyTy::ErrorType (expr->get_mappings ().get_hirid ());
       }
 
@@ -62,18 +68,25 @@ public:
   {
     auto resolved
       = TypeCheckExpr::Resolve (expr.get_tuple_expr ().get (), inside_loop);
-    if (resolved == nullptr)
+    if (resolved->get_kind () == TyTy::TypeKind::ERROR)
       {
-	rust_error_at (expr.get_tuple_expr ()->get_locus_slow (),
+	rust_error_at (expr.get_tuple_expr ()->get_locus (),
 		       "failed to resolve TupleIndexExpr receiver");
 	return;
+      }
+
+    // FIXME does this require autoderef here?
+    if (resolved->get_kind () == TyTy::TypeKind::REF)
+      {
+	TyTy::ReferenceType *r = static_cast<TyTy::ReferenceType *> (resolved);
+	resolved = r->get_base ();
       }
 
     bool is_valid_type = resolved->get_kind () == TyTy::TypeKind::ADT
 			 || resolved->get_kind () == TyTy::TypeKind::TUPLE;
     if (!is_valid_type)
       {
-	rust_error_at (expr.get_tuple_expr ()->get_locus_slow (),
+	rust_error_at (expr.get_tuple_expr ()->get_locus (),
 		       "Expected Tuple or ADT got: %s",
 		       resolved->as_string ().c_str ());
 	return;
@@ -103,14 +116,18 @@ public:
       }
 
     TyTy::ADTType *adt = static_cast<TyTy::ADTType *> (resolved);
+    rust_assert (!adt->is_enum ());
+    rust_assert (adt->number_of_variants () == 1);
+
+    TyTy::VariantDef *variant = adt->get_variants ().at (0);
     TupleIndex index = expr.get_tuple_index ();
-    if ((size_t) index >= adt->num_fields ())
+    if ((size_t) index >= variant->num_fields ())
       {
 	rust_error_at (expr.get_locus (), "unknown field at index %i", index);
 	return;
       }
 
-    auto field_tyty = adt->get_field ((size_t) index);
+    auto field_tyty = variant->get_field_at_index ((size_t) index);
     if (field_tyty == nullptr)
       {
 	rust_error_at (expr.get_locus (),
@@ -140,7 +157,8 @@ public:
 	auto field_ty = TypeCheckExpr::Resolve (elem.get (), false);
 	fields.push_back (TyTy::TyVar (field_ty->get_ref ()));
       }
-    infered = new TyTy::TupleType (expr.get_mappings ().get_hirid (), fields);
+    infered = new TyTy::TupleType (expr.get_mappings ().get_hirid (),
+				   expr.get_locus (), fields);
   }
 
   void visit (HIR::ReturnExpr &expr) override
@@ -148,18 +166,10 @@ public:
     auto fn_return_tyty = context->peek_return_type ();
     rust_assert (fn_return_tyty != nullptr);
 
-    TyTy::BaseType *expr_ty;
-    if (expr.has_return_expr ())
-      expr_ty = TypeCheckExpr::Resolve (expr.get_expr (), false);
-    else
-      expr_ty = new TyTy::TupleType (expr.get_mappings ().get_hirid ());
-
-    if (expr_ty == nullptr)
-      {
-	rust_error_at (expr.get_locus (),
-		       "failed to resolve type for ReturnExpr");
-	return;
-      }
+    TyTy::BaseType *expr_ty
+      = expr.has_return_expr ()
+	  ? TypeCheckExpr::Resolve (expr.get_expr (), false)
+	  : TyTy::TupleType::get_unit_type (expr.get_mappings ().get_hirid ());
 
     infered = fn_return_tyty->unify (expr_ty);
     fn_return_tyty->append_reference (expr_ty->get_ref ());
@@ -184,7 +194,33 @@ public:
 	return;
       }
 
-    infered = TyTy::TypeCheckCallExpr::go (function_tyty, expr, context);
+    TyTy::VariantDef &variant = TyTy::VariantDef::get_error_node ();
+    if (function_tyty->get_kind () == TyTy::TypeKind::ADT)
+      {
+	TyTy::ADTType *adt = static_cast<TyTy::ADTType *> (function_tyty);
+	if (adt->is_enum ())
+	  {
+	    // lookup variant id
+	    HirId variant_id;
+	    bool ok = context->lookup_variant_definition (
+	      expr.get_fnexpr ()->get_mappings ().get_hirid (), &variant_id);
+	    rust_assert (ok);
+
+	    TyTy::VariantDef *lookup_variant = nullptr;
+	    ok = adt->lookup_variant_by_id (variant_id, &lookup_variant);
+	    rust_assert (ok);
+
+	    variant = *lookup_variant;
+	  }
+	else
+	  {
+	    rust_assert (adt->number_of_variants () == 1);
+	    variant = *adt->get_variants ().at (0);
+	  }
+      }
+
+    infered
+      = TyTy::TypeCheckCallExpr::go (function_tyty, expr, variant, context);
     if (infered == nullptr)
       {
 	rust_error_at (expr.get_locus (), "failed to lookup type to CallExpr");
@@ -198,48 +234,38 @@ public:
   {
     auto receiver_tyty
       = TypeCheckExpr::Resolve (expr.get_receiver ().get (), false);
-    if (receiver_tyty == nullptr)
+    if (receiver_tyty->get_kind () == TyTy::TypeKind::ERROR)
       {
-	rust_error_at (expr.get_receiver ()->get_locus_slow (),
+	rust_error_at (expr.get_receiver ()->get_locus (),
 		       "failed to resolve receiver in MethodCallExpr");
 	return;
       }
 
     context->insert_receiver (expr.get_mappings ().get_hirid (), receiver_tyty);
 
-    // https://doc.rust-lang.org/reference/expressions/method-call-expr.html
-    // method resolution is complex in rust once we start handling generics and
-    // traits. For now we only support looking up the valid name in impl blocks
-    // which is simple. There will need to be adjustments to ensure we can turn
-    // the receiver into borrowed references etc
-
-    bool reciever_is_generic
-      = receiver_tyty->get_kind () == TyTy::TypeKind::PARAM;
-    bool probe_bounds = true;
-    bool probe_impls = !reciever_is_generic;
-    bool ignore_mandatory_trait_items = !reciever_is_generic;
-
-    auto candidates
-      = PathProbeType::Probe (receiver_tyty,
-			      expr.get_method_name ().get_segment (),
-			      probe_impls, probe_bounds,
-			      ignore_mandatory_trait_items);
-    if (candidates.size () == 0)
+    auto candidate
+      = MethodResolver::Probe (receiver_tyty,
+			       expr.get_method_name ().get_segment ());
+    if (candidate.is_error ())
       {
-	rust_error_at (expr.get_locus (),
-		       "failed to resolve the PathExprSegment to any Method");
-	return;
-      }
-    else if (candidates.size () > 1)
-      {
-	ReportMultipleCandidateError::Report (
-	  candidates, expr.get_method_name ().get_segment (),
-	  expr.get_method_name ().get_locus ());
+	rust_error_at (
+	  expr.get_method_name ().get_locus (),
+	  "failed to resolve method for %<%s%>",
+	  expr.get_method_name ().get_segment ().as_string ().c_str ());
 	return;
       }
 
-    auto resolved_candidate = candidates.at (0);
-    TyTy::BaseType *lookup_tyty = resolved_candidate.ty;
+    // Get the adjusted self
+    Adjuster adj (receiver_tyty);
+    TyTy::BaseType *adjusted_self = adj.adjust_type (candidate.adjustments);
+    adjusted_self->debug ();
+
+    // store the adjustments for code-generation to know what to do
+    context->insert_autoderef_mappings (expr.get_mappings ().get_hirid (),
+					std::move (candidate.adjustments));
+
+    PathProbeCandidate &resolved_candidate = candidate.candidate;
+    TyTy::BaseType *lookup_tyty = candidate.candidate.ty;
     NodeId resolved_node_id
       = resolved_candidate.is_impl_candidate ()
 	  ? resolved_candidate.item.impl.impl_item->get_impl_mappings ()
@@ -265,9 +291,11 @@ public:
 	return;
       }
 
-    if (receiver_tyty->get_kind () == TyTy::TypeKind::ADT)
+    auto root = receiver_tyty->get_root ();
+    bool receiver_is_type_param = root->get_kind () == TyTy::TypeKind::PARAM;
+    if (root->get_kind () == TyTy::TypeKind::ADT)
       {
-	TyTy::ADTType *adt = static_cast<TyTy::ADTType *> (receiver_tyty);
+	const TyTy::ADTType *adt = static_cast<const TyTy::ADTType *> (root);
 	if (adt->has_substitutions () && fn->needs_substitution ())
 	  {
 	    // consider the case where we have:
@@ -289,10 +317,11 @@ public:
 	    // default types GenericParams on impl blocks since these must
 	    // always be at the end of the list
 
-	    auto s = fn->get_self_type ();
+	    auto s = fn->get_self_type ()->get_root ();
 	    rust_assert (s->can_eq (adt, false));
 	    rust_assert (s->get_kind () == TyTy::TypeKind::ADT);
-	    TyTy::ADTType *self_adt = static_cast<TyTy::ADTType *> (s);
+	    const TyTy::ADTType *self_adt
+	      = static_cast<const TyTy::ADTType *> (s);
 
 	    // we need to grab the Self substitutions as the inherit type
 	    // parameters for this
@@ -318,7 +347,7 @@ public:
 	  }
       }
 
-    if (!reciever_is_generic)
+    if (!receiver_is_type_param)
       {
 	// apply any remaining generic arguments
 	if (expr.get_method_name ().has_generic_args ())
@@ -339,8 +368,11 @@ public:
 	  }
       }
 
+    // ADT expected but got PARAM
+
     TyTy::BaseType *function_ret_tyty
-      = TyTy::TypeCheckMethodCallExpr::go (lookup, expr, context);
+      = TyTy::TypeCheckMethodCallExpr::go (lookup, expr, adjusted_self,
+					   context);
     if (function_ret_tyty == nullptr
 	|| function_ret_tyty->get_kind () == TyTy::TypeKind::ERROR)
       {
@@ -362,7 +394,8 @@ public:
 
   void visit (HIR::AssignmentExpr &expr) override
   {
-    infered = new TyTy::TupleType (expr.get_mappings ().get_hirid ());
+    infered
+      = TyTy::TupleType::get_unit_type (expr.get_mappings ().get_hirid ());
 
     auto lhs = TypeCheckExpr::Resolve (expr.get_lhs (), false);
     auto rhs = TypeCheckExpr::Resolve (expr.get_rhs (), false);
@@ -409,6 +442,40 @@ public:
       result->clone ());
   }
 
+  void visit (HIR::CompoundAssignmentExpr &expr) override
+  {
+    infered
+      = TyTy::TupleType::get_unit_type (expr.get_mappings ().get_hirid ());
+
+    auto lhs = TypeCheckExpr::Resolve (expr.get_left_expr ().get (), false);
+    auto rhs = TypeCheckExpr::Resolve (expr.get_right_expr ().get (), false);
+
+    // we dont care about the result of the unify from a compound assignment
+    // since this is a unit-type expr
+    auto result = lhs->unify (rhs);
+    if (result->get_kind () == TyTy::TypeKind::ERROR)
+      return;
+
+    auto lang_item_type
+      = Analysis::RustLangItem::CompoundAssignmentOperatorToLangItem (
+	expr.get_expr_type ());
+    bool operator_overloaded
+      = resolve_operator_overload (lang_item_type, expr, lhs, rhs);
+    if (operator_overloaded)
+      return;
+
+    bool valid_lhs = validate_arithmetic_type (lhs, expr.get_expr_type ());
+    bool valid_rhs = validate_arithmetic_type (rhs, expr.get_expr_type ());
+    bool valid = valid_lhs && valid_rhs;
+    if (!valid)
+      {
+	rust_error_at (expr.get_locus (),
+		       "cannot apply this operator to types %s and %s",
+		       lhs->as_string ().c_str (), rhs->as_string ().c_str ());
+	return;
+      }
+  }
+
   void visit (HIR::IdentifierExpr &expr) override
   {
     NodeId ast_node_id = expr.get_mappings ().get_nodeid ();
@@ -422,6 +489,8 @@ public:
 	Definition def;
 	if (!resolver->lookup_definition (ref_node_id, &def))
 	  {
+	    // FIXME
+	    // this is an internal error
 	    rust_error_at (expr.get_locus (),
 			   "unknown reference for resolved name");
 	    return;
@@ -430,6 +499,8 @@ public:
       }
     else if (!resolver->lookup_resolved_type (ast_node_id, &ref_node_id))
       {
+	// FIXME
+	// this is an internal error
 	rust_error_at (expr.get_locus (),
 		       "Failed to lookup type reference for node: %s",
 		       expr.as_string ().c_str ());
@@ -438,6 +509,8 @@ public:
 
     if (ref_node_id == UNKNOWN_NODEID)
       {
+	// FIXME
+	// this is an internal error
 	rust_error_at (expr.get_locus (), "unresolved node: %s",
 		       expr.as_string ().c_str ());
 	return;
@@ -448,6 +521,8 @@ public:
     if (!mappings->lookup_node_to_hir (expr.get_mappings ().get_crate_num (),
 				       ref_node_id, &ref))
       {
+	// FIXME
+	// this is an internal error
 	rust_error_at (expr.get_locus (), "123 reverse lookup failure");
 	return;
       }
@@ -456,6 +531,8 @@ public:
     TyTy::BaseType *lookup;
     if (!context->lookup_type (ref, &lookup))
       {
+	// FIXME
+	// this is an internal error
 	rust_error_at (mappings->lookup_location (ref),
 		       "Failed to resolve IdentifierExpr type: %s",
 		       expr.as_string ().c_str ());
@@ -472,7 +549,7 @@ public:
 	case HIR::Literal::LitType::INT: {
 	  bool ok = false;
 
-	  switch (expr.get_literal ()->get_type_hint ())
+	  switch (expr.get_literal ().get_type_hint ())
 	    {
 	    case CORETYPE_I8:
 	      ok = context->lookup_builtin ("i8", &infered);
@@ -507,19 +584,20 @@ public:
 	      break;
 
 	    case CORETYPE_F32:
-	      expr.get_literal ()->set_lit_type (HIR::Literal::LitType::FLOAT);
+	      expr.get_literal ().set_lit_type (HIR::Literal::LitType::FLOAT);
 	      ok = context->lookup_builtin ("f32", &infered);
 	      break;
 	    case CORETYPE_F64:
-	      expr.get_literal ()->set_lit_type (HIR::Literal::LitType::FLOAT);
+	      expr.get_literal ().set_lit_type (HIR::Literal::LitType::FLOAT);
 	      ok = context->lookup_builtin ("f64", &infered);
 	      break;
 
 	    default:
 	      ok = true;
-	      infered = new TyTy::InferType (
-		expr.get_mappings ().get_hirid (),
-		TyTy::InferType::InferTypeKind::INTEGRAL);
+	      infered
+		= new TyTy::InferType (expr.get_mappings ().get_hirid (),
+				       TyTy::InferType::InferTypeKind::INTEGRAL,
+				       expr.get_locus ());
 	      break;
 	    }
 	  rust_assert (ok);
@@ -529,7 +607,7 @@ public:
 	case HIR::Literal::LitType::FLOAT: {
 	  bool ok = false;
 
-	  switch (expr.get_literal ()->get_type_hint ())
+	  switch (expr.get_literal ().get_type_hint ())
 	    {
 	    case CORETYPE_F32:
 	      ok = context->lookup_builtin ("f32", &infered);
@@ -542,7 +620,8 @@ public:
 	      ok = true;
 	      infered
 		= new TyTy::InferType (expr.get_mappings ().get_hirid (),
-				       TyTy::InferType::InferTypeKind::FLOAT);
+				       TyTy::InferType::InferTypeKind::FLOAT,
+				       expr.get_locus ());
 	      break;
 	    }
 	  rust_assert (ok);
@@ -572,22 +651,56 @@ public:
 	  auto ok = context->lookup_builtin ("str", &base);
 	  rust_assert (ok);
 
-	  infered
-	    = new TyTy::ReferenceType (expr.get_mappings ().get_hirid (),
-				       TyTy::TyVar (base->get_ref ()), false);
+	  infered = new TyTy::ReferenceType (expr.get_mappings ().get_hirid (),
+					     TyTy::TyVar (base->get_ref ()),
+					     Mutability::Imm);
 	}
 	break;
 
 	case HIR::Literal::LitType::BYTE_STRING: {
-	  /* We just treat this as a string, but it really is an arraytype of
-	     u8. It isn't in UTF-8, but really just a byte array.  */
-	  TyTy::BaseType *base = nullptr;
-	  auto ok = context->lookup_builtin ("str", &base);
+	  /* This is an arraytype of u8 reference (&[u8;size]). It isn't in
+	     UTF-8, but really just a byte array. Code to construct the array
+	     reference copied from ArrayElemsValues and ArrayType. */
+	  TyTy::BaseType *u8;
+	  auto ok = context->lookup_builtin ("u8", &u8);
 	  rust_assert (ok);
 
-	  infered
-	    = new TyTy::ReferenceType (expr.get_mappings ().get_hirid (),
-				       TyTy::TyVar (base->get_ref ()), false);
+	  auto crate_num = mappings->get_current_crate ();
+	  Analysis::NodeMapping capacity_mapping (crate_num, UNKNOWN_NODEID,
+						  mappings->get_next_hir_id (
+						    crate_num),
+						  UNKNOWN_LOCAL_DEFID);
+
+	  /* Capacity is the size of the string (number of chars).
+	     It is a constant, but for fold it to get a tree.  */
+	  std::string capacity_str
+	    = std::to_string (expr.get_literal ().as_string ().size ());
+	  HIR::LiteralExpr *literal_capacity
+	    = new HIR::LiteralExpr (capacity_mapping, capacity_str,
+				    HIR::Literal::LitType::INT,
+				    PrimitiveCoreType::CORETYPE_USIZE,
+				    expr.get_locus ());
+
+	  // mark the type for this implicit node
+	  TyTy::BaseType *expected_ty = nullptr;
+	  ok = context->lookup_builtin ("usize", &expected_ty);
+	  rust_assert (ok);
+	  context->insert_type (capacity_mapping, expected_ty);
+
+	  Analysis::NodeMapping array_mapping (crate_num, UNKNOWN_NODEID,
+					       mappings->get_next_hir_id (
+						 crate_num),
+					       UNKNOWN_LOCAL_DEFID);
+
+	  TyTy::ArrayType *array
+	    = new TyTy::ArrayType (array_mapping.get_hirid (),
+				   expr.get_locus (), *literal_capacity,
+				   TyTy::TyVar (u8->get_ref ()));
+	  context->insert_type (array_mapping, array);
+
+	  infered = new TyTy::ReferenceType (expr.get_mappings ().get_hirid (),
+					     TyTy::TyVar (array->get_ref ()),
+					     Mutability::Imm);
 	}
 	break;
 
@@ -604,6 +717,13 @@ public:
     auto lhs = TypeCheckExpr::Resolve (expr.get_lhs (), false);
     auto rhs = TypeCheckExpr::Resolve (expr.get_rhs (), false);
 
+    auto lang_item_type
+      = Analysis::RustLangItem::OperatorToLangItem (expr.get_expr_type ());
+    bool operator_overloaded
+      = resolve_operator_overload (lang_item_type, expr, lhs, rhs);
+    if (operator_overloaded)
+      return;
+
     bool valid_lhs = validate_arithmetic_type (lhs, expr.get_expr_type ());
     bool valid_rhs = validate_arithmetic_type (rhs, expr.get_expr_type ());
     bool valid = valid_lhs && valid_rhs;
@@ -616,8 +736,6 @@ public:
       }
 
     infered = lhs->unify (rhs);
-    infered->append_reference (lhs->get_ref ());
-    infered->append_reference (rhs->get_ref ());
   }
 
   void visit (HIR::ComparisonExpr &expr) override
@@ -629,10 +747,8 @@ public:
     if (result == nullptr || result->get_kind () == TyTy::TypeKind::ERROR)
       return;
 
-    // we expect this to be
-    infered = new TyTy::BoolType (expr.get_mappings ().get_hirid ());
-    infered->append_reference (lhs->get_ref ());
-    infered->append_reference (rhs->get_ref ());
+    bool ok = context->lookup_builtin ("bool", &infered);
+    rust_assert (ok);
   }
 
   void visit (HIR::LazyBooleanExpr &expr) override
@@ -643,23 +759,30 @@ public:
     // we expect the lhs and rhs must be bools at this point
     TyTy::BoolType elhs (expr.get_mappings ().get_hirid ());
     lhs = elhs.unify (lhs);
-    if (lhs == nullptr || lhs->get_kind () == TyTy::TypeKind::ERROR)
+    if (lhs->get_kind () == TyTy::TypeKind::ERROR)
       return;
 
     TyTy::BoolType rlhs (expr.get_mappings ().get_hirid ());
     rhs = elhs.unify (rhs);
-    if (lhs == nullptr || lhs->get_kind () == TyTy::TypeKind::ERROR)
+    if (lhs->get_kind () == TyTy::TypeKind::ERROR)
       return;
 
     infered = lhs->unify (rhs);
-    infered->append_reference (lhs->get_ref ());
-    infered->append_reference (rhs->get_ref ());
   }
 
   void visit (HIR::NegationExpr &expr) override
   {
     auto negated_expr_ty
       = TypeCheckExpr::Resolve (expr.get_expr ().get (), false);
+
+    // check for operator overload
+    auto lang_item_type = Analysis::RustLangItem::NegationOperatorToLangItem (
+      expr.get_expr_type ());
+    bool operator_overloaded
+      = resolve_operator_overload (lang_item_type, expr, negated_expr_ty,
+				   nullptr);
+    if (operator_overloaded)
+      return;
 
     // https://doc.rust-lang.org/reference/expressions/operator-expr.html#negation-operators
     switch (expr.get_expr_type ())
@@ -712,7 +835,8 @@ public:
     TypeCheckExpr::Resolve (expr.get_if_condition (), false);
     TypeCheckExpr::Resolve (expr.get_if_block (), inside_loop);
 
-    infered = new TyTy::TupleType (expr.get_mappings ().get_hirid ());
+    infered
+      = TyTy::TupleType::get_unit_type (expr.get_mappings ().get_hirid ());
   }
 
   void visit (HIR::IfExprConseqElse &expr) override
@@ -755,121 +879,79 @@ public:
       = TypeCheckExpr::Resolve (expr.get_block_expr ().get (), inside_loop);
   }
 
-  void visit (HIR::ArrayIndexExpr &expr) override
-  {
-    TyTy::BaseType *size_ty;
-    if (!context->lookup_builtin ("usize", &size_ty))
-      {
-	rust_error_at (
-	  expr.get_locus (),
-	  "Failure looking up size type for index in ArrayIndexExpr");
-	return;
-      }
-
-    auto resolved_index_expr
-      = size_ty->unify (TypeCheckExpr::Resolve (expr.get_index_expr (), false));
-    if (resolved_index_expr == nullptr)
-      {
-	rust_error_at (expr.get_index_expr ()->get_locus_slow (),
-		       "Type Resolver failure in Index for ArrayIndexExpr");
-	return;
-      }
-    context->insert_type (expr.get_index_expr ()->get_mappings (),
-			  resolved_index_expr);
-
-    // resolve the array reference
-    expr.get_array_expr ()->accept_vis (*this);
-    if (infered == nullptr)
-      {
-	rust_error_at (expr.get_index_expr ()->get_locus_slow (),
-		       "failed to resolve array reference expression");
-	return;
-      }
-    else if (infered->get_kind () != TyTy::TypeKind::ARRAY)
-      {
-	rust_error_at (expr.get_index_expr ()->get_locus_slow (),
-		       "expected an ArrayType got [%s]",
-		       infered->as_string ().c_str ());
-	infered = nullptr;
-	return;
-      }
-
-    TyTy::ArrayType *array_type = static_cast<TyTy::ArrayType *> (infered);
-    infered = array_type->get_element_type ()->clone ();
-  }
+  void visit (HIR::ArrayIndexExpr &expr) override;
 
   void visit (HIR::ArrayExpr &expr) override
   {
-    HIR::ArrayElems *elements = expr.get_internal_elements ();
-    root_array_expr_locus = expr.get_locus ();
+    HIR::ArrayElems &elements = *expr.get_internal_elements ();
 
-    elements->accept_vis (*this);
-    if (infered_array_elems == nullptr)
-      return;
-    if (folded_array_capacity == nullptr)
-      return;
-
-    infered
-      = new TyTy::ArrayType (expr.get_mappings ().get_hirid (),
-			     folded_array_capacity,
-			     TyTy::TyVar (infered_array_elems->get_ref ()));
-  }
-
-  void visit (HIR::ArrayElemsValues &elems) override
-  {
-    std::vector<TyTy::BaseType *> types;
-    elems.iterate ([&] (HIR::Expr *e) mutable -> bool {
-      types.push_back (TypeCheckExpr::Resolve (e, false));
-      return true;
-    });
-
-    infered_array_elems
-      = TyTy::TyVar::get_implicit_infer_var (root_array_expr_locus).get_tyty ();
-
-    for (auto &type : types)
+    HIR::Expr *capacity_expr = nullptr;
+    TyTy::BaseType *element_type = nullptr;
+    switch (elements.get_array_expr_type ())
       {
-	infered_array_elems = infered_array_elems->unify (type);
+	case HIR::ArrayElems::ArrayExprType::COPIED: {
+	  HIR::ArrayElemsCopied &elems
+	    = static_cast<HIR::ArrayElemsCopied &> (elements);
+	  element_type
+	    = TypeCheckExpr::Resolve (elems.get_elem_to_copy (), false);
+
+	  auto capacity_type
+	    = TypeCheckExpr::Resolve (elems.get_num_copies_expr (), false);
+
+	  TyTy::BaseType *expected_ty = nullptr;
+	  bool ok = context->lookup_builtin ("usize", &expected_ty);
+	  rust_assert (ok);
+	  context->insert_type (elems.get_num_copies_expr ()->get_mappings (),
+				expected_ty);
+
+	  auto unified = expected_ty->unify (capacity_type);
+	  if (unified->get_kind () == TyTy::TypeKind::ERROR)
+	    return;
+
+	  capacity_expr = elems.get_num_copies_expr ();
+	}
+	break;
+
+	case HIR::ArrayElems::ArrayExprType::VALUES: {
+	  HIR::ArrayElemsValues &elems
+	    = static_cast<HIR::ArrayElemsValues &> (elements);
+
+	  std::vector<TyTy::BaseType *> types;
+	  for (auto &elem : elems.get_values ())
+	    {
+	      types.push_back (TypeCheckExpr::Resolve (elem.get (), false));
+	    }
+
+	  element_type = TyTy::TyVar::get_implicit_infer_var (expr.get_locus ())
+			   .get_tyty ();
+	  for (auto &type : types)
+	    {
+	      element_type = element_type->unify (type);
+	    }
+
+	  auto crate_num = mappings->get_current_crate ();
+	  Analysis::NodeMapping mapping (crate_num, UNKNOWN_NODEID,
+					 mappings->get_next_hir_id (crate_num),
+					 UNKNOWN_LOCAL_DEFID);
+	  std::string capacity_str = std::to_string (elems.get_num_elements ());
+	  capacity_expr
+	    = new HIR::LiteralExpr (mapping, capacity_str,
+				    HIR::Literal::LitType::INT,
+				    PrimitiveCoreType::CORETYPE_USIZE,
+				    Location ());
+
+	  // mark the type for this implicit node
+	  TyTy::BaseType *expected_ty = nullptr;
+	  bool ok = context->lookup_builtin ("usize", &expected_ty);
+	  rust_assert (ok);
+	  context->insert_type (mapping, expected_ty);
+	}
+	break;
       }
-    for (auto &elem : types)
-      {
-	infered_array_elems->append_reference (elem->get_ref ());
-      }
 
-    auto crate_num = mappings->get_current_crate ();
-    Analysis::NodeMapping mapping (crate_num, UNKNOWN_NODEID,
-				   mappings->get_next_hir_id (crate_num),
-				   UNKNOWN_LOCAL_DEFID);
-    std::string capacity_str = std::to_string (elems.get_num_elements ());
-    HIR::LiteralExpr implicit_literal_capacity (
-      mapping, capacity_str, HIR::Literal::LitType::INT,
-      PrimitiveCoreType::CORETYPE_USIZE, Location ());
-
-    // mark the type for this implicit node
-    context->insert_type (mapping, new TyTy::USizeType (mapping.get_hirid ()));
-
-    folded_array_capacity
-      = ConstFold::ConstFoldExpr::fold (&implicit_literal_capacity);
-  }
-
-  void visit (HIR::ArrayElemsCopied &elems) override
-  {
-    auto capacity_type
-      = TypeCheckExpr::Resolve (elems.get_num_copies_expr (), false);
-
-    TyTy::USizeType *expected_ty = new TyTy::USizeType (
-      elems.get_num_copies_expr ()->get_mappings ().get_hirid ());
-    context->insert_type (elems.get_num_copies_expr ()->get_mappings (),
-			  expected_ty);
-
-    auto unified = expected_ty->unify (capacity_type);
-    if (unified->get_kind () == TyTy::TypeKind::ERROR)
-      return;
-
-    folded_array_capacity
-      = ConstFold::ConstFoldExpr::fold (elems.get_num_copies_expr ());
-
-    infered_array_elems
-      = TypeCheckExpr::Resolve (elems.get_elem_to_copy (), false);
+    infered = new TyTy::ArrayType (expr.get_mappings ().get_hirid (),
+				   expr.get_locus (), *capacity_expr,
+				   TyTy::TyVar (element_type->get_ref ()));
   }
 
   // empty struct
@@ -902,6 +984,14 @@ public:
     auto struct_base
       = TypeCheckExpr::Resolve (expr.get_receiver_expr ().get (), false);
 
+    // FIXME does this require autoderef here?
+    if (struct_base->get_kind () == TyTy::TypeKind::REF)
+      {
+	TyTy::ReferenceType *r
+	  = static_cast<TyTy::ReferenceType *> (struct_base);
+	struct_base = r->get_base ();
+      }
+
     bool is_valid_type = struct_base->get_kind () == TyTy::TypeKind::ADT;
     if (!is_valid_type)
       {
@@ -912,8 +1002,15 @@ public:
       }
 
     TyTy::ADTType *adt = static_cast<TyTy::ADTType *> (struct_base);
-    auto resolved = adt->get_field (expr.get_field_name ());
-    if (resolved == nullptr)
+    rust_assert (!adt->is_enum ());
+    rust_assert (adt->number_of_variants () == 1);
+
+    TyTy::VariantDef *vaiant = adt->get_variants ().at (0);
+
+    TyTy::StructFieldType *lookup = nullptr;
+    bool found
+      = vaiant->lookup_field (expr.get_field_name (), &lookup, nullptr);
+    if (!found)
       {
 	rust_error_at (expr.get_locus (), "unknown field [%s] for type [%s]",
 		       expr.get_field_name ().c_str (),
@@ -921,152 +1018,22 @@ public:
 	return;
       }
 
-    infered = resolved->get_field_type ();
+    infered = lookup->get_field_type ();
   }
 
-  void visit (HIR::PathInExpression &expr) override
-  {
-    NodeId resolved_node_id = UNKNOWN_NODEID;
+  void visit (HIR::QualifiedPathInExpression &expr) override;
 
-    size_t offset = -1;
-    TyTy::BaseType *tyseg
-      = resolve_root_path (expr, &offset, &resolved_node_id);
-    if (tyseg->get_kind () == TyTy::TypeKind::ERROR)
-      return;
-
-    if (expr.get_num_segments () == 1)
-      {
-	Location locus = expr.get_segments ().back ().get_locus ();
-
-	bool is_big_self
-	  = expr.get_segments ().front ().get_segment ().as_string ().compare (
-	      "Self")
-	    == 0;
-	if (!is_big_self && tyseg->needs_generic_substitutions ())
-	  {
-	    tyseg = SubstMapper::InferSubst (tyseg, locus);
-	  }
-
-	infered = tyseg;
-	return;
-      }
-
-    TyTy::BaseType *prev_segment = tyseg;
-    for (size_t i = offset; i < expr.get_num_segments (); i++)
-      {
-	HIR::PathExprSegment &seg = expr.get_segments ().at (i);
-
-	bool reciever_is_generic
-	  = prev_segment->get_kind () == TyTy::TypeKind::PARAM;
-	bool probe_bounds = true;
-	bool probe_impls = !reciever_is_generic;
-	bool ignore_mandatory_trait_items = !reciever_is_generic;
-
-	// probe the path
-	auto candidates
-	  = PathProbeType::Probe (tyseg, seg.get_segment (), probe_impls,
-				  probe_bounds, ignore_mandatory_trait_items);
-	if (candidates.size () == 0)
-	  {
-	    rust_error_at (
-	      seg.get_locus (),
-	      "failed to resolve path segment using an impl Probe");
-	    return;
-	  }
-	else if (candidates.size () > 1)
-	  {
-	    ReportMultipleCandidateError::Report (candidates,
-						  seg.get_segment (),
-						  seg.get_locus ());
-	    return;
-	  }
-
-	auto &candidate = candidates.at (0);
-	prev_segment = tyseg;
-	tyseg = candidate.ty;
-
-	if (candidate.is_impl_candidate ())
-	  {
-	    resolved_node_id
-	      = candidate.item.impl.impl_item->get_impl_mappings ()
-		  .get_nodeid ();
-	  }
-	else
-	  {
-	    resolved_node_id
-	      = candidate.item.trait.item_ref->get_mappings ().get_nodeid ();
-	  }
-
-	if (seg.has_generic_args ())
-	  {
-	    if (!tyseg->can_substitute ())
-	      {
-		rust_error_at (expr.get_locus (),
-			       "substitutions not supported for %s",
-			       tyseg->as_string ().c_str ());
-		return;
-	      }
-
-	    tyseg = SubstMapper::Resolve (tyseg, expr.get_locus (),
-					  &seg.get_generic_args ());
-	    if (tyseg->get_kind () == TyTy::TypeKind::ERROR)
-	      return;
-	  }
-      }
-
-    context->insert_receiver (expr.get_mappings ().get_hirid (), prev_segment);
-    if (tyseg->needs_generic_substitutions ())
-      {
-	Location locus = expr.get_segments ().back ().get_locus ();
-	if (!prev_segment->needs_generic_substitutions ())
-	  {
-	    auto used_args_in_prev_segment
-	      = GetUsedSubstArgs::From (prev_segment);
-	    if (!used_args_in_prev_segment.is_error ())
-	      tyseg = SubstMapperInternal::Resolve (tyseg,
-						    used_args_in_prev_segment);
-	  }
-	else
-	  {
-	    tyseg = SubstMapper::InferSubst (tyseg, locus);
-	  }
-
-	if (tyseg->get_kind () == TyTy::TypeKind::ERROR)
-	  return;
-      }
-
-    rust_assert (resolved_node_id != UNKNOWN_NODEID);
-
-    // lookup if the name resolver was able to canonically resolve this or not
-    NodeId path_resolved_id = UNKNOWN_NODEID;
-    if (resolver->lookup_resolved_name (expr.get_mappings ().get_nodeid (),
-					&path_resolved_id))
-      {
-	rust_assert (path_resolved_id == resolved_node_id);
-      }
-    // check the type scope
-    else if (resolver->lookup_resolved_type (expr.get_mappings ().get_nodeid (),
-					     &path_resolved_id))
-      {
-	rust_assert (path_resolved_id == resolved_node_id);
-      }
-    else
-      {
-	resolver->insert_resolved_name (expr.get_mappings ().get_nodeid (),
-					resolved_node_id);
-      }
-
-    infered = tyseg;
-  }
+  void visit (HIR::PathInExpression &expr) override;
 
   void visit (HIR::LoopExpr &expr) override
   {
-    context->push_new_loop_context (expr.get_mappings ().get_hirid ());
+    context->push_new_loop_context (expr.get_mappings ().get_hirid (),
+				    expr.get_locus ());
     TyTy::BaseType *block_expr
       = TypeCheckExpr::Resolve (expr.get_loop_block ().get (), true);
     if (!block_expr->is_unit ())
       {
-	rust_error_at (expr.get_loop_block ()->get_locus_slow (),
+	rust_error_at (expr.get_loop_block ()->get_locus (),
 		       "expected %<()%> got %s",
 		       block_expr->as_string ().c_str ());
 	return;
@@ -1080,9 +1047,10 @@ public:
 	    && (((TyTy::InferType *) loop_context_type)->get_infer_kind ()
 		!= TyTy::InferType::GENERAL));
 
-    infered = loop_context_type_infered
-		? loop_context_type
-		: new TyTy::TupleType (expr.get_mappings ().get_hirid ());
+    infered
+      = loop_context_type_infered
+	  ? loop_context_type
+	  : TyTy::TupleType::get_unit_type (expr.get_mappings ().get_hirid ());
   }
 
   void visit (HIR::WhileLoopExpr &expr) override
@@ -1095,14 +1063,15 @@ public:
 
     if (!block_expr->is_unit ())
       {
-	rust_error_at (expr.get_loop_block ()->get_locus_slow (),
+	rust_error_at (expr.get_loop_block ()->get_locus (),
 		       "expected %<()%> got %s",
 		       block_expr->as_string ().c_str ());
 	return;
       }
 
     context->pop_loop_context ();
-    infered = new TyTy::TupleType (expr.get_mappings ().get_hirid ());
+    infered
+      = TyTy::TupleType::get_unit_type (expr.get_mappings ().get_hirid ());
   }
 
   void visit (HIR::BreakExpr &expr) override
@@ -1150,17 +1119,33 @@ public:
     TyTy::BaseType *resolved_base
       = TypeCheckExpr::Resolve (expr.get_expr ().get (), false);
 
-    // FIXME double_reference
+    if (expr.get_is_double_borrow ())
+      {
+	// FIXME double_reference
+	gcc_unreachable ();
+      }
 
     infered = new TyTy::ReferenceType (expr.get_mappings ().get_hirid (),
 				       TyTy::TyVar (resolved_base->get_ref ()),
-				       expr.get_is_mut ());
+				       expr.get_mut ());
   }
 
   void visit (HIR::DereferenceExpr &expr) override
   {
     TyTy::BaseType *resolved_base
       = TypeCheckExpr::Resolve (expr.get_expr ().get (), false);
+
+    auto lang_item_type = Analysis::RustLangItem::ItemType::DEREF;
+    bool operator_overloaded
+      = resolve_operator_overload (lang_item_type, expr, resolved_base,
+				   nullptr);
+    if (operator_overloaded)
+      {
+	// operator overloaded deref always refurns a reference type lets assert
+	// this
+	rust_assert (infered->get_kind () == TyTy::TypeKind::REF);
+	resolved_base = infered;
+      }
 
     bool is_valid_type
       = resolved_base->get_kind () == TyTy::TypeKind::REF
@@ -1196,146 +1181,82 @@ public:
     infered = expr_to_convert->cast (tyty_to_convert_to);
   }
 
-private:
-  TypeCheckExpr (bool inside_loop)
-    : TypeCheckBase (), infered (nullptr), infered_array_elems (nullptr),
-      folded_array_capacity (nullptr), inside_loop (inside_loop)
-  {}
-
-  TyTy::BaseType *resolve_root_path (HIR::PathInExpression &expr,
-				     size_t *offset,
-				     NodeId *root_resolved_node_id)
+  void visit (HIR::MatchExpr &expr) override
   {
-    TyTy::BaseType *root_tyty = nullptr;
-    *offset = 0;
-    for (size_t i = 0; i < expr.get_num_segments (); i++)
+    // this needs to perform a least upper bound coercion on the blocks and then
+    // unify the scruintee and arms
+    TyTy::BaseType *scrutinee_tyty
+      = TypeCheckExpr::Resolve (expr.get_scrutinee_expr ().get (), false);
+
+    std::vector<TyTy::BaseType *> kase_block_tys;
+    for (auto &kase : expr.get_match_cases ())
       {
-	HIR::PathExprSegment &seg = expr.get_segments ().at (i);
-	bool is_root = *offset == 0;
-	NodeId ast_node_id = seg.get_mappings ().get_nodeid ();
+	// lets check the arms
+	HIR::MatchArm &kase_arm = kase.get_arm ();
+	for (auto &pattern : kase_arm.get_patterns ())
+	  {
+	    TyTy::BaseType *kase_arm_ty
+	      = TypeCheckPattern::Resolve (pattern.get (), scrutinee_tyty);
 
-	// then lookup the reference_node_id
-	NodeId ref_node_id = UNKNOWN_NODEID;
-	if (resolver->lookup_resolved_name (ast_node_id, &ref_node_id))
-	  {
-	    // these ref_node_ids will resolve to a pattern declaration but we
-	    // are interested in the definition that this refers to get the
-	    // parent id
-	    Definition def;
-	    if (!resolver->lookup_definition (ref_node_id, &def))
-	      {
-		rust_error_at (expr.get_locus (),
-			       "unknown reference for resolved name");
-		return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
-	      }
-	    ref_node_id = def.parent;
-	  }
-	else
-	  {
-	    resolver->lookup_resolved_type (ast_node_id, &ref_node_id);
+	    TyTy::BaseType *checked_kase = scrutinee_tyty->unify (kase_arm_ty);
+	    if (checked_kase->get_kind () == TyTy::TypeKind::ERROR)
+	      return;
 	  }
 
-	if (ref_node_id == UNKNOWN_NODEID)
-	  {
-	    if (is_root)
-	      {
-		rust_error_at (seg.get_locus (),
-			       "failed to type resolve root segment");
-		return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
-	      }
-	    return root_tyty;
-	  }
-
-	// node back to HIR
-	HirId ref;
-	if (!mappings->lookup_node_to_hir (
-	      expr.get_mappings ().get_crate_num (), ref_node_id, &ref))
-	  {
-	    if (is_root)
-	      {
-		rust_error_at (seg.get_locus (), "456 reverse lookup failure");
-		rust_debug_loc (
-		  seg.get_locus (),
-		  "failure with [%s] mappings [%s] ref_node_id [%u]",
-		  seg.as_string ().c_str (),
-		  seg.get_mappings ().as_string ().c_str (), ref_node_id);
-
-		return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
-	      }
-	    return root_tyty;
-	  }
-
-	// FIXME
-	// modules are not going to have an explicit TyTy.In this case we
-	// can probably do some kind of check. By looking up if the HirId ref
-	// node is a module and continue. If the path expression is single
-	// segment of module we can error with expected value but found module
-	// or something.
-	//
-	// Something like this
-	//
-	// bool seg_is_module = mappings->lookup_module (ref);
-	// if (seg_is_module)
-	//   {
-	//     if (have_more_segments)
-	//       continue;
-	//
-	//     rust_error_at (seg.get_locus (), "expected value");
-	//     return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
-	//   }
-
-	TyTy::BaseType *lookup = nullptr;
-	if (!context->lookup_type (ref, &lookup))
-	  {
-	    if (is_root)
-	      {
-		rust_error_at (seg.get_locus (),
-			       "failed to resolve root segment");
-		return new TyTy::ErrorType (expr.get_mappings ().get_hirid ());
-	      }
-	    return root_tyty;
-	  }
-
-	// if we have a previous segment type
-	if (root_tyty != nullptr)
-	  {
-	    // if this next segment needs substitution we must apply the
-	    // previous type arguments
-	    //
-	    // such as: GenericStruct::<_>::new(123, 456)
-	    if (lookup->needs_generic_substitutions ())
-	      {
-		if (!root_tyty->needs_generic_substitutions ())
-		  {
-		    auto used_args_in_prev_segment
-		      = GetUsedSubstArgs::From (root_tyty);
-		    lookup = SubstMapperInternal::Resolve (
-		      lookup, used_args_in_prev_segment);
-		  }
-	      }
-	  }
-
-	// turbo-fish segment path::<ty>
-	if (seg.has_generic_args ())
-	  {
-	    if (!lookup->can_substitute ())
-	      {
-		rust_error_at (seg.get_locus (),
-			       "substitutions not supported for %s",
-			       lookup->as_string ().c_str ());
-		return new TyTy::ErrorType (lookup->get_ref ());
-	      }
-	    lookup = SubstMapper::Resolve (lookup, expr.get_locus (),
-					   &seg.get_generic_args ());
-	  }
-
-	*root_resolved_node_id = ref_node_id;
-	*offset = *offset + 1;
-	root_tyty = lookup;
+	// check the kase type
+	TyTy::BaseType *kase_block_ty
+	  = TypeCheckExpr::Resolve (kase.get_expr ().get (), false);
+	kase_block_tys.push_back (kase_block_ty);
       }
 
-    return root_tyty;
+    if (kase_block_tys.size () == 0)
+      {
+	infered
+	  = TyTy::TupleType::get_unit_type (expr.get_mappings ().get_hirid ());
+	return;
+      }
+
+    infered = kase_block_tys.at (0);
+    for (size_t i = 1; i < kase_block_tys.size (); i++)
+      {
+	TyTy::BaseType *kase_ty = kase_block_tys.at (i);
+	infered = infered->unify (kase_ty);
+	if (infered->get_kind () == TyTy::TypeKind::ERROR)
+	  return;
+      }
   }
+
+  void visit (HIR::RangeFromToExpr &expr) override;
+
+  void visit (HIR::RangeFromExpr &expr) override;
+
+  void visit (HIR::RangeToExpr &expr) override;
+
+  void visit (HIR::RangeFullExpr &expr) override;
+
+  void visit (HIR::RangeFromToInclExpr &expr) override;
+
+protected:
+  bool
+  resolve_operator_overload (Analysis::RustLangItem::ItemType lang_item_type,
+			     HIR::OperatorExprMeta expr, TyTy::BaseType *lhs,
+			     TyTy::BaseType *rhs);
+
+private:
+  TypeCheckExpr (bool inside_loop)
+    : TypeCheckBase (), infered (nullptr), inside_loop (inside_loop)
+  {}
+
+  // Beware: currently returns Tyty::ErrorType or nullptr in case of error.
+  TyTy::BaseType *resolve_root_path (HIR::PathInExpression &expr,
+				     size_t *offset,
+				     NodeId *root_resolved_node_id);
+
+  void resolve_segments (NodeId root_resolved_node_id,
+			 std::vector<HIR::PathExprSegment> &segments,
+			 size_t offset, TyTy::BaseType *tyseg,
+			 const Analysis::NodeMapping &expr_mappings,
+			 Location expr_locus);
 
   bool
   validate_arithmetic_type (TyTy::BaseType *type,
@@ -1392,14 +1313,8 @@ private:
   /* The return value of TypeCheckExpr::Resolve */
   TyTy::BaseType *infered;
 
-  /* The return value of visit(ArrayElemsValues&) and visit(ArrayElemsCopied&)
-     Stores the type of array elements, if `expr` is ArrayExpr. */
-  TyTy::BaseType *infered_array_elems;
-  Bexpression *folded_array_capacity;
-  Location root_array_expr_locus;
-
   bool inside_loop;
-}; // namespace Resolver
+};
 
 } // namespace Resolver
 } // namespace Rust

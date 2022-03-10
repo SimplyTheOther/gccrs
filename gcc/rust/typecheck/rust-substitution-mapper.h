@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -90,10 +90,41 @@ public:
       resolved = concrete;
   }
 
+  void visit (TyTy::PlaceholderType &type) override
+  {
+    rust_assert (type.can_resolve ());
+    resolved = SubstMapper::Resolve (type.resolve (), locus, generics);
+  }
+
+  void visit (TyTy::ProjectionType &type) override
+  {
+    TyTy::ProjectionType *concrete = nullptr;
+    if (!have_generic_args ())
+      {
+	TyTy::BaseType *substs = type.infer_substitions (locus);
+	rust_assert (substs->get_kind () == TyTy::TypeKind::ADT);
+	concrete = static_cast<TyTy::ProjectionType *> (substs);
+      }
+    else
+      {
+	TyTy::SubstitutionArgumentMappings mappings
+	  = type.get_mappings_from_generic_args (*generics);
+	if (mappings.is_error ())
+	  return;
+
+	concrete = type.handle_substitions (mappings);
+      }
+
+    if (concrete != nullptr)
+      resolved = concrete;
+  }
+
+  // nothing to do for these
   void visit (TyTy::InferType &) override { gcc_unreachable (); }
   void visit (TyTy::TupleType &) override { gcc_unreachable (); }
   void visit (TyTy::FnPtr &) override { gcc_unreachable (); }
   void visit (TyTy::ArrayType &) override { gcc_unreachable (); }
+  void visit (TyTy::SliceType &) override { gcc_unreachable (); }
   void visit (TyTy::BoolType &) override { gcc_unreachable (); }
   void visit (TyTy::IntType &) override { gcc_unreachable (); }
   void visit (TyTy::UintType &) override { gcc_unreachable (); }
@@ -107,7 +138,8 @@ public:
   void visit (TyTy::ParamType &) override { gcc_unreachable (); }
   void visit (TyTy::StrType &) override { gcc_unreachable (); }
   void visit (TyTy::NeverType &) override { gcc_unreachable (); }
-  void visit (TyTy::PlaceholderType &) override { gcc_unreachable (); }
+  void visit (TyTy::DynamicObjectType &) override { gcc_unreachable (); }
+  void visit (TyTy::ClosureType &) override { gcc_unreachable (); }
 
 private:
   SubstMapper (HirId ref, HIR::GenericArgs *generics, Location locus)
@@ -123,13 +155,10 @@ class SubstMapperInternal : public TyTy::TyVisitor
 {
 public:
   static TyTy::BaseType *Resolve (TyTy::BaseType *base,
-				  TyTy::SubstitutionArgumentMappings &mappings)
-  {
-    SubstMapperInternal mapper (base->get_ref (), mappings);
-    base->accept_vis (mapper);
-    rust_assert (mapper.resolved != nullptr);
-    return mapper.resolved;
-  }
+				  TyTy::SubstitutionArgumentMappings &mappings);
+
+  static bool mappings_are_bound (TyTy::BaseType *ty,
+				  TyTy::SubstitutionArgumentMappings &mappings);
 
   void visit (TyTy::FnType &type) override
   {
@@ -176,10 +205,27 @@ public:
     resolved = type.handle_substitions (mappings);
   }
 
+  void visit (TyTy::PlaceholderType &type) override
+  {
+    rust_assert (type.can_resolve ());
+    resolved = SubstMapperInternal::Resolve (type.resolve (), mappings);
+  }
+
+  void visit (TyTy::ProjectionType &type) override
+  {
+    resolved = type.handle_substitions (mappings);
+  }
+
+  void visit (TyTy::ClosureType &type) override
+  {
+    resolved = type.handle_substitions (mappings);
+  }
+
   // nothing to do for these
   void visit (TyTy::InferType &) override { gcc_unreachable (); }
   void visit (TyTy::FnPtr &) override { gcc_unreachable (); }
   void visit (TyTy::ArrayType &) override { gcc_unreachable (); }
+  void visit (TyTy::SliceType &) override { gcc_unreachable (); }
   void visit (TyTy::BoolType &) override { gcc_unreachable (); }
   void visit (TyTy::IntType &) override { gcc_unreachable (); }
   void visit (TyTy::UintType &) override { gcc_unreachable (); }
@@ -190,7 +236,7 @@ public:
   void visit (TyTy::CharType &) override { gcc_unreachable (); }
   void visit (TyTy::StrType &) override { gcc_unreachable (); }
   void visit (TyTy::NeverType &) override { gcc_unreachable (); }
-  void visit (TyTy::PlaceholderType &) override { gcc_unreachable (); }
+  void visit (TyTy::DynamicObjectType &) override { gcc_unreachable (); }
 
 private:
   SubstMapperInternal (HirId ref, TyTy::SubstitutionArgumentMappings &mappings)
@@ -230,10 +276,19 @@ public:
     resolved = to_sub->handle_substitions (type.get_substitution_arguments ());
   }
 
+  void visit (TyTy::ClosureType &type) override
+  {
+    rust_assert (type.was_substituted ());
+
+    TyTy::ClosureType *to_sub = static_cast<TyTy::ClosureType *> (receiver);
+    resolved = to_sub->handle_substitions (type.get_substitution_arguments ());
+  }
+
   void visit (TyTy::InferType &) override { gcc_unreachable (); }
   void visit (TyTy::TupleType &) override { gcc_unreachable (); }
   void visit (TyTy::FnPtr &) override { gcc_unreachable (); }
   void visit (TyTy::ArrayType &) override { gcc_unreachable (); }
+  void visit (TyTy::SliceType &) override { gcc_unreachable (); }
   void visit (TyTy::BoolType &) override { gcc_unreachable (); }
   void visit (TyTy::IntType &) override { gcc_unreachable (); }
   void visit (TyTy::UintType &) override { gcc_unreachable (); }
@@ -248,6 +303,8 @@ public:
   void visit (TyTy::StrType &) override { gcc_unreachable (); }
   void visit (TyTy::NeverType &) override { gcc_unreachable (); }
   void visit (TyTy::PlaceholderType &) override { gcc_unreachable (); }
+  void visit (TyTy::ProjectionType &) override { gcc_unreachable (); }
+  void visit (TyTy::DynamicObjectType &) override { gcc_unreachable (); }
 
 private:
   SubstMapperFromExisting (TyTy::BaseType *concrete, TyTy::BaseType *receiver)
@@ -260,44 +317,52 @@ private:
   TyTy::BaseType *resolved;
 };
 
-class GetUsedSubstArgs : public TyTy::TyVisitor
+class GetUsedSubstArgs : public TyTy::TyConstVisitor
 {
 public:
-  static TyTy::SubstitutionArgumentMappings From (TyTy::BaseType *from)
+  static TyTy::SubstitutionArgumentMappings From (const TyTy::BaseType *from)
   {
     GetUsedSubstArgs mapper;
     from->accept_vis (mapper);
     return mapper.args;
   }
 
-  void visit (TyTy::FnType &type) override
+  void visit (const TyTy::FnType &type) override
   {
     args = type.get_substitution_arguments ();
   }
 
-  void visit (TyTy::ADTType &type) override
+  void visit (const TyTy::ADTType &type) override
   {
     args = type.get_substitution_arguments ();
   }
 
-  void visit (TyTy::InferType &) override {}
-  void visit (TyTy::TupleType &) override {}
-  void visit (TyTy::FnPtr &) override {}
-  void visit (TyTy::ArrayType &) override {}
-  void visit (TyTy::BoolType &) override {}
-  void visit (TyTy::IntType &) override {}
-  void visit (TyTy::UintType &) override {}
-  void visit (TyTy::FloatType &) override {}
-  void visit (TyTy::USizeType &) override {}
-  void visit (TyTy::ISizeType &) override {}
-  void visit (TyTy::ErrorType &) override {}
-  void visit (TyTy::CharType &) override {}
-  void visit (TyTy::ReferenceType &) override {}
-  void visit (TyTy::PointerType &) override {}
-  void visit (TyTy::ParamType &) override {}
-  void visit (TyTy::StrType &) override {}
-  void visit (TyTy::NeverType &) override {}
-  void visit (TyTy::PlaceholderType &) override {}
+  void visit (const TyTy::ClosureType &type) override
+  {
+    args = type.get_substitution_arguments ();
+  }
+
+  void visit (const TyTy::InferType &) override {}
+  void visit (const TyTy::TupleType &) override {}
+  void visit (const TyTy::FnPtr &) override {}
+  void visit (const TyTy::ArrayType &) override {}
+  void visit (const TyTy::SliceType &) override {}
+  void visit (const TyTy::BoolType &) override {}
+  void visit (const TyTy::IntType &) override {}
+  void visit (const TyTy::UintType &) override {}
+  void visit (const TyTy::FloatType &) override {}
+  void visit (const TyTy::USizeType &) override {}
+  void visit (const TyTy::ISizeType &) override {}
+  void visit (const TyTy::ErrorType &) override {}
+  void visit (const TyTy::CharType &) override {}
+  void visit (const TyTy::ReferenceType &) override {}
+  void visit (const TyTy::PointerType &) override {}
+  void visit (const TyTy::ParamType &) override {}
+  void visit (const TyTy::StrType &) override {}
+  void visit (const TyTy::NeverType &) override {}
+  void visit (const TyTy::PlaceholderType &) override {}
+  void visit (const TyTy::ProjectionType &) override {}
+  void visit (const TyTy::DynamicObjectType &) override {}
 
 private:
   GetUsedSubstArgs () : args (TyTy::SubstitutionArgumentMappings::error ()) {}

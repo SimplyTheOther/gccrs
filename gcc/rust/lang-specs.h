@@ -1,5 +1,5 @@
 /* lang-specs.h -- gcc driver specs for Rust frontend.
-   Copyright (C) 2009-2020 Free Software Foundation, Inc.
+   Copyright (C) 2009-2022 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -17,7 +17,7 @@
    along with GCC; see the file COPYING3.  If not see
    <http://www.gnu.org/licenses/>.  */
 
-/* This is the contribution to the `default_compilers' array in gcc.c
+/* This is the contribution to the `default_compilers' array in gcc.cc
    for the Rust language.  */
 
 {".rs", "@rs", 0, 1, 0},

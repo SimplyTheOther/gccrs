@@ -40,6 +40,7 @@ pub mod module
 
     ///
     mod doc { }
+
     /**/
     /***/
   }

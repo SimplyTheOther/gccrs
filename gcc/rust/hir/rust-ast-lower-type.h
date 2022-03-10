@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -28,6 +28,7 @@ namespace HIR {
 
 class ASTLowerTypePath : public ASTLoweringBase
 {
+protected:
   using Rust::HIR::ASTLoweringBase::visit;
 
 public:
@@ -59,22 +60,20 @@ public:
 
   void visit (AST::TypePath &path) override
   {
-    std::vector<std::unique_ptr<HIR::TypePathSegment> > translated_segments;
+    std::vector<std::unique_ptr<HIR::TypePathSegment>> translated_segments;
 
-    path.iterate_segments ([&] (AST::TypePathSegment *seg) mutable -> bool {
-      translated_segment = nullptr;
-      seg->accept_vis (*this);
-      if (translated_segment == nullptr)
-	{
-	  rust_fatal_error (seg->get_locus (),
-			    "failed to translate AST TypePathSegment");
-	  return false;
-	}
-
-      translated_segments.push_back (
-	std::unique_ptr<HIR::TypePathSegment> (translated_segment));
-      return true;
-    });
+    for (auto &seg : path.get_segments ())
+      {
+	translated_segment = nullptr;
+	seg->accept_vis (*this);
+	if (translated_segment == nullptr)
+	  {
+	    rust_fatal_error (seg->get_locus (),
+			      "failed to translate AST TypePathSegment");
+	  }
+	translated_segments.push_back (
+	  std::unique_ptr<HIR::TypePathSegment> (translated_segment));
+      }
 
     auto crate_num = mappings->get_current_crate ();
     auto hirid = mappings->get_next_hir_id (crate_num);
@@ -88,9 +87,30 @@ public:
     mappings->insert_hir_type (crate_num, hirid, translated);
   }
 
+protected:
+  HIR::TypePathSegment *translated_segment;
+
 private:
   HIR::TypePath *translated;
-  HIR::TypePathSegment *translated_segment;
+};
+
+class ASTLowerQualifiedPathInType : public ASTLowerTypePath
+{
+  using ASTLowerTypePath::visit;
+
+public:
+  static HIR::QualifiedPathInType *translate (AST::QualifiedPathInType &type)
+  {
+    ASTLowerQualifiedPathInType resolver;
+    type.accept_vis (resolver);
+    rust_assert (resolver.translated != nullptr);
+    return resolver.translated;
+  }
+
+  void visit (AST::QualifiedPathInType &path) override;
+
+private:
+  HIR::QualifiedPathInType *translated;
 };
 
 class ASTLoweringType : public ASTLoweringBase
@@ -106,8 +126,7 @@ public:
     rust_assert (resolver.translated != nullptr);
     resolver.mappings->insert_location (
       resolver.translated->get_mappings ().get_crate_num (),
-      resolver.translated->get_mappings ().get_hirid (),
-      type->get_locus_slow ());
+      resolver.translated->get_mappings ().get_hirid (), type->get_locus ());
 
     return resolver.translated;
   }
@@ -116,8 +135,8 @@ public:
   {
     bool is_variadic = false;
     std::vector<HIR::LifetimeParam> lifetime_params;
-    HIR::FunctionQualifiers qualifiers (
-      HIR::FunctionQualifiers::AsyncConstStatus::NONE, false);
+    HIR::FunctionQualifiers qualifiers
+      = lower_qualifiers (fntype.get_function_qualifiers ());
 
     std::vector<HIR::MaybeNamedParam> named_params;
     for (auto &param : fntype.get_function_params ())
@@ -167,7 +186,7 @@ public:
 
   void visit (AST::TupleType &tuple) override
   {
-    std::vector<std::unique_ptr<HIR::Type> > elems;
+    std::vector<std::unique_ptr<HIR::Type>> elems;
     for (auto &e : tuple.get_elems ())
       {
 	HIR::Type *t = ASTLoweringType::translate (e.get ());
@@ -186,6 +205,11 @@ public:
   void visit (AST::TypePath &path) override
   {
     translated = ASTLowerTypePath::translate (path);
+  }
+
+  void visit (AST::QualifiedPathInType &path) override
+  {
+    translated = ASTLowerQualifiedPathInType::translate (path);
   }
 
   void visit (AST::ArrayType &type) override
@@ -221,7 +245,9 @@ public:
 				   mappings->get_next_hir_id (crate_num),
 				   mappings->get_next_localdef_id (crate_num));
 
-    translated = new HIR::ReferenceType (mapping, type.get_has_mut (),
+    translated = new HIR::ReferenceType (mapping,
+					 type.get_has_mut () ? Mutability::Mut
+							     : Mutability::Imm,
 					 std::unique_ptr<HIR::Type> (base_type),
 					 type.get_locus (), lifetime);
 
@@ -242,7 +268,9 @@ public:
     translated
       = new HIR::RawPointerType (mapping,
 				 type.get_pointer_type ()
-				   == AST::RawPointerType::PointerType::MUT,
+				     == AST::RawPointerType::PointerType::MUT
+				   ? Mutability::Mut
+				   : Mutability::Imm,
 				 std::unique_ptr<HIR::Type> (base_type),
 				 type.get_locus ());
 
@@ -263,6 +291,10 @@ public:
 			       translated);
   }
 
+  void visit (AST::TraitObjectTypeOneBound &type) override;
+
+  void visit (AST::TraitObjectType &type) override;
+
 private:
   ASTLoweringType () : ASTLoweringBase (), translated (nullptr) {}
 
@@ -282,8 +314,7 @@ public:
     rust_assert (resolver.translated != nullptr);
     resolver.mappings->insert_location (
       resolver.translated->get_mappings ().get_crate_num (),
-      resolver.translated->get_mappings ().get_hirid (),
-      param->get_locus_slow ());
+      resolver.translated->get_mappings ().get_hirid (), param->get_locus ());
     resolver.mappings->insert_hir_generic_param (
       resolver.translated->get_mappings ().get_crate_num (),
       resolver.translated->get_mappings ().get_hirid (), resolver.translated);
@@ -309,7 +340,7 @@ public:
   void visit (AST::TypeParam &param) override
   {
     AST::Attribute outer_attr = AST::Attribute::create_empty ();
-    std::vector<std::unique_ptr<HIR::TypeParamBound> > type_param_bounds;
+    std::vector<std::unique_ptr<HIR::TypeParamBound>> type_param_bounds;
     if (param.has_type_param_bounds ())
       {
 	for (auto &bound : param.get_type_param_bounds ())
@@ -356,7 +387,7 @@ public:
     resolver.mappings->insert_location (
       resolver.translated->get_mappings ().get_crate_num (),
       resolver.translated->get_mappings ().get_hirid (),
-      resolver.translated->get_locus_slow ());
+      resolver.translated->get_locus ());
 
     return resolver.translated;
   }
@@ -389,6 +420,73 @@ private:
   ASTLoweringTypeBounds () : ASTLoweringBase (), translated (nullptr) {}
 
   HIR::TypeParamBound *translated;
+};
+
+class ASTLowerWhereClauseItem : public ASTLoweringBase
+{
+  using Rust::HIR::ASTLoweringBase::visit;
+
+public:
+  static HIR::WhereClauseItem *translate (AST::WhereClauseItem &item)
+  {
+    ASTLowerWhereClauseItem compiler;
+    item.accept_vis (compiler);
+    rust_assert (compiler.translated != nullptr);
+    return compiler.translated;
+  }
+
+  void visit (AST::LifetimeWhereClauseItem &item) override
+  {
+    HIR::Lifetime l = lower_lifetime (item.get_lifetime ());
+    std::vector<HIR::Lifetime> lifetime_bounds;
+    for (auto &lifetime_bound : item.get_lifetime_bounds ())
+      {
+	HIR::Lifetime ll = lower_lifetime (lifetime_bound);
+	lifetime_bounds.push_back (std::move (ll));
+      }
+
+    auto crate_num = mappings->get_current_crate ();
+    Analysis::NodeMapping mapping (crate_num, item.get_node_id (),
+				   mappings->get_next_hir_id (crate_num),
+				   UNKNOWN_LOCAL_DEFID);
+
+    translated = new HIR::LifetimeWhereClauseItem (mapping, std::move (l),
+						   std::move (lifetime_bounds),
+						   item.get_locus ());
+  }
+
+  void visit (AST::TypeBoundWhereClauseItem &item) override
+  {
+    // FIXME
+    std::vector<HIR::LifetimeParam> for_lifetimes;
+
+    std::unique_ptr<HIR::Type> bound_type = std::unique_ptr<HIR::Type> (
+      ASTLoweringType::translate (item.get_type ().get ()));
+
+    std::vector<std::unique_ptr<HIR::TypeParamBound>> type_param_bounds;
+    for (auto &bound : item.get_type_param_bounds ())
+      {
+	HIR::TypeParamBound *b
+	  = ASTLoweringTypeBounds::translate (bound.get ());
+	type_param_bounds.push_back (std::unique_ptr<HIR::TypeParamBound> (b));
+      }
+
+    auto crate_num = mappings->get_current_crate ();
+    Analysis::NodeMapping mapping (crate_num, item.get_node_id (),
+				   mappings->get_next_hir_id (crate_num),
+				   UNKNOWN_LOCAL_DEFID);
+
+    translated
+      = new HIR::TypeBoundWhereClauseItem (mapping, std::move (for_lifetimes),
+					   std::move (bound_type),
+					   std::move (type_param_bounds),
+					   item.get_locus ());
+  }
+
+private:
+  ASTLowerWhereClauseItem () : ASTLoweringBase (), translated (nullptr) {}
+
+  HIR::WhereClauseItem *translated;
 };
 
 } // namespace HIR

@@ -1,5 +1,5 @@
 # Target Makefile Fragment for OpenRISC
-# Copyright (C) 2018-2021 Free Software Foundation, Inc.
+# Copyright (C) 2018-2022 Free Software Foundation, Inc.
 # Contributed by Stafford Horne.
 #
 # This file is part of GCC.
@@ -21,6 +21,6 @@
 comma=,
 MULTILIB_OPTIONS = $(subst $(comma), ,$(TM_MULTILIB_CONFIG))
 
-or1k-rust.o: $(srcdir)/config/or1k/or1k-rust.c \
+or1k-rust.o: $(srcdir)/config/or1k/or1k-rust.cc \
   $(CONFIG_H) $(SYSTEM_H) coretypes.h $(TM_H) $(TREE_H) $(C_COMMON_H)
 	$(COMPILER) -c $(ALL_COMPILERFLAGS) $(ALL_CPPFLAGS) $(INCLUDES) $<

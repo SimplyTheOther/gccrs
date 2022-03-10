@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -83,6 +83,13 @@ TypeCheckContext::insert_type (const Analysis::NodeMapping &mappings,
   resolved[id] = type;
 }
 
+void
+TypeCheckContext::insert_implicit_type (HirId id, TyTy::BaseType *type)
+{
+  rust_assert (type != nullptr);
+  resolved[id] = type;
+}
+
 bool
 TypeCheckContext::lookup_type (HirId id, TyTy::BaseType **type)
 {
@@ -115,19 +122,26 @@ TypeCheckContext::lookup_type_by_node_id (NodeId ref, HirId *id)
 TyTy::BaseType *
 TypeCheckContext::peek_return_type ()
 {
-  return return_type_stack.back ();
+  return return_type_stack.back ().second;
 }
 
 void
-TypeCheckContext::push_return_type (TyTy::BaseType *return_type)
+TypeCheckContext::push_return_type (TypeCheckContextItem item,
+				    TyTy::BaseType *return_type)
 {
-  return_type_stack.push_back (return_type);
+  return_type_stack.push_back ({std::move (item), return_type});
 }
 
 void
 TypeCheckContext::pop_return_type ()
 {
   return_type_stack.pop_back ();
+}
+
+TypeCheckContextItem &
+TypeCheckContext::peek_context ()
+{
+  return return_type_stack.back ().first;
 }
 
 } // namespace Resolver

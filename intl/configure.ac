@@ -32,6 +32,20 @@ else
 fi
 AC_SUBST(MAINT)
 
+dnl Variables for tags utilities; based on automake 1.16.4+'s init.m4
+if test -z "$CTAGS"; then
+  CTAGS=ctags
+fi
+AC_SUBST([CTAGS])
+if test -z "$ETAGS"; then
+  ETAGS=etags
+fi
+AC_SUBST([ETAGS])
+if test -z "$MKID"; then
+  MKID=mkid
+fi
+AC_SUBST([MKID])
+
 # Additional info for config.intl.
 AC_SUBST(LIBINTL_DEP)
 AC_SUBST(INCINTL)
@@ -68,6 +82,12 @@ changequote([,])dnl
 fi
 AC_SUBST(BISON3_YES)
 AC_SUBST(BISON3_NO)
+
+AC_ARG_ENABLE(host-shared,
+[AS_HELP_STRING([--enable-host-shared],
+		[build host code as shared libraries])],
+[PICFLAG=-fPIC], [PICFLAG=])
+AC_SUBST(PICFLAG)
 
 AC_CONFIG_FILES(Makefile config.intl)
 AC_OUTPUT

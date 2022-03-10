@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -22,9 +22,6 @@
 
 #include "rust-system.h"
 #include "rust-hir-map.h"
-
-// gccrs imports
-// required for AST::Token
 #include "rust-token.h"
 #include "rust-location.h"
 
@@ -32,7 +29,6 @@ namespace Rust {
 // TODO: remove typedefs and make actual types for these
 typedef std::string Identifier;
 typedef int TupleIndex;
-
 struct Session;
 
 namespace AST {
@@ -47,34 +43,6 @@ enum DelimType
   SQUARE,
   CURLY
 };
-
-// Base AST node object - TODO is this really required or useful? Where to draw
-// line?
-/*class Node {
-  public:
-    // Gets node's Location.
-    Location get_locus() const {
-	return loc;
-    }
-
-    // Sets node's Location.
-    void set_locus(Location loc_) {
-	loc = loc_;
-    }
-
-    // Get node output as a string. Pure virtual.
-    virtual std::string as_string() const = 0;
-
-    virtual ~Node() {}
-
-    // TODO: constructor including Location? Make all derived classes have
-Location?
-
-  private:
-    // The node's location.
-    Location loc;
-};*/
-// decided to not have node as a "node" would never need to be stored
 
 // forward decl for use in token tree method
 class Token;
@@ -108,9 +76,18 @@ protected:
 class MacroMatch
 {
 public:
+  enum MacroMatchType
+  {
+    Fragment,
+    Repetition,
+    Matcher,
+    Tok
+  };
+
   virtual ~MacroMatch () {}
 
   virtual std::string as_string () const = 0;
+  virtual Location get_match_locus () const = 0;
 
   // Unique pointer custom clone function
   std::unique_ptr<MacroMatch> clone_macro_match () const
@@ -119,6 +96,8 @@ public:
   }
 
   virtual void accept_vis (ASTVisitor &vis) = 0;
+
+  virtual MacroMatchType get_macro_match_type () const = 0;
 
 protected:
   // pure virtual clone implementation
@@ -217,6 +196,7 @@ public:
   }
 
   std::string as_string () const override;
+  Location get_match_locus () const override { return tok_ref->get_locus (); };
 
   void accept_vis (ASTVisitor &vis) override;
 
@@ -224,6 +204,7 @@ public:
   std::vector<std::unique_ptr<Token> > to_token_stream () const override;
 
   TokenId get_id () const { return tok_ref->get_id (); }
+  const std::string &get_str () const { return tok_ref->get_str (); }
 
   Location get_locus () const { return tok_ref->get_locus (); }
 
@@ -231,6 +212,11 @@ public:
 
   // Get a new token pointer copy.
   const_TokenPtr get_tok_ptr () const { return tok_ref; }
+
+  MacroMatchType get_macro_match_type () const override
+  {
+    return MacroMatchType::Tok;
+  }
 
 protected:
   // No virtual for now as not polymorphic but can be in future
@@ -259,10 +245,8 @@ public:
   {
     CHAR,
     STRING,
-    RAW_STRING,
     BYTE,
     BYTE_STRING,
-    RAW_BYTE_STRING,
     INT,
     FLOAT,
     BOOL
@@ -457,6 +441,8 @@ public:
 
   Location get_locus () const { return locus; }
 
+  AttrInput &get_attr_input () const { return *attr_input; }
+
   /* e.g.:
       #![crate_type = "lib"]
       #[test]
@@ -542,6 +528,13 @@ protected:
 class AttrInput
 {
 public:
+  enum AttrInputType
+  {
+    LITERAL,
+    META_ITEM,
+    TOKEN_TREE,
+  };
+
   virtual ~AttrInput () {}
 
   // Unique pointer custom clone function
@@ -563,6 +556,8 @@ public:
 
   // Returns whether attr input has been parsed to meta item syntax.
   virtual bool is_meta_item () const = 0;
+
+  virtual AttrInputType get_attr_input_type () const = 0;
 
 protected:
   // pure virtual clone implementation
@@ -649,6 +644,11 @@ public:
   void accept_vis (ASTVisitor &vis) override;
 
   bool check_cfg_predicate (const Session &session) const override;
+
+  AttrInputType get_attr_input_type () const final override
+  {
+    return AttrInput::AttrInputType::META_ITEM;
+  }
 
   // Clones this object.
   std::unique_ptr<AttrInputMetaItemContainer>
@@ -767,6 +767,18 @@ public:
   }
 
   bool is_meta_item () const override { return false; }
+
+  AttrInputType get_attr_input_type () const final override
+  {
+    return AttrInput::AttrInputType::TOKEN_TREE;
+  }
+
+  std::vector<std::unique_ptr<TokenTree> > &get_token_trees ()
+  {
+    return token_trees;
+  }
+
+  DelimType get_delim_type () const { return delim_type; }
 };
 
 /* Forward decl - definition moved to rust-expr.h as it requires LiteralExpr to
@@ -797,7 +809,7 @@ class MetaWord;
 class MetaListPaths;
 
 // Forward decl - defined in rust-macro.h
-struct MetaListNameValueStr;
+class MetaListNameValueStr;
 
 /* Base statement abstract class. Note that most "statements" are not allowed in
  * top-level module scope - only a subclass of statements called "items" are. */
@@ -816,13 +828,13 @@ public:
 
   virtual void accept_vis (ASTVisitor &vis) = 0;
 
-  /* HACK: slow way of getting location from base expression through virtual
-   * methods. */
-  virtual Location get_locus_slow () const { return Location (); }
+  virtual Location get_locus () const = 0;
 
   virtual void mark_for_strip () = 0;
   virtual bool is_marked_for_strip () const = 0;
   NodeId get_node_id () const { return node_id; }
+
+  virtual bool is_item () const = 0;
 
 protected:
   Stmt () : node_id (Analysis::Mappings::get ()->get_next_node_id ()) {}
@@ -848,6 +860,10 @@ public:
   virtual void
   add_crate_name (std::vector<std::string> &names ATTRIBUTE_UNUSED) const
   {}
+
+  // FIXME: ARTHUR: Is it okay to have removed that final? Is it *required*
+  // behavior that we have items that can also be expressions?
+  bool is_item () const override { return true; }
 
 protected:
   // Clone function implementation as pure virtual method
@@ -885,9 +901,7 @@ public:
 
   virtual ~Expr () {}
 
-  /* HACK: slow way of getting location from base expression through virtual
-   * methods. */
-  virtual Location get_locus_slow () const { return Location (); }
+  virtual Location get_locus () const = 0;
 
   // HACK: strictly not needed, but faster than full downcast clone
   virtual bool is_expr_without_block () const = 0;
@@ -945,6 +959,8 @@ public:
   {
     return clone_expr_without_block_impl ();
   }
+
+  virtual ExprWithoutBlock *to_stmt () const { return clone_expr_impl (); }
 };
 
 /* HACK: IdentifierExpr, delete when figure out identifier vs expr problem in
@@ -966,8 +982,7 @@ public:
 
   std::string as_string () const override { return ident; }
 
-  Location get_locus () const { return locus; }
-  Location get_locus_slow () const final override { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   Identifier get_ident () const { return ident; }
 
@@ -1019,26 +1034,18 @@ public:
   virtual ~Pattern () {}
 
   virtual std::string as_string () const = 0;
-
   virtual void accept_vis (ASTVisitor &vis) = 0;
 
   // as only one kind of pattern can be stripped, have default of nothing
   virtual void mark_for_strip () {}
   virtual bool is_marked_for_strip () const { return false; }
 
-  /* HACK: slow way of getting location from base expression through virtual
-   * methods. */
-  virtual Location get_locus_slow () const = 0;
-
-  virtual NodeId get_node_id () const { return node_id; }
+  virtual Location get_locus () const = 0;
+  virtual NodeId get_pattern_node_id () const = 0;
 
 protected:
   // Clone pattern implementation as pure virtual method
   virtual Pattern *clone_pattern_impl () const = 0;
-
-  Pattern () : node_id (Analysis::Mappings::get ()->get_next_node_id ()) {}
-
-  NodeId node_id;
 };
 
 // forward decl for Type
@@ -1071,7 +1078,7 @@ public:
   virtual void mark_for_strip () {}
   virtual bool is_marked_for_strip () const { return false; }
 
-  virtual Location get_locus_slow () const = 0;
+  virtual Location get_locus () const = 0;
 
   NodeId get_node_id () const { return node_id; }
 
@@ -1128,7 +1135,7 @@ public:
 
   NodeId get_node_id () const { return node_id; }
 
-  virtual Location get_locus_slow () const = 0;
+  virtual Location get_locus () const = 0;
 
 protected:
   // Clone function implementation as pure virtual method
@@ -1185,9 +1192,7 @@ public:
 
   LifetimeType get_lifetime_type () { return lifetime_type; }
 
-  Location get_locus () const { return locus; }
-
-  Location get_locus_slow () const override final { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
   std::string get_lifetime_name () const { return lifetime_name; }
 
@@ -1217,7 +1222,7 @@ public:
 
   virtual void accept_vis (ASTVisitor &vis) = 0;
 
-  virtual Location get_locus_slow () const = 0;
+  virtual Location get_locus () const = 0;
 
   NodeId get_node_id () { return node_id; }
 
@@ -1270,9 +1275,7 @@ public:
 
   void accept_vis (ASTVisitor &vis) override;
 
-  Location get_locus () const { return locus; }
-
-  Location get_locus_slow () const override final { return get_locus (); }
+  Location get_locus () const override final { return locus; }
 
 protected:
   /* Use covariance to implement clone function as returning this object rather
@@ -1342,7 +1345,7 @@ public:
   virtual void mark_for_strip () = 0;
   virtual bool is_marked_for_strip () const = 0;
 
-  virtual Location get_locus_slow () const = 0;
+  virtual Location get_locus () const = 0;
 };
 
 // Abstract base class for items used in a trait impl
@@ -1477,90 +1480,158 @@ public:
   }
 };
 
-/* A macro invocation item (or statement) AST node (i.e. semi-coloned macro
- * invocation) */
-class MacroInvocationSemi : public MacroItem,
-			    public TraitItem,
-			    public InherentImplItem,
-			    public TraitImplItem,
-			    public ExternalItem
+class SingleASTNode
 {
-  std::vector<Attribute> outer_attrs;
-  MacroInvocData invoc_data;
-  Location locus;
-
 public:
-  std::string as_string () const override;
+  enum NodeType
+  {
+    EXPRESSION,
+    ITEM,
+    STMT,
+  };
 
-  MacroInvocationSemi (MacroInvocData invoc_data,
-		       std::vector<Attribute> outer_attrs, Location locus)
-    : outer_attrs (std::move (outer_attrs)),
-      invoc_data (std::move (invoc_data)), locus (locus)
+  SingleASTNode (std::unique_ptr<Expr> expr)
+    : type (EXPRESSION), expr (std::move (expr)), item (nullptr), stmt (nullptr)
   {}
 
-  void accept_vis (ASTVisitor &vis) override;
+  SingleASTNode (std::unique_ptr<Item> item)
+    : type (ITEM), expr (nullptr), item (std::move (item)), stmt (nullptr)
+  {}
 
-  // Clones this macro invocation semi.
-  std::unique_ptr<MacroInvocationSemi> clone_macro_invocation_semi () const
+  SingleASTNode (std::unique_ptr<Stmt> stmt)
+    : type (STMT), expr (nullptr), item (nullptr), stmt (std::move (stmt))
+  {}
+
+  SingleASTNode (SingleASTNode const &other)
   {
-    return std::unique_ptr<MacroInvocationSemi> (
-      clone_macro_invocation_semi_impl ());
+    type = other.type;
+    switch (type)
+      {
+      case EXPRESSION:
+	expr = other.expr->clone_expr ();
+	break;
+
+      case ITEM:
+	item = other.item->clone_item ();
+	break;
+
+      case STMT:
+	stmt = other.stmt->clone_stmt ();
+	break;
+      }
   }
 
-  void mark_for_strip () override { invoc_data.mark_for_strip (); }
-  bool is_marked_for_strip () const override
+  SingleASTNode operator= (SingleASTNode const &other)
   {
-    return invoc_data.is_marked_for_strip ();
+    type = other.type;
+    switch (type)
+      {
+      case EXPRESSION:
+	expr = other.expr->clone_expr ();
+	break;
+
+      case ITEM:
+	item = other.item->clone_item ();
+	break;
+
+      case STMT:
+	stmt = other.stmt->clone_stmt ();
+	break;
+      }
+    return *this;
   }
 
-  // TODO: this mutable getter seems really dodgy. Think up better way.
-  const std::vector<Attribute> &get_outer_attrs () const { return outer_attrs; }
-  std::vector<Attribute> &get_outer_attrs () { return outer_attrs; }
+  SingleASTNode (SingleASTNode &&other) = default;
+  SingleASTNode &operator= (SingleASTNode &&other) = default;
 
-  Location get_locus () const { return locus; }
-
-  Location get_locus_slow () const override { return get_locus (); }
-
-protected:
-  MacroInvocationSemi *clone_macro_invocation_semi_impl () const
+  std::unique_ptr<Expr> &get_expr ()
   {
-    return new MacroInvocationSemi (*this);
+    rust_assert (type == EXPRESSION);
+    return expr;
   }
 
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  MacroInvocationSemi *clone_item_impl () const final override
+  std::unique_ptr<Item> &get_item ()
   {
-    return clone_macro_invocation_semi_impl ();
+    rust_assert (type == ITEM);
+    return item;
   }
 
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  MacroInvocationSemi *clone_inherent_impl_item_impl () const final override
+  std::unique_ptr<Stmt> &get_stmt ()
   {
-    return clone_macro_invocation_semi_impl ();
+    rust_assert (type == STMT);
+    return stmt;
   }
 
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  MacroInvocationSemi *clone_trait_impl_item_impl () const final override
+  void accept_vis (ASTVisitor &vis)
   {
-    return clone_macro_invocation_semi_impl ();
+    switch (type)
+      {
+      case EXPRESSION:
+	expr->accept_vis (vis);
+	break;
+
+      case ITEM:
+	item->accept_vis (vis);
+	break;
+
+      case STMT:
+	stmt->accept_vis (vis);
+	break;
+      }
   }
 
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  MacroInvocationSemi *clone_trait_item_impl () const final override
+private:
+  NodeType type;
+
+  // FIXME make this a union
+  std::unique_ptr<Expr> expr;
+  std::unique_ptr<Item> item;
+  std::unique_ptr<Stmt> stmt;
+};
+
+/* Basically, a "fragment" that can be incorporated into the AST, created as
+ * a result of macro expansion. Really annoying to work with due to the fact
+ * that macros can really expand to anything. As such, horrible representation
+ * at the moment. */
+class ASTFragment
+{
+private:
+  /* basic idea: essentially, a vector of tagged unions of different AST node
+   * types. Now, this could actually be stored without a tagged union if the
+   * different AST node types had a unified parent, but that would create
+   * issues with the diamond problem or significant performance penalties. So
+   * a tagged union had to be used instead. A vector is used to represent the
+   * ability for a macro to expand to two statements, for instance. */
+
+  std::vector<SingleASTNode> nodes;
+
+public:
+  ASTFragment (std::vector<SingleASTNode> nodes) : nodes (std::move (nodes)) {}
+
+  ASTFragment (ASTFragment const &other)
   {
-    return clone_macro_invocation_semi_impl ();
+    nodes.clear ();
+    nodes.reserve (other.nodes.size ());
+    for (auto &n : other.nodes)
+      {
+	nodes.push_back (n);
+      }
   }
 
-  /* Use covariance to implement clone function as returning this object
-   * rather than base */
-  MacroInvocationSemi *clone_external_item_impl () const final override
+  ASTFragment &operator= (ASTFragment const &other)
   {
-    return clone_macro_invocation_semi_impl ();
+    nodes.clear ();
+    nodes.reserve (other.nodes.size ());
+    for (auto &n : other.nodes)
+      {
+	nodes.push_back (n);
+      }
+    return *this;
   }
+
+  static ASTFragment create_empty () { return ASTFragment ({}); }
+
+  std::vector<SingleASTNode> &get_nodes () { return nodes; }
 };
 
 // A crate AST object - holds all the data for a single compilation unit

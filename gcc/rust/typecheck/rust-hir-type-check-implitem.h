@@ -1,4 +1,4 @@
-// Copyright (C) 2020 Free Software Foundation, Inc.
+// Copyright (C) 2020-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -33,9 +33,9 @@ class TypeCheckTopLevelExternItem : public TypeCheckBase
   using Rust::Resolver::TypeCheckBase::visit;
 
 public:
-  static void Resolve (HIR::ExternalItem *item)
+  static void Resolve (HIR::ExternalItem *item, const HIR::ExternBlock &parent)
   {
-    TypeCheckTopLevelExternItem resolver;
+    TypeCheckTopLevelExternItem resolver (parent);
     item->accept_vis (resolver);
   }
 
@@ -77,7 +77,8 @@ public:
 
     TyTy::BaseType *ret_type = nullptr;
     if (!function.has_return_type ())
-      ret_type = new TyTy::TupleType (function.get_mappings ().get_hirid ());
+      ret_type = TyTy::TupleType::get_unit_type (
+	function.get_mappings ().get_hirid ());
     else
       {
 	auto resolved
@@ -100,8 +101,14 @@ public:
 	// get the name as well required for later on
 	auto param_tyty = TypeCheckType::Resolve (param.get_type ().get ());
 
+	// these are implicit mappings and not used
+	auto crate_num = mappings->get_current_crate ();
+	Analysis::NodeMapping mapping (crate_num, mappings->get_next_node_id (),
+				       mappings->get_next_hir_id (crate_num),
+				       UNKNOWN_LOCAL_DEFID);
+
 	HIR::IdentifierPattern *param_pattern = new HIR::IdentifierPattern (
-	  param.get_param_name (), Location (), false, false,
+	  mapping, param.get_param_name (), Location (), false, Mutability::Imm,
 	  std::unique_ptr<HIR::Pattern> (nullptr));
 
 	params.push_back (
@@ -111,20 +118,30 @@ public:
 	context->insert_type (param.get_mappings (), param_tyty);
       }
 
-    uint8_t flags = FNTYPE_IS_EXTERN_FLAG;
+    uint8_t flags = TyTy::FnType::FNTYPE_IS_EXTERN_FLAG;
     if (function.is_variadic ())
-      flags |= FNTYPE_IS_VARADIC_FLAG;
+      flags |= TyTy::FnType::FNTYPE_IS_VARADIC_FLAG;
 
-    auto fnType
-      = new TyTy::FnType (function.get_mappings ().get_hirid (),
-			  function.get_mappings ().get_defid (),
-			  function.get_item_name (), flags, std::move (params),
-			  ret_type, std::move (substitutions));
+    RustIdent ident{
+      CanonicalPath::new_seg (function.get_mappings ().get_nodeid (),
+			      function.get_item_name ()),
+      function.get_locus ()};
+
+    auto fnType = new TyTy::FnType (function.get_mappings ().get_hirid (),
+				    function.get_mappings ().get_defid (),
+				    function.get_item_name (), ident, flags,
+				    parent.get_abi (), std::move (params),
+				    ret_type, std::move (substitutions));
+
     context->insert_type (function.get_mappings (), fnType);
   }
 
 private:
-  TypeCheckTopLevelExternItem () : TypeCheckBase () {}
+  TypeCheckTopLevelExternItem (const HIR::ExternBlock &parent)
+    : TypeCheckBase (), parent (parent)
+  {}
+
+  const HIR::ExternBlock &parent;
 };
 
 class TypeCheckTopLevelImplItem : public TypeCheckBase
@@ -146,6 +163,11 @@ public:
       = TypeCheckType::Resolve (alias.get_type_aliased ().get ());
 
     context->insert_type (alias.get_mappings (), actual_type);
+
+    for (auto &where_clause_item : alias.get_where_clause ().get_items ())
+      {
+	ResolveWhereClauseItem::Resolve (*where_clause_item.get ());
+      }
   }
 
   void visit (HIR::ConstantItem &constant) override
@@ -155,9 +177,6 @@ public:
       = TypeCheckExpr::Resolve (constant.get_expr (), false);
 
     context->insert_type (constant.get_mappings (), type->unify (expr_type));
-
-    // notify the constant folder of this
-    ConstFold::ConstFoldItem::fold (constant);
   }
 
   void visit (HIR::Function &function) override
@@ -187,9 +206,15 @@ public:
 	  }
       }
 
+    for (auto &where_clause_item : function.get_where_clause ().get_items ())
+      {
+	ResolveWhereClauseItem::Resolve (*where_clause_item.get ());
+      }
+
     TyTy::BaseType *ret_type = nullptr;
     if (!function.has_function_return_type ())
-      ret_type = new TyTy::TupleType (function.get_mappings ().get_hirid ());
+      ret_type = TyTy::TupleType::get_unit_type (
+	function.get_mappings ().get_hirid ());
     else
       {
 	auto resolved
@@ -209,17 +234,58 @@ public:
     std::vector<std::pair<HIR::Pattern *, TyTy::BaseType *> > params;
     if (function.is_method ())
       {
+	// these are implicit mappings and not used
+	auto crate_num = mappings->get_current_crate ();
+	Analysis::NodeMapping mapping (crate_num, mappings->get_next_node_id (),
+				       mappings->get_next_hir_id (crate_num),
+				       UNKNOWN_LOCAL_DEFID);
+
 	// add the synthetic self param at the front, this is a placeholder for
 	// compilation to know parameter names. The types are ignored but we
 	// reuse the HIR identifier pattern which requires it
 	HIR::SelfParam &self_param = function.get_self_param ();
 	HIR::IdentifierPattern *self_pattern = new HIR::IdentifierPattern (
-	  "self", self_param.get_locus (), self_param.is_ref (),
-	  self_param.is_mut (), std::unique_ptr<HIR::Pattern> (nullptr));
-	context->insert_type (self_param.get_mappings (), self->clone ());
+	  mapping, "self", self_param.get_locus (), self_param.is_ref (),
+	  self_param.get_mut (), std::unique_ptr<HIR::Pattern> (nullptr));
+
+	// might have a specified type
+	TyTy::BaseType *self_type = nullptr;
+	if (self_param.has_type ())
+	  {
+	    std::unique_ptr<HIR::Type> &specified_type = self_param.get_type ();
+	    self_type = TypeCheckType::Resolve (specified_type.get ());
+	  }
+	else
+	  {
+	    switch (self_param.get_self_kind ())
+	      {
+	      case HIR::SelfParam::IMM:
+	      case HIR::SelfParam::MUT:
+		self_type = self->clone ();
+		break;
+
+	      case HIR::SelfParam::IMM_REF:
+		self_type = new TyTy::ReferenceType (
+		  self_param.get_mappings ().get_hirid (),
+		  TyTy::TyVar (self->get_ref ()), Mutability::Imm);
+		break;
+
+	      case HIR::SelfParam::MUT_REF:
+		self_type = new TyTy::ReferenceType (
+		  self_param.get_mappings ().get_hirid (),
+		  TyTy::TyVar (self->get_ref ()), Mutability::Mut);
+		break;
+
+	      default:
+		gcc_unreachable ();
+		return;
+	      }
+	  }
+
+	context->insert_type (self_param.get_mappings (), self_type);
 	params.push_back (
 	  std::pair<HIR::Pattern *, TyTy::BaseType *> (self_pattern,
-						       self->clone ()));
+						       self_type));
       }
 
     for (auto &param : function.get_function_params ())
@@ -233,11 +299,22 @@ public:
 	context->insert_type (param.get_mappings (), param_tyty);
       }
 
-    auto fnType = new TyTy::FnType (
-      function.get_mappings ().get_hirid (),
-      function.get_mappings ().get_defid (), function.get_function_name (),
-      function.is_method () ? FNTYPE_IS_METHOD_FLAG : FNTYPE_DEFAULT_FLAGS,
-      std::move (params), ret_type, std::move (substitutions));
+    const CanonicalPath *canonical_path = nullptr;
+    bool ok = mappings->lookup_canonical_path (
+      function.get_mappings ().get_crate_num (),
+      function.get_mappings ().get_nodeid (), &canonical_path);
+    rust_assert (ok);
+
+    RustIdent ident{*canonical_path, function.get_locus ()};
+    auto fnType = new TyTy::FnType (function.get_mappings ().get_hirid (),
+				    function.get_mappings ().get_defid (),
+				    function.get_function_name (), ident,
+				    function.is_method ()
+				      ? TyTy::FnType::FNTYPE_IS_METHOD_FLAG
+				      : TyTy::FnType::FNTYPE_DEFAULT_FLAGS,
+				    ABI::RUST, std::move (params), ret_type,
+				    std::move (substitutions));
+
     context->insert_type (function.get_mappings (), fnType);
   }
 
@@ -257,9 +334,10 @@ class TypeCheckImplItem : public TypeCheckBase
 public:
   using Rust::Resolver::TypeCheckBase::visit;
 
-  static void Resolve (HIR::ImplItem *item, TyTy::BaseType *self)
+  static void Resolve (HIR::ImplBlock *parent, HIR::ImplItem *item,
+		       TyTy::BaseType *self)
   {
-    TypeCheckImplItem resolver (self);
+    TypeCheckImplItem resolver (parent, self);
     item->accept_vis (resolver);
   }
 
@@ -283,7 +361,8 @@ public:
     // need to get the return type from this
     TyTy::FnType *resolve_fn_type = static_cast<TyTy::FnType *> (lookup);
     auto expected_ret_tyty = resolve_fn_type->get_return_type ();
-    context->push_return_type (expected_ret_tyty);
+    context->push_return_type (TypeCheckContextItem (parent, &function),
+			       expected_ret_tyty);
 
     auto block_expr_ty
       = TypeCheckExpr::Resolve (function.get_definition ().get (), false);
@@ -293,8 +372,11 @@ public:
   }
 
 protected:
-  TypeCheckImplItem (TyTy::BaseType *self) : TypeCheckBase (), self (self) {}
+  TypeCheckImplItem (HIR::ImplBlock *parent, TyTy::BaseType *self)
+    : TypeCheckBase (), parent (parent), self (self)
+  {}
 
+  HIR::ImplBlock *parent;
   TyTy::BaseType *self;
 };
 
@@ -303,22 +385,25 @@ class TypeCheckImplItemWithTrait : public TypeCheckImplItem
   using Rust::Resolver::TypeCheckBase::visit;
 
 public:
-  static const TraitItemReference &Resolve (HIR::ImplItem *item,
-					    TyTy::BaseType *self,
-					    TraitReference &trait_reference)
+  static const TraitItemReference *
+  Resolve (HIR::ImplBlock *parent, HIR::ImplItem *item, TyTy::BaseType *self,
+	   TraitReference &trait_reference,
+	   std::vector<TyTy::SubstitutionParamMapping> substitutions)
   {
-    TypeCheckImplItemWithTrait resolver (self, trait_reference);
+    TypeCheckImplItemWithTrait resolver (parent, self, trait_reference,
+					 substitutions);
     item->accept_vis (resolver);
     return resolver.resolved_trait_item;
   }
 
   void visit (HIR::ConstantItem &constant) override
   {
-    resolved_trait_item = trait_reference.lookup_trait_item (
-      constant.get_identifier (), TraitItemReference::TraitItemType::CONST);
+    trait_reference.lookup_trait_item_by_type (
+      constant.get_identifier (), TraitItemReference::TraitItemType::CONST,
+      &resolved_trait_item);
 
     // unknown trait item
-    if (resolved_trait_item.is_error ())
+    if (resolved_trait_item->is_error ())
       {
 	RichLocation r (constant.get_locus ());
 	r.add_range (trait_reference.get_locus ());
@@ -332,14 +417,19 @@ public:
     TyTy::BaseType *lookup;
     if (!context->lookup_type (constant.get_mappings ().get_hirid (), &lookup))
       return;
-    if (resolved_trait_item.is_error ())
+    if (resolved_trait_item->is_error ())
       return;
 
+    // merge the attributes
+    const HIR::TraitItem *hir_trait_item
+      = resolved_trait_item->get_hir_trait_item ();
+    merge_attributes (constant.get_outer_attrs (), *hir_trait_item);
+
     // check the types are compatible
-    if (!resolved_trait_item.get_tyty ()->can_eq (lookup, true))
+    if (!resolved_trait_item->get_tyty ()->can_eq (lookup, true))
       {
 	RichLocation r (constant.get_locus ());
-	r.add_range (resolved_trait_item.get_locus ());
+	r.add_range (resolved_trait_item->get_locus ());
 
 	rust_error_at (
 	  r, "constant %<%s%> has an incompatible type for trait %<%s%>",
@@ -350,11 +440,14 @@ public:
 
   void visit (HIR::TypeAlias &type) override
   {
-    resolved_trait_item = trait_reference.lookup_trait_item (
-      type.get_new_type_name (), TraitItemReference::TraitItemType::TYPE);
+    // resolved_trait_item = trait_reference.lookup_trait_item (
+    //   type.get_new_type_name (), TraitItemReference::TraitItemType::TYPE);
+    trait_reference.lookup_trait_item_by_type (
+      type.get_new_type_name (), TraitItemReference::TraitItemType::TYPE,
+      &resolved_trait_item);
 
     // unknown trait item
-    if (resolved_trait_item.is_error ())
+    if (resolved_trait_item->is_error ())
       {
 	RichLocation r (type.get_locus ());
 	r.add_range (trait_reference.get_locus ());
@@ -368,14 +461,19 @@ public:
     TyTy::BaseType *lookup;
     if (!context->lookup_type (type.get_mappings ().get_hirid (), &lookup))
       return;
-    if (resolved_trait_item.is_error ())
+    if (resolved_trait_item->is_error ())
       return;
 
+    // merge the attributes
+    const HIR::TraitItem *hir_trait_item
+      = resolved_trait_item->get_hir_trait_item ();
+    merge_attributes (type.get_outer_attrs (), *hir_trait_item);
+
     // check the types are compatible
-    if (!resolved_trait_item.get_tyty ()->can_eq (lookup, true))
+    if (!resolved_trait_item->get_tyty ()->can_eq (lookup, true))
       {
 	RichLocation r (type.get_locus ());
-	r.add_range (resolved_trait_item.get_locus ());
+	r.add_range (resolved_trait_item->get_locus ());
 
 	rust_error_at (
 	  r, "type alias %<%s%> has an incompatible type for trait %<%s%>",
@@ -383,17 +481,26 @@ public:
 	  trait_reference.get_name ().c_str ());
       }
 
-    context->insert_type (resolved_trait_item.get_mappings (),
-			  lookup->clone ());
+    // its actually a projection, since we need a way to actually bind the
+    // generic substitutions to the type itself
+    TyTy::ProjectionType *projection = new TyTy::ProjectionType (
+      type.get_mappings ().get_hirid (), lookup, &trait_reference,
+      resolved_trait_item->get_mappings ().get_defid (), substitutions);
+
+    context->insert_type (type.get_mappings (), projection);
+    resolved_trait_item->associated_type_set (projection);
   }
 
   void visit (HIR::Function &function) override
   {
-    resolved_trait_item = trait_reference.lookup_trait_item (
-      function.get_function_name (), TraitItemReference::TraitItemType::FN);
+    // resolved_trait_item = trait_reference.lookup_trait_item (
+    //   function.get_function_name (), TraitItemReference::TraitItemType::FN);
+    trait_reference.lookup_trait_item_by_type (
+      function.get_function_name (), TraitItemReference::TraitItemType::FN,
+      &resolved_trait_item);
 
     // unknown trait item
-    if (resolved_trait_item.is_error ())
+    if (resolved_trait_item->is_error ())
       {
 	RichLocation r (function.get_locus ());
 	r.add_range (trait_reference.get_locus ());
@@ -407,16 +514,21 @@ public:
     TyTy::BaseType *lookup;
     if (!context->lookup_type (function.get_mappings ().get_hirid (), &lookup))
       return;
-    if (resolved_trait_item.is_error ())
+    if (resolved_trait_item->is_error ())
       return;
 
+    // merge the attributes
+    const HIR::TraitItem *hir_trait_item
+      = resolved_trait_item->get_hir_trait_item ();
+    merge_attributes (function.get_outer_attrs (), *hir_trait_item);
+
     rust_assert (lookup->get_kind () == TyTy::TypeKind::FNDEF);
-    rust_assert (resolved_trait_item.get_tyty ()->get_kind ()
+    rust_assert (resolved_trait_item->get_tyty ()->get_kind ()
 		 == TyTy::TypeKind::FNDEF);
 
     TyTy::FnType *fntype = static_cast<TyTy::FnType *> (lookup);
     TyTy::FnType *trait_item_fntype
-      = static_cast<TyTy::FnType *> (resolved_trait_item.get_tyty ());
+      = static_cast<TyTy::FnType *> (resolved_trait_item->get_tyty ());
 
     // sets substitute self into the trait_item_ref->tyty
     TyTy::SubstitutionParamMapping *self_mapping = nullptr;
@@ -443,7 +555,7 @@ public:
     if (!trait_item_fntype->can_eq (fntype, true))
       {
 	RichLocation r (function.get_locus ());
-	r.add_range (resolved_trait_item.get_locus ());
+	r.add_range (resolved_trait_item->get_locus ());
 
 	rust_error_at (
 	  r, "method %<%s%> has an incompatible type for trait %<%s%>",
@@ -452,11 +564,26 @@ public:
       }
   }
 
+protected:
+  // this allows us to inherit the must_use specified on a trait definition onto
+  // its implementation
+  void merge_attributes (AST::AttrVec &impl_item_attrs,
+			 const HIR::TraitItem &trait_item)
+  {
+    for (const auto &attr : trait_item.get_outer_attrs ())
+      {
+	impl_item_attrs.push_back (attr);
+      }
+  }
+
 private:
-  TypeCheckImplItemWithTrait (TyTy::BaseType *self,
-			      TraitReference &trait_reference)
-    : TypeCheckImplItem (self), trait_reference (trait_reference),
-      resolved_trait_item (TraitItemReference::error_node ())
+  TypeCheckImplItemWithTrait (
+    HIR::ImplBlock *parent, TyTy::BaseType *self,
+    TraitReference &trait_reference,
+    std::vector<TyTy::SubstitutionParamMapping> substitutions)
+    : TypeCheckImplItem (parent, self), trait_reference (trait_reference),
+      resolved_trait_item (&TraitItemReference::error_node ()),
+      substitutions (substitutions)
   {
     rust_assert (is_trait_impl_block ());
   }
@@ -464,7 +591,8 @@ private:
   bool is_trait_impl_block () const { return !trait_reference.is_error (); }
 
   TraitReference &trait_reference;
-  TraitItemReference &resolved_trait_item;
+  TraitItemReference *resolved_trait_item;
+  std::vector<TyTy::SubstitutionParamMapping> substitutions;
 };
 
 } // namespace Resolver

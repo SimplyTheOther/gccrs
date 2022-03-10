@@ -1,5 +1,5 @@
 ; Options for the Fortran front end.
-; Copyright (C) 2003-2021 Free Software Foundation, Inc.
+; Copyright (C) 2003-2022 Free Software Foundation, Inc.
 ;
 ; This file is part of GCC.
 ;
@@ -285,6 +285,10 @@ Wuse-without-only
 Fortran Var(warn_use_without_only) Warning
 Warn about USE statements that have no ONLY qualifier.
 
+Wopenacc-parallelism
+Fortran
+; Documented in C
+
 Wopenmp-simd
 Fortran
 ; Documented in C
@@ -408,6 +412,9 @@ Produce a backtrace when a runtime error is encountered.
 fblas-matmul-limit=
 Fortran RejectNegative Joined UInteger Var(flag_blas_matmul_limit) Init(30)
 -fblas-matmul-limit=<n>	Size of the smallest matrix for which matmul will use BLAS.
+
+fbuilding-libgfortran
+Fortran Undocumented Var(flag_building_libgfortran)
 
 fcheck-array-temporaries
 Fortran
@@ -689,10 +696,6 @@ Fortran LTO
 
 fopenacc-dim=
 Fortran LTO Joined Var(flag_openacc_dims)
-; Documented in C
-
-fopenacc-kernels=
-Fortran RejectNegative Joined Enum(openacc_kernels) Var(flag_openacc_kernels) Init(OPENACC_KERNELS_PARLOOPS)
 ; Documented in C
 
 fopenmp

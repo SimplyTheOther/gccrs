@@ -1,4 +1,4 @@
-// Copyright (C) 2021 Free Software Foundation, Inc.
+// Copyright (C) 2021-2022 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -21,6 +21,7 @@
 
 #include "rust-hir-full.h"
 #include "rust-tyty-visitor.h"
+#include "rust-hir-type-check-util.h"
 
 namespace Rust {
 namespace Resolver {
@@ -46,26 +47,7 @@ public:
 
   TraitItemReference (TraitItemReference const &other);
 
-  TraitItemReference &operator= (TraitItemReference const &other)
-  {
-    identifier = other.identifier;
-    optional_flag = other.optional_flag;
-    type = other.type;
-    hir_trait_item = other.hir_trait_item;
-    self = other.self;
-    locus = other.locus;
-    context = other.context;
-
-    inherited_substitutions.clear ();
-    inherited_substitutions.reserve (other.inherited_substitutions.size ());
-    for (size_t i = 0; i < other.inherited_substitutions.size (); i++)
-      inherited_substitutions.push_back (other.inherited_substitutions.at (i));
-
-    return *this;
-  }
-
-  TraitItemReference (TraitItemReference &&other) = default;
-  TraitItemReference &operator= (TraitItemReference &&other) = default;
+  TraitItemReference &operator= (TraitItemReference const &other);
 
   static TraitItemReference error ()
   {
@@ -109,11 +91,11 @@ public:
 
   TraitItemType get_trait_item_type () const { return type; }
 
-  const HIR::TraitItem *get_hir_trait_item () const { return hir_trait_item; }
+  HIR::TraitItem *get_hir_trait_item () const { return hir_trait_item; }
 
   Location get_locus () const { return locus; }
 
-  const Analysis::NodeMapping &get_mappings () const
+  const Analysis::NodeMapping get_mappings () const
   {
     return hir_trait_item->get_mappings ();
   }
@@ -146,6 +128,21 @@ public:
     return get_error ();
   }
 
+  Analysis::NodeMapping get_parent_trait_mappings () const;
+
+  // this is called when the trait is completed resolution and gives the items a
+  // chance to run their specific type resolution passes. If we call their
+  // resolution on construction it can lead to a case where the trait being
+  // resolved recursively trying to resolve the trait itself infinitely since
+  // the trait will not be stored in its own map yet
+  void on_resolved ();
+
+  void associated_type_set (TyTy::BaseType *ty);
+
+  void associated_type_reset ();
+
+  bool is_object_safe () const;
+
 private:
   TyTy::ErrorType *get_error () const
   {
@@ -160,6 +157,11 @@ private:
 
   TyTy::BaseType *get_type_from_fn (/*const*/ HIR::TraitItemFunc &fn) const;
 
+  bool is_item_resolved () const;
+  void resolve_item (HIR::TraitItemType &type);
+  void resolve_item (HIR::TraitItemConst &constant);
+  void resolve_item (HIR::TraitItemFunc &func);
+
   std::string identifier;
   bool optional_flag;
   TraitItemType type;
@@ -172,12 +174,16 @@ private:
   Resolver::TypeCheckContext *context;
 };
 
+// this wraps up the HIR::Trait so we can do analysis on it
+
 class TraitReference
 {
 public:
   TraitReference (const HIR::Trait *hir_trait_ref,
-		  std::vector<TraitItemReference> item_refs)
-    : hir_trait_ref (hir_trait_ref), item_refs (item_refs)
+		  std::vector<TraitItemReference> item_refs,
+		  std::vector<const TraitReference *> super_traits)
+    : hir_trait_ref (hir_trait_ref), item_refs (item_refs),
+      super_traits (super_traits)
   {}
 
   TraitReference (TraitReference const &other)
@@ -195,7 +201,7 @@ public:
   TraitReference (TraitReference &&other) = default;
   TraitReference &operator= (TraitReference &&other) = default;
 
-  static TraitReference error () { return TraitReference (nullptr, {}); }
+  static TraitReference error () { return TraitReference (nullptr, {}, {}); }
 
   bool is_error () const { return hir_trait_ref == nullptr; }
 
@@ -228,9 +234,54 @@ public:
 	   + "]";
   }
 
+  const HIR::Trait *get_hir_trait_ref () const { return hir_trait_ref; }
+
   const Analysis::NodeMapping &get_mappings () const
   {
     return hir_trait_ref->get_mappings ();
+  }
+
+  bool lookup_hir_trait_item (const HIR::TraitItem &item,
+			      TraitItemReference **ref)
+  {
+    return lookup_trait_item (item.trait_identifier (), ref);
+  }
+
+  bool lookup_trait_item (const std::string &ident, TraitItemReference **ref)
+  {
+    for (auto &item : item_refs)
+      {
+	if (ident.compare (item.get_identifier ()) == 0)
+	  {
+	    *ref = &item;
+	    return true;
+	  }
+      }
+    return false;
+  }
+
+  bool lookup_trait_item_by_type (const std::string &ident,
+				  TraitItemReference::TraitItemType type,
+				  TraitItemReference **ref)
+  {
+    for (auto &item : item_refs)
+      {
+	if (item.get_trait_item_type () != type)
+	  continue;
+
+	if (ident.compare (item.get_identifier ()) == 0)
+	  {
+	    *ref = &item;
+	    return true;
+	  }
+      }
+    return false;
+  }
+
+  bool lookup_hir_trait_item (const HIR::TraitItem &item,
+			      const TraitItemReference **ref) const
+  {
+    return lookup_trait_item (item.trait_identifier (), ref);
   }
 
   bool lookup_trait_item (const std::string &ident,
@@ -247,7 +298,7 @@ public:
     return false;
   }
 
-  const TraitItemReference &
+  const TraitItemReference *
   lookup_trait_item (const std::string &ident,
 		     TraitItemReference::TraitItemType type) const
   {
@@ -257,9 +308,9 @@ public:
 	  continue;
 
 	if (ident.compare (item.get_identifier ()) == 0)
-	  return item;
+	  return &item;
       }
-    return TraitItemReference::error_node ();
+    return &TraitItemReference::error_node ();
   }
 
   size_t size () const { return item_refs.size (); }
@@ -269,9 +320,105 @@ public:
     return item_refs;
   }
 
+  void on_resolved ()
+  {
+    for (auto &item : item_refs)
+      {
+	item.on_resolved ();
+      }
+  }
+
+  void clear_associated_types ()
+  {
+    for (auto &item : item_refs)
+      {
+	bool is_assoc_type = item.get_trait_item_type ()
+			     == TraitItemReference::TraitItemType::TYPE;
+	if (is_assoc_type)
+	  item.associated_type_reset ();
+      }
+  }
+
+  bool is_equal (const TraitReference &other) const
+  {
+    DefId this_id = get_mappings ().get_defid ();
+    DefId other_id = other.get_mappings ().get_defid ();
+    return this_id == other_id;
+  }
+
+  const std::vector<const TraitReference *> get_super_traits () const
+  {
+    return super_traits;
+  }
+
+  bool is_object_safe (bool emit_error, Location locus) const
+  {
+    // https: // doc.rust-lang.org/reference/items/traits.html#object-safety
+    std::vector<const TraitReference *> non_object_super_traits;
+    for (auto &item : super_traits)
+      {
+	if (!item->is_object_safe (false, Location ()))
+	  non_object_super_traits.push_back (item);
+      }
+
+    std::vector<const Resolver::TraitItemReference *> non_object_safe_items;
+    for (auto &item : get_trait_items ())
+      {
+	if (!item.is_object_safe ())
+	  non_object_safe_items.push_back (&item);
+      }
+
+    bool is_safe
+      = non_object_super_traits.empty () && non_object_safe_items.empty ();
+    if (emit_error && !is_safe)
+      {
+	RichLocation r (locus);
+	for (auto &item : non_object_super_traits)
+	  r.add_range (item->get_locus ());
+	for (auto &item : non_object_safe_items)
+	  r.add_range (item->get_locus ());
+
+	rust_error_at (r, "trait bound is not object safe");
+      }
+
+    return is_safe;
+  }
+
 private:
   const HIR::Trait *hir_trait_ref;
   std::vector<TraitItemReference> item_refs;
+  std::vector<const TraitReference *> super_traits;
+};
+
+class AssociatedImplTrait
+{
+public:
+  AssociatedImplTrait (TraitReference *trait, HIR::ImplBlock *impl,
+		       TyTy::BaseType *self,
+		       Resolver::TypeCheckContext *context)
+    : trait (trait), impl (impl), self (self), context (context)
+  {}
+
+  TraitReference *get_trait () { return trait; }
+
+  HIR::ImplBlock *get_impl_block () { return impl; }
+
+  TyTy::BaseType *get_self () { return self; }
+
+  void setup_associated_types ();
+
+  void reset_associated_types ();
+
+  TyTy::BaseType *get_projected_type (const TraitItemReference *trait_item_ref,
+				      TyTy::BaseType *reciever, HirId ref,
+				      HIR::GenericArgs &trait_generics,
+				      Location expr_locus);
+
+private:
+  TraitReference *trait;
+  HIR::ImplBlock *impl;
+  TyTy::BaseType *self;
+  Resolver::TypeCheckContext *context;
 };
 
 } // namespace Resolver
